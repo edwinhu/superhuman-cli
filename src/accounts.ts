@@ -19,6 +19,33 @@ export interface SwitchResult {
 /**
  * List all linked accounts in Superhuman
  */
+/**
+ * Get the current account's email address
+ */
+export async function getCurrentAccount(
+  conn: SuperhumanConnection
+): Promise<string | null> {
+  const { Runtime } = conn;
+
+  const result = await Runtime.evaluate({
+    expression: `
+      (() => {
+        try {
+          return window.GoogleAccount?.emailAddress || null;
+        } catch (e) {
+          return null;
+        }
+      })()
+    `,
+    returnByValue: true,
+  });
+
+  return result.result.value as string | null;
+}
+
+/**
+ * List all linked accounts in Superhuman
+ */
 export async function listAccounts(
   conn: SuperhumanConnection
 ): Promise<Account[]> {

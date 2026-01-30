@@ -28,6 +28,7 @@ import {
 import { listInbox, searchInbox } from "./inbox";
 import { readThread } from "./read";
 import { listAccounts, switchAccount, type Account } from "./accounts";
+import { replyToThread, replyAllToThread, forwardThread } from "./reply";
 
 const VERSION = "0.1.0";
 const CDP_PORT = 9333;
@@ -95,6 +96,9 @@ ${colors.bold}COMMANDS${colors.reset}
   ${colors.cyan}inbox${colors.reset}      List recent emails from inbox
   ${colors.cyan}search${colors.reset}     Search emails
   ${colors.cyan}read${colors.reset}       Read a specific email thread
+  ${colors.cyan}reply${colors.reset}      Reply to an email thread
+  ${colors.cyan}reply-all${colors.reset}  Reply-all to an email thread
+  ${colors.cyan}forward${colors.reset}    Forward an email thread
   ${colors.cyan}compose${colors.reset}    Open compose window and fill in email (keeps window open)
   ${colors.cyan}draft${colors.reset}      Create and save a draft
   ${colors.cyan}send${colors.reset}       Compose and send an email immediately
@@ -102,12 +106,13 @@ ${colors.bold}COMMANDS${colors.reset}
   ${colors.cyan}help${colors.reset}       Show this help message
 
 ${colors.bold}OPTIONS${colors.reset}
-  --to <email>       Recipient email address (required for compose/draft/send)
+  --to <email>       Recipient email address (required for compose/draft/send/forward)
   --cc <email>       CC recipient (can be used multiple times)
   --bcc <email>      BCC recipient (can be used multiple times)
   --subject <text>   Email subject
   --body <text>      Email body (plain text, converted to HTML)
   --html <text>      Email body as HTML
+  --send             Send immediately instead of saving as draft (for reply/reply-all/forward)
   --limit <number>   Number of results (default: 10, for inbox/search)
   --json             Output as JSON (for inbox/search/read)
   --port <number>    CDP port (default: ${CDP_PORT})
@@ -132,6 +137,17 @@ ${colors.bold}EXAMPLES${colors.reset}
   ${colors.dim}# Read an email thread${colors.reset}
   superhuman read <thread-id>
   superhuman read <thread-id> --json
+
+  ${colors.dim}# Reply to an email${colors.reset}
+  superhuman reply <thread-id> --body "Thanks for the update!"
+  superhuman reply <thread-id> --body "Got it!" --send
+
+  ${colors.dim}# Reply-all to an email${colors.reset}
+  superhuman reply-all <thread-id> --body "Thanks everyone!"
+
+  ${colors.dim}# Forward an email${colors.reset}
+  superhuman forward <thread-id> --to colleague@example.com --body "FYI"
+  superhuman forward <thread-id> --to colleague@example.com --send
 
   ${colors.dim}# Create a draft${colors.reset}
   superhuman draft --to user@example.com --subject "Hello" --body "Hi there!"
@@ -164,6 +180,8 @@ interface CliOptions {
   json: boolean;
   // account switching
   accountArg: string; // index or email for account command
+  // reply/forward options
+  send: boolean; // send immediately instead of saving as draft
 }
 
 function parseArgs(args: string[]): CliOptions {
@@ -181,6 +199,7 @@ function parseArgs(args: string[]): CliOptions {
     threadId: "",
     json: false,
     accountArg: "",
+    send: false,
   };
 
   let i = 0;
@@ -240,6 +259,10 @@ function parseArgs(args: string[]): CliOptions {
           options.json = true;
           i += 1;
           break;
+        case "send":
+          options.send = true;
+          i += 1;
+          break;
         default:
           error(`Unknown option: ${arg}`);
           process.exit(1);
@@ -253,6 +276,18 @@ function parseArgs(args: string[]): CliOptions {
       i += 1;
     } else if (options.command === "read" && !options.threadId) {
       // Allow thread ID as positional argument
+      options.threadId = arg;
+      i += 1;
+    } else if (options.command === "reply" && !options.threadId) {
+      // Allow thread ID as positional argument for reply
+      options.threadId = arg;
+      i += 1;
+    } else if (options.command === "reply-all" && !options.threadId) {
+      // Allow thread ID as positional argument for reply-all
+      options.threadId = arg;
+      i += 1;
+    } else if (options.command === "forward" && !options.threadId) {
+      // Allow thread ID as positional argument for forward
       options.threadId = arg;
       i += 1;
     } else if (options.command === "account" && !options.accountArg) {
@@ -576,6 +611,106 @@ async function cmdRead(options: CliOptions) {
   await disconnect(conn);
 }
 
+async function cmdReply(options: CliOptions) {
+  if (!options.threadId) {
+    error("Thread ID is required");
+    console.log(`Usage: superhuman reply <thread-id> [--body "text"] [--send]`);
+    process.exit(1);
+  }
+
+  const conn = await checkConnection(options.port);
+  if (!conn) {
+    process.exit(1);
+  }
+
+  const body = options.body || "";
+  const action = options.send ? "Sending" : "Creating draft for";
+  info(`${action} reply to thread ${options.threadId}...`);
+
+  const result = await replyToThread(conn, options.threadId, body, options.send);
+
+  if (result.success) {
+    if (options.send) {
+      success("Reply sent!");
+    } else {
+      success(`Draft saved (${result.draftId})`);
+    }
+  } else {
+    error("Failed to create reply");
+  }
+
+  await disconnect(conn);
+}
+
+async function cmdReplyAll(options: CliOptions) {
+  if (!options.threadId) {
+    error("Thread ID is required");
+    console.log(`Usage: superhuman reply-all <thread-id> [--body "text"] [--send]`);
+    process.exit(1);
+  }
+
+  const conn = await checkConnection(options.port);
+  if (!conn) {
+    process.exit(1);
+  }
+
+  const body = options.body || "";
+  const action = options.send ? "Sending" : "Creating draft for";
+  info(`${action} reply-all to thread ${options.threadId}...`);
+
+  const result = await replyAllToThread(conn, options.threadId, body, options.send);
+
+  if (result.success) {
+    if (options.send) {
+      success("Reply-all sent!");
+    } else {
+      success(`Draft saved (${result.draftId})`);
+    }
+  } else {
+    error("Failed to create reply-all");
+  }
+
+  await disconnect(conn);
+}
+
+async function cmdForward(options: CliOptions) {
+  if (!options.threadId) {
+    error("Thread ID is required");
+    console.log(`Usage: superhuman forward <thread-id> --to <email> [--body "text"] [--send]`);
+    process.exit(1);
+  }
+
+  if (options.to.length === 0) {
+    error("Recipient is required (--to)");
+    console.log(`Usage: superhuman forward <thread-id> --to <email> [--body "text"] [--send]`);
+    process.exit(1);
+  }
+
+  const conn = await checkConnection(options.port);
+  if (!conn) {
+    process.exit(1);
+  }
+
+  const body = options.body || "";
+  const toEmail = options.to[0]; // Use first recipient for forward
+  const action = options.send ? "Sending" : "Creating draft for";
+  info(`${action} forward to ${toEmail}...`);
+
+  const result = await forwardThread(conn, options.threadId, toEmail, body, options.send);
+
+  if (result.success) {
+    if (options.send) {
+      success("Forward sent!");
+    } else {
+      success(`Draft saved (${result.draftId})`);
+    }
+  } else {
+    error("Failed to create forward");
+  }
+
+  await disconnect(conn);
+}
+
 async function cmdAccounts(options: CliOptions) {
   const conn = await checkConnection(options.port);
   if (!conn) {
@@ -699,6 +834,18 @@ async function main() {
 
     case "read":
       await cmdRead(options);
+      break;
+
+    case "reply":
+      await cmdReply(options);
+      break;
+
+    case "reply-all":
+      await cmdReplyAll(options);
+      break;
+
+    case "forward":
+      await cmdForward(options);
       break;
 
     case "compose":
