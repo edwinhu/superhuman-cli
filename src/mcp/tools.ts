@@ -18,6 +18,8 @@ import {
   textToHtml,
   type SuperhumanConnection,
 } from "../superhuman-api";
+import { listInbox, searchInbox } from "../inbox";
+import { readThread } from "../read";
 
 const CDP_PORT = 9333;
 
@@ -41,6 +43,20 @@ export const SendSchema = EmailSchema;
 export const SearchSchema = z.object({
   query: z.string().describe("Search query string"),
   limit: z.number().optional().describe("Maximum number of results to return (default: 10)"),
+});
+
+/**
+ * Zod schema for inbox listing
+ */
+export const InboxSchema = z.object({
+  limit: z.number().optional().describe("Maximum number of threads to return (default: 10)"),
+});
+
+/**
+ * Zod schema for reading a thread
+ */
+export const ReadSchema = z.object({
+  threadId: z.string().describe("The thread ID to read"),
 });
 
 type TextContent = { type: "text"; text: string };
@@ -211,6 +227,76 @@ export async function searchHandler(args: z.infer<typeof SearchSchema>): Promise
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     return errorResult(`Failed to search inbox: ${message}`);
+  } finally {
+    if (conn) await disconnect(conn);
+  }
+}
+
+/**
+ * Handler for superhuman_inbox tool
+ */
+export async function inboxHandler(args: z.infer<typeof InboxSchema>): Promise<ToolResult> {
+  let conn: SuperhumanConnection | null = null;
+
+  try {
+    conn = await connectToSuperhuman(CDP_PORT);
+    if (!conn) {
+      throw new Error("Could not connect to Superhuman. Make sure it's running with --remote-debugging-port=9333");
+    }
+
+    const threads = await listInbox(conn, { limit: args.limit ?? 10 });
+
+    if (threads.length === 0) {
+      return successResult("No emails in inbox");
+    }
+
+    const resultsText = threads
+      .map((t, i) => {
+        const from = t.from.name || t.from.email;
+        return `${i + 1}. From: ${from}\n   Subject: ${t.subject}\n   Date: ${t.date}\n   Snippet: ${t.snippet.substring(0, 100)}...`;
+      })
+      .join("\n\n");
+
+    return successResult(`Inbox (${threads.length} threads):\n\n${resultsText}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return errorResult(`Failed to list inbox: ${message}`);
+  } finally {
+    if (conn) await disconnect(conn);
+  }
+}
+
+/**
+ * Handler for superhuman_read tool
+ */
+export async function readHandler(args: z.infer<typeof ReadSchema>): Promise<ToolResult> {
+  let conn: SuperhumanConnection | null = null;
+
+  try {
+    conn = await connectToSuperhuman(CDP_PORT);
+    if (!conn) {
+      throw new Error("Could not connect to Superhuman. Make sure it's running with --remote-debugging-port=9333");
+    }
+
+    const messages = await readThread(conn, args.threadId);
+
+    if (messages.length === 0) {
+      return errorResult(`Thread not found: ${args.threadId}`);
+    }
+
+    const messagesText = messages
+      .map((msg, i) => {
+        const from = msg.from.name ? `${msg.from.name} <${msg.from.email}>` : msg.from.email;
+        const to = msg.to.map(r => r.email).join(", ");
+        const cc = msg.cc.length > 0 ? `\nCc: ${msg.cc.map(r => r.email).join(", ")}` : "";
+        return `--- Message ${i + 1} ---\nFrom: ${from}\nTo: ${to}${cc}\nDate: ${msg.date}\nSubject: ${msg.subject}\n\n${msg.snippet}`;
+      })
+      .join("\n\n");
+
+    return successResult(`Thread: ${messages[0].subject}\n\n${messagesText}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return errorResult(`Failed to read thread: ${message}`);
   } finally {
     if (conn) await disconnect(conn);
   }

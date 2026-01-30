@@ -25,6 +25,8 @@ import {
   textToHtml,
   type SuperhumanConnection,
 } from "./superhuman-api";
+import { listInbox, searchInbox } from "./inbox";
+import { readThread } from "./read";
 
 const VERSION = "0.1.0";
 const CDP_PORT = 9333;
@@ -65,6 +67,9 @@ ${colors.bold}USAGE${colors.reset}
   superhuman <command> [options]
 
 ${colors.bold}COMMANDS${colors.reset}
+  ${colors.cyan}inbox${colors.reset}      List recent emails from inbox
+  ${colors.cyan}search${colors.reset}     Search emails
+  ${colors.cyan}read${colors.reset}       Read a specific email thread
   ${colors.cyan}compose${colors.reset}    Open compose window and fill in email (keeps window open)
   ${colors.cyan}draft${colors.reset}      Create and save a draft
   ${colors.cyan}send${colors.reset}       Compose and send an email immediately
@@ -78,9 +83,23 @@ ${colors.bold}OPTIONS${colors.reset}
   --subject <text>   Email subject
   --body <text>      Email body (plain text, converted to HTML)
   --html <text>      Email body as HTML
+  --limit <number>   Number of results (default: 10, for inbox/search)
+  --json             Output as JSON (for inbox/search/read)
   --port <number>    CDP port (default: ${CDP_PORT})
 
 ${colors.bold}EXAMPLES${colors.reset}
+  ${colors.dim}# List recent emails${colors.reset}
+  superhuman inbox
+  superhuman inbox --limit 5 --json
+
+  ${colors.dim}# Search emails${colors.reset}
+  superhuman search "from:john subject:meeting"
+  superhuman search "project update" --limit 20
+
+  ${colors.dim}# Read an email thread${colors.reset}
+  superhuman read <thread-id>
+  superhuman read <thread-id> --json
+
   ${colors.dim}# Create a draft${colors.reset}
   superhuman draft --to user@example.com --subject "Hello" --body "Hi there!"
 
@@ -105,6 +124,11 @@ interface CliOptions {
   body: string;
   html: string;
   port: number;
+  // inbox/search/read options
+  limit: number;
+  query: string;
+  threadId: string;
+  json: boolean;
 }
 
 function parseArgs(args: string[]): CliOptions {
@@ -117,6 +141,10 @@ function parseArgs(args: string[]): CliOptions {
     body: "",
     html: "",
     port: CDP_PORT,
+    limit: 10,
+    query: "",
+    threadId: "",
+    json: false,
   };
 
   let i = 0;
@@ -160,12 +188,36 @@ function parseArgs(args: string[]): CliOptions {
           options.command = "help";
           i += 1;
           break;
+        case "limit":
+          options.limit = parseInt(value, 10);
+          i += 2;
+          break;
+        case "query":
+          options.query = value;
+          i += 2;
+          break;
+        case "thread":
+          options.threadId = value;
+          i += 2;
+          break;
+        case "json":
+          options.json = true;
+          i += 1;
+          break;
         default:
           error(`Unknown option: ${arg}`);
           process.exit(1);
       }
     } else if (!options.command) {
       options.command = arg;
+      i += 1;
+    } else if (options.command === "search" && !options.query) {
+      // Allow search query as positional argument
+      options.query = arg;
+      i += 1;
+    } else if (options.command === "read" && !options.threadId) {
+      // Allow thread ID as positional argument
+      options.threadId = arg;
       i += 1;
     } else {
       error(`Unexpected argument: ${arg}`);
@@ -349,6 +401,141 @@ async function cmdSend(options: CliOptions) {
   await disconnect(conn);
 }
 
+function formatDate(dateStr: string): string {
+  if (!dateStr) return "";
+  const date = new Date(dateStr);
+  const now = new Date();
+  const isToday = date.toDateString() === now.toDateString();
+  if (isToday) {
+    return date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" });
+  }
+  return date.toLocaleDateString("en-US", { month: "short", day: "numeric" });
+}
+
+function truncate(str: string | null | undefined, maxLen: number): string {
+  if (!str) return "";
+  if (str.length <= maxLen) return str;
+  return str.slice(0, maxLen - 1) + "…";
+}
+
+async function cmdInbox(options: CliOptions) {
+  const conn = await checkConnection(options.port);
+  if (!conn) {
+    process.exit(1);
+  }
+
+  const threads = await listInbox(conn, { limit: options.limit });
+
+  if (options.json) {
+    console.log(JSON.stringify(threads, null, 2));
+  } else {
+    if (threads.length === 0) {
+      info("No emails in inbox");
+    } else {
+      // Print header
+      console.log(
+        `${colors.dim}${"From".padEnd(25)} ${"Subject".padEnd(40)} ${"Date".padEnd(10)}${colors.reset}`
+      );
+      console.log(colors.dim + "─".repeat(78) + colors.reset);
+
+      for (const thread of threads) {
+        const from = truncate(thread.from.name || thread.from.email, 24);
+        const subject = truncate(thread.subject, 39);
+        const date = formatDate(thread.date);
+        console.log(`${from.padEnd(25)} ${subject.padEnd(40)} ${date}`);
+      }
+    }
+  }
+
+  await disconnect(conn);
+}
+
+async function cmdSearch(options: CliOptions) {
+  if (!options.query) {
+    error("Search query is required");
+    console.log(`Usage: superhuman search <query>`);
+    process.exit(1);
+  }
+
+  const conn = await checkConnection(options.port);
+  if (!conn) {
+    process.exit(1);
+  }
+
+  const threads = await searchInbox(conn, {
+    query: options.query,
+    limit: options.limit,
+  });
+
+  if (options.json) {
+    console.log(JSON.stringify(threads, null, 2));
+  } else {
+    if (threads.length === 0) {
+      info(`No results for "${options.query}"`);
+    } else {
+      info(`Found ${threads.length} result(s) for "${options.query}":\n`);
+      console.log(
+        `${colors.dim}${"From".padEnd(25)} ${"Subject".padEnd(40)} ${"Date".padEnd(10)}${colors.reset}`
+      );
+      console.log(colors.dim + "─".repeat(78) + colors.reset);
+
+      for (const thread of threads) {
+        const from = truncate(thread.from.name || thread.from.email, 24);
+        const subject = truncate(thread.subject, 39);
+        const date = formatDate(thread.date);
+        console.log(`${from.padEnd(25)} ${subject.padEnd(40)} ${date}`);
+      }
+    }
+  }
+
+  await disconnect(conn);
+}
+
+async function cmdRead(options: CliOptions) {
+  if (!options.threadId) {
+    error("Thread ID is required");
+    console.log(`Usage: superhuman read <thread-id>`);
+    process.exit(1);
+  }
+
+  const conn = await checkConnection(options.port);
+  if (!conn) {
+    process.exit(1);
+  }
+
+  const messages = await readThread(conn, options.threadId);
+
+  if (options.json) {
+    console.log(JSON.stringify(messages, null, 2));
+  } else {
+    if (messages.length === 0) {
+      error("Thread not found or no messages");
+    } else {
+      for (let i = 0; i < messages.length; i++) {
+        const msg = messages[i];
+        if (i > 0) {
+          console.log("\n" + colors.dim + "─".repeat(60) + colors.reset + "\n");
+        }
+        console.log(`${colors.bold}${msg.subject}${colors.reset}`);
+        console.log(`${colors.cyan}From:${colors.reset} ${msg.from.name} <${msg.from.email}>`);
+        console.log(
+          `${colors.cyan}To:${colors.reset} ${msg.to.map((r) => r.email).join(", ")}`
+        );
+        if (msg.cc.length > 0) {
+          console.log(
+            `${colors.cyan}Cc:${colors.reset} ${msg.cc.map((r) => r.email).join(", ")}`
+          );
+        }
+        console.log(`${colors.cyan}Date:${colors.reset} ${new Date(msg.date).toLocaleString()}`);
+        console.log();
+        console.log(msg.snippet);
+      }
+    }
+  }
+
+  await disconnect(conn);
+}
+
 async function main() {
   const args = process.argv.slice(2);
 
@@ -367,6 +554,18 @@ async function main() {
 
     case "status":
       await cmdStatus(options);
+      break;
+
+    case "inbox":
+      await cmdInbox(options);
+      break;
+
+    case "search":
+      await cmdSearch(options);
+      break;
+
+    case "read":
+      await cmdRead(options);
       break;
 
     case "compose":

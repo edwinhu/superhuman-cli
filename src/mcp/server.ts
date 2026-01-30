@@ -6,7 +6,10 @@
 
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
-import { DraftSchema, SendSchema, SearchSchema, draftHandler, sendHandler, searchHandler } from "./tools";
+import {
+  DraftSchema, SendSchema, SearchSchema, InboxSchema, ReadSchema,
+  draftHandler, sendHandler, searchHandler, inboxHandler, readHandler
+} from "./tools";
 
 function createMcpServer(): McpServer {
   const server = new McpServer(
@@ -39,6 +42,24 @@ function createMcpServer(): McpServer {
       inputSchema: SearchSchema,
     },
     searchHandler
+  );
+
+  server.registerTool(
+    "superhuman_inbox",
+    {
+      description: "List recent emails from the Superhuman inbox. Returns thread summaries with from, subject, date, and snippet.",
+      inputSchema: InboxSchema,
+    },
+    inboxHandler
+  );
+
+  server.registerTool(
+    "superhuman_read",
+    {
+      description: "Read a specific email thread by ID. Returns all messages in the thread with full details.",
+      inputSchema: ReadSchema,
+    },
+    readHandler
   );
 
   return server;
