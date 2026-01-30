@@ -200,6 +200,12 @@ export async function addRecipient(
       const draft = ctrl?.state?.draft;
       if (!draft?.from?.constructor) return false;
 
+      const existingTo = draft.to || [];
+
+      // Check if email already exists in To field
+      const alreadyExists = existingTo.some(r => r.email === ${JSON.stringify(email)});
+      if (alreadyExists) return true; // Already there, success
+
       const Recipient = draft.from.constructor;
       const newRecipient = new Recipient({
         email: ${JSON.stringify(email)},
@@ -207,8 +213,41 @@ export async function addRecipient(
         raw: ${JSON.stringify(name ? `${name} <${email}>` : email)},
       });
 
-      const existingTo = draft.to || [];
       ctrl._updateDraft({ to: [...existingTo, newRecipient] });
+      return true;
+    `
+  );
+  return result === true;
+}
+
+/**
+ * Add a recipient to the Cc field
+ */
+export async function addCcRecipient(
+  conn: SuperhumanConnection,
+  email: string,
+  name?: string
+): Promise<boolean> {
+  const result = await withDraftController<boolean>(
+    conn,
+    `
+      const draft = ctrl?.state?.draft;
+      if (!draft?.from?.constructor) return false;
+
+      const existingCc = draft.cc || [];
+
+      // Check if email already exists in Cc field
+      const alreadyExists = existingCc.some(r => r.email === ${JSON.stringify(email)});
+      if (alreadyExists) return true; // Already there, success
+
+      const Recipient = draft.from.constructor;
+      const newRecipient = new Recipient({
+        email: ${JSON.stringify(email)},
+        name: ${JSON.stringify(name || "")},
+        raw: ${JSON.stringify(name ? `${name} <${email}>` : email)},
+      });
+
+      ctrl._updateDraft({ cc: [...existingCc, newRecipient] });
       return true;
     `
   );

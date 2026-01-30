@@ -21,6 +21,7 @@ import {
 import { listInbox, searchInbox } from "../inbox";
 import { readThread } from "../read";
 import { listAccounts, switchAccount } from "../accounts";
+import { replyToThread, replyAllToThread, forwardThread } from "../reply";
 
 const CDP_PORT = 9333;
 
@@ -70,6 +71,34 @@ export const AccountsSchema = z.object({});
  */
 export const SwitchAccountSchema = z.object({
   account: z.string().describe("Account to switch to: either an email address or 1-based index number"),
+});
+
+/**
+ * Zod schema for reply to a thread
+ */
+export const ReplySchema = z.object({
+  threadId: z.string().describe("Thread ID to reply to"),
+  body: z.string().describe("Reply message body"),
+  send: z.boolean().optional().describe("Send immediately instead of creating draft (default: false)"),
+});
+
+/**
+ * Zod schema for reply-all to a thread
+ */
+export const ReplyAllSchema = z.object({
+  threadId: z.string().describe("Thread ID to reply-all to"),
+  body: z.string().describe("Reply message body"),
+  send: z.boolean().optional().describe("Send immediately instead of creating draft (default: false)"),
+});
+
+/**
+ * Zod schema for forwarding a thread
+ */
+export const ForwardSchema = z.object({
+  threadId: z.string().describe("Thread ID to forward"),
+  toEmail: z.string().describe("Email address to forward to"),
+  body: z.string().describe("Message body to include before the forwarded content"),
+  send: z.boolean().optional().describe("Send immediately instead of creating draft (default: false)"),
 });
 
 type TextContent = { type: "text"; text: string };
@@ -405,3 +434,98 @@ export async function switchAccountHandler(args: z.infer<typeof SwitchAccountSch
   }
 }
 
+/**
+ * Handler for superhuman_reply tool
+ */
+export async function replyHandler(args: z.infer<typeof ReplySchema>): Promise<ToolResult> {
+  let conn: SuperhumanConnection | null = null;
+
+  try {
+    conn = await connectToSuperhuman(CDP_PORT);
+    if (!conn) {
+      throw new Error("Could not connect to Superhuman. Make sure it's running with --remote-debugging-port=9333");
+    }
+
+    const send = args.send ?? false;
+    const result = await replyToThread(conn, args.threadId, args.body, send);
+
+    if (!result.success) {
+      throw new Error("Failed to create reply");
+    }
+
+    if (send) {
+      return successResult(`Reply sent successfully to thread ${args.threadId}`);
+    } else {
+      return successResult(`Reply draft created for thread ${args.threadId}${result.draftId ? `\nDraft ID: ${result.draftId}` : ""}`);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return errorResult(`Failed to reply: ${message}`);
+  } finally {
+    if (conn) await disconnect(conn);
+  }
+}
+
+/**
+ * Handler for superhuman_reply_all tool
+ */
+export async function replyAllHandler(args: z.infer<typeof ReplyAllSchema>): Promise<ToolResult> {
+  let conn: SuperhumanConnection | null = null;
+
+  try {
+    conn = await connectToSuperhuman(CDP_PORT);
+    if (!conn) {
+      throw new Error("Could not connect to Superhuman. Make sure it's running with --remote-debugging-port=9333");
+    }
+
+    const send = args.send ?? false;
+    const result = await replyAllToThread(conn, args.threadId, args.body, send);
+
+    if (!result.success) {
+      throw new Error("Failed to create reply-all");
+    }
+
+    if (send) {
+      return successResult(`Reply-all sent successfully to thread ${args.threadId}`);
+    } else {
+      return successResult(`Reply-all draft created for thread ${args.threadId}${result.draftId ? `\nDraft ID: ${result.draftId}` : ""}`);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return errorResult(`Failed to reply-all: ${message}`);
+  } finally {
+    if (conn) await disconnect(conn);
+  }
+}
+
+/**
+ * Handler for superhuman_forward tool
+ */
+export async function forwardHandler(args: z.infer<typeof ForwardSchema>): Promise<ToolResult> {
+  let conn: SuperhumanConnection | null = null;
+
+  try {
+    conn = await connectToSuperhuman(CDP_PORT);
+    if (!conn) {
+      throw new Error("Could not connect to Superhuman. Make sure it's running with --remote-debugging-port=9333");
+    }
+
+    const send = args.send ?? false;
+    const result = await forwardThread(conn, args.threadId, args.toEmail, args.body, send);
+
+    if (!result.success) {
+      throw new Error("Failed to create forward");
+    }
+
+    if (send) {
+      return successResult(`Email forwarded successfully to ${args.toEmail}`);
+    } else {
+      return successResult(`Forward draft created for ${args.toEmail}${result.draftId ? `\nDraft ID: ${result.draftId}` : ""}`);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return errorResult(`Failed to forward: ${message}`);
+  } finally {
+    if (conn) await disconnect(conn);
+  }
+}

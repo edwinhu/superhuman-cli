@@ -8,9 +8,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   DraftSchema, SendSchema, SearchSchema, InboxSchema, ReadSchema,
-  AccountsSchema, SwitchAccountSchema,
+  AccountsSchema, SwitchAccountSchema, ReplySchema, ReplyAllSchema, ForwardSchema,
   draftHandler, sendHandler, searchHandler, inboxHandler, readHandler,
-  accountsHandler, switchAccountHandler
+  accountsHandler, switchAccountHandler, replyHandler, replyAllHandler, forwardHandler
 } from "./tools";
 
 function createMcpServer(): McpServer {
@@ -80,6 +80,33 @@ function createMcpServer(): McpServer {
       inputSchema: SwitchAccountSchema,
     },
     switchAccountHandler
+  );
+
+  server.registerTool(
+    "superhuman_reply",
+    {
+      description: "Reply to an email thread. Creates a draft by default, or sends immediately with send=true. The reply is addressed to the sender of the last message in the thread.",
+      inputSchema: ReplySchema,
+    },
+    replyHandler
+  );
+
+  server.registerTool(
+    "superhuman_reply_all",
+    {
+      description: "Reply-all to an email thread. Creates a draft by default, or sends immediately with send=true. The reply is addressed to all recipients of the last message (excluding yourself).",
+      inputSchema: ReplyAllSchema,
+    },
+    replyAllHandler
+  );
+
+  server.registerTool(
+    "superhuman_forward",
+    {
+      description: "Forward an email thread to a new recipient. Creates a draft by default, or sends immediately with send=true. Includes the original message with forwarding headers.",
+      inputSchema: ForwardSchema,
+    },
+    forwardHandler
   );
 
   return server;
