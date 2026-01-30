@@ -9,8 +9,10 @@ import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js"
 import {
   DraftSchema, SendSchema, SearchSchema, InboxSchema, ReadSchema,
   AccountsSchema, SwitchAccountSchema, ReplySchema, ReplyAllSchema, ForwardSchema,
+  ArchiveSchema, DeleteSchema,
   draftHandler, sendHandler, searchHandler, inboxHandler, readHandler,
-  accountsHandler, switchAccountHandler, replyHandler, replyAllHandler, forwardHandler
+  accountsHandler, switchAccountHandler, replyHandler, replyAllHandler, forwardHandler,
+  archiveHandler, deleteHandler
 } from "./tools";
 
 function createMcpServer(): McpServer {
@@ -107,6 +109,24 @@ function createMcpServer(): McpServer {
       inputSchema: ForwardSchema,
     },
     forwardHandler
+  );
+
+  server.registerTool(
+    "superhuman_archive",
+    {
+      description: "Archive one or more email threads. Removes threads from inbox without deleting them.",
+      inputSchema: ArchiveSchema,
+    },
+    archiveHandler
+  );
+
+  server.registerTool(
+    "superhuman_delete",
+    {
+      description: "Delete (trash) one or more email threads. Moves threads to the trash folder.",
+      inputSchema: DeleteSchema,
+    },
+    deleteHandler
   );
 
   return server;

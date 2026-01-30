@@ -29,6 +29,7 @@ import { listInbox, searchInbox } from "./inbox";
 import { readThread } from "./read";
 import { listAccounts, switchAccount, type Account } from "./accounts";
 import { replyToThread, replyAllToThread, forwardThread } from "./reply";
+import { archiveThread, deleteThread } from "./archive";
 
 const VERSION = "0.1.0";
 const CDP_PORT = 9333;
@@ -99,6 +100,8 @@ ${colors.bold}COMMANDS${colors.reset}
   ${colors.cyan}reply${colors.reset}      Reply to an email thread
   ${colors.cyan}reply-all${colors.reset}  Reply-all to an email thread
   ${colors.cyan}forward${colors.reset}    Forward an email thread
+  ${colors.cyan}archive${colors.reset}    Archive email thread(s)
+  ${colors.cyan}delete${colors.reset}     Delete (trash) email thread(s)
   ${colors.cyan}compose${colors.reset}    Open compose window and fill in email (keeps window open)
   ${colors.cyan}draft${colors.reset}      Create and save a draft
   ${colors.cyan}send${colors.reset}       Compose and send an email immediately
@@ -149,6 +152,14 @@ ${colors.bold}EXAMPLES${colors.reset}
   superhuman forward <thread-id> --to colleague@example.com --body "FYI"
   superhuman forward <thread-id> --to colleague@example.com --send
 
+  ${colors.dim}# Archive emails${colors.reset}
+  superhuman archive <thread-id>
+  superhuman archive <thread-id1> <thread-id2> <thread-id3>
+
+  ${colors.dim}# Delete (trash) emails${colors.reset}
+  superhuman delete <thread-id>
+  superhuman delete <thread-id1> <thread-id2> <thread-id3>
+
   ${colors.dim}# Create a draft${colors.reset}
   superhuman draft --to user@example.com --subject "Hello" --body "Hi there!"
 
@@ -177,6 +188,7 @@ interface CliOptions {
   limit: number;
   query: string;
   threadId: string;
+  threadIds: string[]; // for bulk operations (archive/delete)
   json: boolean;
   // account switching
   accountArg: string; // index or email for account command
@@ -197,6 +209,7 @@ function parseArgs(args: string[]): CliOptions {
     limit: 10,
     query: "",
     threadId: "",
+    threadIds: [],
     json: false,
     accountArg: "",
     send: false,
@@ -293,6 +306,10 @@ function parseArgs(args: string[]): CliOptions {
     } else if (options.command === "account" && !options.accountArg) {
       // Allow account index or email as positional argument
       options.accountArg = arg;
+      i += 1;
+    } else if (options.command === "archive" || options.command === "delete") {
+      // Collect multiple thread IDs for archive/delete
+      options.threadIds.push(arg);
       i += 1;
     } else {
       error(`Unexpected argument: ${arg}`);
@@ -711,6 +728,72 @@ async function cmdForward(options: CliOptions) {
   await disconnect(conn);
 }
 
+async function cmdArchive(options: CliOptions) {
+  if (options.threadIds.length === 0) {
+    error("At least one thread ID is required");
+    console.log(`Usage: superhuman archive <thread-id> [thread-id...]`);
+    process.exit(1);
+  }
+
+  const conn = await checkConnection(options.port);
+  if (!conn) {
+    process.exit(1);
+  }
+
+  let successCount = 0;
+  let failCount = 0;
+
+  for (const threadId of options.threadIds) {
+    const result = await archiveThread(conn, threadId);
+    if (result.success) {
+      success(`Archived: ${threadId}`);
+      successCount++;
+    } else {
+      error(`Failed to archive: ${threadId}`);
+      failCount++;
+    }
+  }
+
+  if (options.threadIds.length > 1) {
+    log(`\n${successCount} archived, ${failCount} failed`);
+  }
+
+  await disconnect(conn);
+}
+
+async function cmdDelete(options: CliOptions) {
+  if (options.threadIds.length === 0) {
+    error("At least one thread ID is required");
+    console.log(`Usage: superhuman delete <thread-id> [thread-id...]`);
+    process.exit(1);
+  }
+
+  const conn = await checkConnection(options.port);
+  if (!conn) {
+    process.exit(1);
+  }
+
+  let successCount = 0;
+  let failCount = 0;
+
+  for (const threadId of options.threadIds) {
+    const result = await deleteThread(conn, threadId);
+    if (result.success) {
+      success(`Deleted: ${threadId}`);
+      successCount++;
+    } else {
+      error(`Failed to delete: ${threadId}`);
+      failCount++;
+    }
+  }
+
+  if (options.threadIds.length > 1) {
+    log(`\n${successCount} deleted, ${failCount} failed`);
+  }
+
+  await disconnect(conn);
+}
+
 async function cmdAccounts(options: CliOptions) {
   const conn = await checkConnection(options.port);
   if (!conn) {
@@ -846,6 +929,14 @@ async function main() {
 
     case "forward":
       await cmdForward(options);
+      break;
+
+    case "archive":
+      await cmdArchive(options);
+      break;
+
+    case "delete":
+      await cmdDelete(options);
       break;
 
     case "compose":

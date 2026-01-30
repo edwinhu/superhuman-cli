@@ -22,6 +22,7 @@ import { listInbox, searchInbox } from "../inbox";
 import { readThread } from "../read";
 import { listAccounts, switchAccount } from "../accounts";
 import { replyToThread, replyAllToThread, forwardThread } from "../reply";
+import { archiveThread, deleteThread } from "../archive";
 
 const CDP_PORT = 9333;
 
@@ -99,6 +100,20 @@ export const ForwardSchema = z.object({
   toEmail: z.string().describe("Email address to forward to"),
   body: z.string().describe("Message body to include before the forwarded content"),
   send: z.boolean().optional().describe("Send immediately instead of creating draft (default: false)"),
+});
+
+/**
+ * Zod schema for archiving threads
+ */
+export const ArchiveSchema = z.object({
+  threadIds: z.array(z.string()).describe("Thread ID(s) to archive"),
+});
+
+/**
+ * Zod schema for deleting threads
+ */
+export const DeleteSchema = z.object({
+  threadIds: z.array(z.string()).describe("Thread ID(s) to delete (move to trash)"),
 });
 
 type TextContent = { type: "text"; text: string };
@@ -525,6 +540,90 @@ export async function forwardHandler(args: z.infer<typeof ForwardSchema>): Promi
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     return errorResult(`Failed to forward: ${message}`);
+  } finally {
+    if (conn) await disconnect(conn);
+  }
+}
+
+/**
+ * Handler for superhuman_archive tool
+ */
+export async function archiveHandler(args: z.infer<typeof ArchiveSchema>): Promise<ToolResult> {
+  if (args.threadIds.length === 0) {
+    return errorResult("At least one thread ID is required");
+  }
+
+  let conn: SuperhumanConnection | null = null;
+
+  try {
+    conn = await connectToSuperhuman(CDP_PORT);
+    if (!conn) {
+      throw new Error("Could not connect to Superhuman. Make sure it's running with --remote-debugging-port=9333");
+    }
+
+    const results: { threadId: string; success: boolean }[] = [];
+
+    for (const threadId of args.threadIds) {
+      const result = await archiveThread(conn, threadId);
+      results.push({ threadId, success: result.success });
+    }
+
+    const succeeded = results.filter((r) => r.success).length;
+    const failed = results.filter((r) => !r.success).length;
+
+    if (failed === 0) {
+      return successResult(`Archived ${succeeded} thread(s) successfully`);
+    } else if (succeeded === 0) {
+      return errorResult(`Failed to archive all ${failed} thread(s)`);
+    } else {
+      const failedIds = results.filter((r) => !r.success).map((r) => r.threadId).join(", ");
+      return successResult(`Archived ${succeeded} thread(s), failed to archive ${failed}: ${failedIds}`);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return errorResult(`Failed to archive: ${message}`);
+  } finally {
+    if (conn) await disconnect(conn);
+  }
+}
+
+/**
+ * Handler for superhuman_delete tool
+ */
+export async function deleteHandler(args: z.infer<typeof DeleteSchema>): Promise<ToolResult> {
+  if (args.threadIds.length === 0) {
+    return errorResult("At least one thread ID is required");
+  }
+
+  let conn: SuperhumanConnection | null = null;
+
+  try {
+    conn = await connectToSuperhuman(CDP_PORT);
+    if (!conn) {
+      throw new Error("Could not connect to Superhuman. Make sure it's running with --remote-debugging-port=9333");
+    }
+
+    const results: { threadId: string; success: boolean }[] = [];
+
+    for (const threadId of args.threadIds) {
+      const result = await deleteThread(conn, threadId);
+      results.push({ threadId, success: result.success });
+    }
+
+    const succeeded = results.filter((r) => r.success).length;
+    const failed = results.filter((r) => !r.success).length;
+
+    if (failed === 0) {
+      return successResult(`Deleted ${succeeded} thread(s) successfully`);
+    } else if (succeeded === 0) {
+      return errorResult(`Failed to delete all ${failed} thread(s)`);
+    } else {
+      const failedIds = results.filter((r) => !r.success).map((r) => r.threadId).join(", ");
+      return successResult(`Deleted ${succeeded} thread(s), failed to delete ${failed}: ${failedIds}`);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return errorResult(`Failed to delete: ${message}`);
   } finally {
     if (conn) await disconnect(conn);
   }
