@@ -8,7 +8,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import {
   DraftSchema, SendSchema, SearchSchema, InboxSchema, ReadSchema,
-  draftHandler, sendHandler, searchHandler, inboxHandler, readHandler
+  AccountsSchema, SwitchAccountSchema,
+  draftHandler, sendHandler, searchHandler, inboxHandler, readHandler,
+  accountsHandler, switchAccountHandler
 } from "./tools";
 
 function createMcpServer(): McpServer {
@@ -60,6 +62,24 @@ function createMcpServer(): McpServer {
       inputSchema: ReadSchema,
     },
     readHandler
+  );
+
+  server.registerTool(
+    "superhuman_accounts",
+    {
+      description: "List all linked email accounts in Superhuman. Returns accounts with current marker.",
+      inputSchema: AccountsSchema,
+    },
+    accountsHandler
+  );
+
+  server.registerTool(
+    "superhuman_switch_account",
+    {
+      description: "Switch to a different linked email account in Superhuman. Accepts either an email address or a 1-based index number.",
+      inputSchema: SwitchAccountSchema,
+    },
+    switchAccountHandler
   );
 
   return server;

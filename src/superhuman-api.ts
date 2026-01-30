@@ -11,6 +11,7 @@ export interface SuperhumanConnection {
   Runtime: CDP.Client["Runtime"];
   Input: CDP.Client["Input"];
   Network: CDP.Client["Network"];
+  Page: CDP.Client["Page"];
 }
 
 export interface DraftState {
@@ -46,11 +47,16 @@ export async function connectToSuperhuman(
   }
 
   const client = await CDP({ target: mainPage.id, port });
+
+  // Enable Page domain for navigation events
+  await client.Page.enable();
+
   return {
     client,
     Runtime: client.Runtime,
     Input: client.Input,
     Network: client.Network,
+    Page: client.Page,
   };
 }
 

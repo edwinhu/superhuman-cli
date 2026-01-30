@@ -27,6 +27,7 @@ import {
 } from "./superhuman-api";
 import { listInbox, searchInbox } from "./inbox";
 import { readThread } from "./read";
+import { listAccounts, switchAccount, type Account } from "./accounts";
 
 const VERSION = "0.1.0";
 const CDP_PORT = 9333;
@@ -59,6 +60,28 @@ function info(message: string) {
   console.log(`${colors.blue}ℹ${colors.reset} ${message}`);
 }
 
+/**
+ * Format accounts list for human-readable output
+ */
+export function formatAccountsList(accounts: Account[]): string {
+  if (accounts.length === 0) return "";
+
+  return accounts
+    .map((account, index) => {
+      const marker = account.isCurrent ? "*" : " ";
+      const suffix = account.isCurrent ? " (current)" : "";
+      return `${marker} ${index + 1}. ${account.email}${suffix}`;
+    })
+    .join("\n");
+}
+
+/**
+ * Format accounts list as JSON
+ */
+export function formatAccountsJson(accounts: Account[]): string {
+  return JSON.stringify(accounts);
+}
+
 function printHelp() {
   console.log(`
 ${colors.bold}Superhuman CLI${colors.reset} v${VERSION}
@@ -67,6 +90,8 @@ ${colors.bold}USAGE${colors.reset}
   superhuman <command> [options]
 
 ${colors.bold}COMMANDS${colors.reset}
+  ${colors.cyan}accounts${colors.reset}   List all linked accounts
+  ${colors.cyan}account${colors.reset}    Switch to a different account
   ${colors.cyan}inbox${colors.reset}      List recent emails from inbox
   ${colors.cyan}search${colors.reset}     Search emails
   ${colors.cyan}read${colors.reset}       Read a specific email thread
@@ -88,6 +113,14 @@ ${colors.bold}OPTIONS${colors.reset}
   --port <number>    CDP port (default: ${CDP_PORT})
 
 ${colors.bold}EXAMPLES${colors.reset}
+  ${colors.dim}# List linked accounts${colors.reset}
+  superhuman accounts
+  superhuman accounts --json
+
+  ${colors.dim}# Switch account${colors.reset}
+  superhuman account 2
+  superhuman account user@example.com
+
   ${colors.dim}# List recent emails${colors.reset}
   superhuman inbox
   superhuman inbox --limit 5 --json
@@ -129,6 +162,8 @@ interface CliOptions {
   query: string;
   threadId: string;
   json: boolean;
+  // account switching
+  accountArg: string; // index or email for account command
 }
 
 function parseArgs(args: string[]): CliOptions {
@@ -145,6 +180,7 @@ function parseArgs(args: string[]): CliOptions {
     query: "",
     threadId: "",
     json: false,
+    accountArg: "",
   };
 
   let i = 0;
@@ -218,6 +254,10 @@ function parseArgs(args: string[]): CliOptions {
     } else if (options.command === "read" && !options.threadId) {
       // Allow thread ID as positional argument
       options.threadId = arg;
+      i += 1;
+    } else if (options.command === "account" && !options.accountArg) {
+      // Allow account index or email as positional argument
+      options.accountArg = arg;
       i += 1;
     } else {
       error(`Unexpected argument: ${arg}`);
@@ -536,6 +576,91 @@ async function cmdRead(options: CliOptions) {
   await disconnect(conn);
 }
 
+async function cmdAccounts(options: CliOptions) {
+  const conn = await checkConnection(options.port);
+  if (!conn) {
+    process.exit(1);
+  }
+
+  const accounts = await listAccounts(conn);
+
+  if (options.json) {
+    console.log(formatAccountsJson(accounts));
+  } else {
+    if (accounts.length === 0) {
+      info("No linked accounts found");
+    } else {
+      console.log(formatAccountsList(accounts));
+    }
+  }
+
+  await disconnect(conn);
+}
+
+async function cmdAccount(options: CliOptions) {
+  if (!options.accountArg) {
+    error("Account index or email is required");
+    console.log(`Usage: superhuman account <index|email>`);
+    process.exit(1);
+  }
+
+  const conn = await checkConnection(options.port);
+  if (!conn) {
+    process.exit(1);
+  }
+
+  const accounts = await listAccounts(conn);
+
+  // Determine target email: either by index (1-based) or by email
+  let targetEmail: string | undefined;
+
+  const indexMatch = options.accountArg.match(/^\d+$/);
+  if (indexMatch) {
+    const index = parseInt(options.accountArg, 10);
+    if (index < 1 || index > accounts.length) {
+      error(`Invalid account index: ${index}. Valid range: 1-${accounts.length}`);
+      await disconnect(conn);
+      process.exit(1);
+    }
+    targetEmail = accounts[index - 1].email;
+  } else {
+    // Treat as email
+    const found = accounts.find(
+      (a) => a.email.toLowerCase() === options.accountArg.toLowerCase()
+    );
+    if (!found) {
+      error(`Account not found: ${options.accountArg}`);
+      info("Available accounts:");
+      console.log(formatAccountsList(accounts));
+      await disconnect(conn);
+      process.exit(1);
+    }
+    targetEmail = found.email;
+  }
+
+  // Check if already on this account
+  const currentAccount = accounts.find((a) => a.isCurrent);
+  if (currentAccount && currentAccount.email === targetEmail) {
+    info(`Already on account: ${targetEmail}`);
+    await disconnect(conn);
+    return;
+  }
+
+  // Switch to the target account
+  const result = await switchAccount(conn, targetEmail);
+
+  if (result.success) {
+    success(`Switched to ${result.email}`);
+  } else {
+    error(`Failed to switch to ${targetEmail}`);
+    if (result.email) {
+      info(`Current account: ${result.email}`);
+    }
+  }
+
+  await disconnect(conn);
+}
+
 async function main() {
   const args = process.argv.slice(2);
 
@@ -554,6 +679,14 @@ async function main() {
 
     case "status":
       await cmdStatus(options);
+      break;
+
+    case "accounts":
+      await cmdAccounts(options);
+      break;
+
+    case "account":
+      await cmdAccount(options);
       break;
 
     case "inbox":
@@ -588,7 +721,10 @@ async function main() {
   }
 }
 
-main().catch((e) => {
-  error(`Fatal error: ${e.message}`);
-  process.exit(1);
-});
+// Only run main when executed directly (not when imported for testing)
+if (import.meta.main) {
+  main().catch((e) => {
+    error(`Fatal error: ${e.message}`);
+    process.exit(1);
+  });
+}
