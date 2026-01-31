@@ -399,3 +399,255 @@ export function textToHtml(text: string): string {
   if (text.includes("<")) return text;
   return `<p>${text.replace(/\n/g, "</p><p>")}</p>`;
 }
+
+/**
+ * Sync threadListView.threadId with threadPane.threadId
+ *
+ * This fixes a bug where reply commands use threadListView.threadId
+ * (the last selected thread in the list) instead of threadPane.threadId
+ * (the currently open thread).
+ */
+export async function syncThreadId(conn: SuperhumanConnection): Promise<boolean> {
+  const { Runtime } = conn;
+
+  const result = await Runtime.evaluate({
+    expression: `
+      (() => {
+        try {
+          const tree = window.ViewState?.tree;
+          const data = tree?.get?.() || tree?._data;
+          const threadPaneId = data?.threadPane?.threadId;
+
+          if (!threadPaneId || !tree?.set) return false;
+
+          tree.set(['threadListView', 'threadId'], threadPaneId);
+          return true;
+        } catch (e) {
+          return false;
+        }
+      })()
+    `,
+    returnByValue: true,
+  });
+
+  return result.result.value === true;
+}
+
+/**
+ * Open a reply-all compose using Superhuman's native command.
+ *
+ * This uses the REPLY_ALL_POP_OUT command which properly sets up threading,
+ * recipients, and subject automatically.
+ */
+export async function openReplyAllCompose(conn: SuperhumanConnection): Promise<string | null> {
+  const { Runtime, Input } = conn;
+
+  // Close any existing compose first
+  await Input.dispatchKeyEvent({ type: "keyDown", key: "Escape", code: "Escape" });
+  await Input.dispatchKeyEvent({ type: "keyUp", key: "Escape", code: "Escape" });
+  await new Promise((r) => setTimeout(r, 500));
+
+  // Sync thread IDs before invoking reply command
+  await syncThreadId(conn);
+
+  // Invoke REPLY_ALL_POP_OUT command
+  const invokeResult = await Runtime.evaluate({
+    expression: `
+      (() => {
+        try {
+          const rc = window.ViewState?.regionalCommands;
+          for (const region of rc) {
+            if (region?.commands) {
+              for (const cmd of region.commands) {
+                if (cmd.id === 'REPLY_ALL_POP_OUT' && typeof cmd.action === 'function') {
+                  const mockEvent = {
+                    preventDefault: () => {},
+                    stopPropagation: () => {},
+                  };
+                  cmd.action(mockEvent);
+                  return true;
+                }
+              }
+            }
+          }
+          return false;
+        } catch (e) {
+          return false;
+        }
+      })()
+    `,
+    returnByValue: true,
+  });
+
+  if (!invokeResult.result.value) {
+    return null;
+  }
+
+  // Wait for compose to open
+  await new Promise((r) => setTimeout(r, 2000));
+
+  // Get the draft key
+  const result = await Runtime.evaluate({
+    expression: `
+      (() => {
+        try {
+          const cfc = window.ViewState?._composeFormController;
+          if (!cfc) return null;
+          const keys = Object.keys(cfc);
+          return keys.find(k => k.startsWith('draft')) || null;
+        } catch (e) {
+          return null;
+        }
+      })()
+    `,
+    returnByValue: true,
+  });
+
+  return result.result.value as string | null;
+}
+
+/**
+ * Open a reply compose using Superhuman's native command.
+ *
+ * This uses the REPLY_POP_OUT command which properly sets up threading,
+ * recipient (original sender only), and subject automatically.
+ */
+export async function openReplyCompose(conn: SuperhumanConnection): Promise<string | null> {
+  const { Runtime, Input } = conn;
+
+  // Close any existing compose first
+  await Input.dispatchKeyEvent({ type: "keyDown", key: "Escape", code: "Escape" });
+  await Input.dispatchKeyEvent({ type: "keyUp", key: "Escape", code: "Escape" });
+  await new Promise((r) => setTimeout(r, 500));
+
+  // Sync thread IDs before invoking reply command
+  await syncThreadId(conn);
+
+  // Invoke REPLY_POP_OUT command
+  const invokeResult = await Runtime.evaluate({
+    expression: `
+      (() => {
+        try {
+          const rc = window.ViewState?.regionalCommands;
+          for (const region of rc) {
+            if (region?.commands) {
+              for (const cmd of region.commands) {
+                if (cmd.id === 'REPLY_POP_OUT' && typeof cmd.action === 'function') {
+                  const mockEvent = {
+                    preventDefault: () => {},
+                    stopPropagation: () => {},
+                  };
+                  cmd.action(mockEvent);
+                  return true;
+                }
+              }
+            }
+          }
+          return false;
+        } catch (e) {
+          return false;
+        }
+      })()
+    `,
+    returnByValue: true,
+  });
+
+  if (!invokeResult.result.value) {
+    return null;
+  }
+
+  // Wait for compose to open
+  await new Promise((r) => setTimeout(r, 2000));
+
+  // Get the draft key
+  const result = await Runtime.evaluate({
+    expression: `
+      (() => {
+        try {
+          const cfc = window.ViewState?._composeFormController;
+          if (!cfc) return null;
+          const keys = Object.keys(cfc);
+          return keys.find(k => k.startsWith('draft')) || null;
+        } catch (e) {
+          return null;
+        }
+      })()
+    `,
+    returnByValue: true,
+  });
+
+  return result.result.value as string | null;
+}
+
+/**
+ * Open a forward compose using Superhuman's native command.
+ *
+ * This uses the FORWARD_POP_OUT command which properly sets up the
+ * forwarded message content and subject automatically.
+ */
+export async function openForwardCompose(conn: SuperhumanConnection): Promise<string | null> {
+  const { Runtime, Input } = conn;
+
+  // Close any existing compose first
+  await Input.dispatchKeyEvent({ type: "keyDown", key: "Escape", code: "Escape" });
+  await Input.dispatchKeyEvent({ type: "keyUp", key: "Escape", code: "Escape" });
+  await new Promise((r) => setTimeout(r, 500));
+
+  // Sync thread IDs before invoking forward command
+  await syncThreadId(conn);
+
+  // Invoke FORWARD_POP_OUT command
+  const invokeResult = await Runtime.evaluate({
+    expression: `
+      (() => {
+        try {
+          const rc = window.ViewState?.regionalCommands;
+          for (const region of rc) {
+            if (region?.commands) {
+              for (const cmd of region.commands) {
+                if (cmd.id === 'FORWARD_POP_OUT' && typeof cmd.action === 'function') {
+                  const mockEvent = {
+                    preventDefault: () => {},
+                    stopPropagation: () => {},
+                  };
+                  cmd.action(mockEvent);
+                  return true;
+                }
+              }
+            }
+          }
+          return false;
+        } catch (e) {
+          return false;
+        }
+      })()
+    `,
+    returnByValue: true,
+  });
+
+  if (!invokeResult.result.value) {
+    return null;
+  }
+
+  // Wait for compose to open
+  await new Promise((r) => setTimeout(r, 2000));
+
+  // Get the draft key
+  const result = await Runtime.evaluate({
+    expression: `
+      (() => {
+        try {
+          const cfc = window.ViewState?._composeFormController;
+          if (!cfc) return null;
+          const keys = Object.keys(cfc);
+          return keys.find(k => k.startsWith('draft')) || null;
+        } catch (e) {
+          return null;
+        }
+      })()
+    `,
+    returnByValue: true,
+  });
+
+  return result.result.value as string | null;
+}
