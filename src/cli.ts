@@ -34,6 +34,16 @@ import { markAsRead, markAsUnread } from "./read-status";
 import { listLabels, getThreadLabels, addLabel, removeLabel, starThread, unstarThread, listStarred } from "./labels";
 import { snoozeThread, unsnoozeThread, listSnoozed, parseSnoozeTime } from "./snooze";
 import { listAttachments, downloadAttachment, type Attachment } from "./attachments";
+import {
+  listEvents,
+  createEvent,
+  updateEvent,
+  deleteEvent as deleteCalendarEvent,
+  getFreeBusy,
+  type CalendarEvent,
+  type CreateEventInput,
+  type UpdateEventInput,
+} from "./calendar";
 
 const VERSION = "0.1.0";
 const CDP_PORT = 9333;
@@ -120,6 +130,11 @@ ${colors.bold}COMMANDS${colors.reset}
   ${colors.cyan}snoozed${colors.reset}    List all snoozed threads
   ${colors.cyan}attachments${colors.reset} List attachments for a thread
   ${colors.cyan}download${colors.reset}   Download attachments from a thread
+  ${colors.cyan}calendar${colors.reset}   List calendar events
+  ${colors.cyan}calendar-create${colors.reset} Create a calendar event
+  ${colors.cyan}calendar-update${colors.reset} Update a calendar event
+  ${colors.cyan}calendar-delete${colors.reset} Delete a calendar event
+  ${colors.cyan}calendar-free${colors.reset} Check free/busy availability
   ${colors.cyan}compose${colors.reset}    Open compose window and fill in email (keeps window open)
   ${colors.cyan}draft${colors.reset}      Create and save a draft
   ${colors.cyan}send${colors.reset}       Compose and send an email immediately
@@ -141,6 +156,13 @@ ${colors.bold}OPTIONS${colors.reset}
   --message <id>     Message ID (required with --attachment)
   --limit <number>   Number of results (default: 10, for inbox/search)
   --json             Output as JSON (for inbox/search/read)
+  --date <date>      Date for calendar (YYYY-MM-DD or "today", "tomorrow")
+  --range <days>     Days to show for calendar (default: 1)
+  --start <time>     Event start time (ISO datetime or natural: "2pm", "tomorrow 3pm")
+  --end <time>       Event end time (ISO datetime, optional if --duration)
+  --duration <mins>  Event duration in minutes (default: 30)
+  --title <text>     Event title (for calendar-create/update)
+  --event <id>       Event ID (for calendar-update/delete)
   --port <number>    CDP port (default: ${CDP_PORT})
 
 ${colors.bold}EXAMPLES${colors.reset}
@@ -221,6 +243,23 @@ ${colors.bold}EXAMPLES${colors.reset}
   superhuman download <thread-id> --output ./downloads
   superhuman download --attachment <attachment-id> --message <message-id> --output ./file.pdf
 
+  ${colors.dim}# List calendar events${colors.reset}
+  superhuman calendar
+  superhuman calendar --date tomorrow
+  superhuman calendar --range 7 --json
+
+  ${colors.dim}# Create calendar event${colors.reset}
+  superhuman calendar-create --title "Meeting" --start "2pm" --duration 30
+  superhuman calendar-create --title "All Day" --date 2026-02-05
+
+  ${colors.dim}# Update/delete calendar event${colors.reset}
+  superhuman calendar-update --event <event-id> --title "New Title"
+  superhuman calendar-delete --event <event-id>
+
+  ${colors.dim}# Check availability${colors.reset}
+  superhuman calendar-free
+  superhuman calendar-free --date tomorrow --range 7
+
   ${colors.dim}# Create a draft${colors.reset}
   superhuman draft --to user@example.com --subject "Hello" --body "Hi there!"
 
@@ -263,6 +302,14 @@ interface CliOptions {
   outputPath: string; // output directory or file path for downloads
   attachmentId: string; // specific attachment ID for single download
   messageId: string; // message ID for single attachment download
+  // calendar options
+  calendarDate: string; // date for calendar listing (YYYY-MM-DD or "today", "tomorrow")
+  calendarRange: number; // number of days to show
+  eventStart: string; // event start time
+  eventEnd: string; // event end time
+  eventDuration: number; // event duration in minutes
+  eventTitle: string; // event title
+  eventId: string; // event ID for update/delete
 }
 
 function parseArgs(args: string[]): CliOptions {
@@ -287,6 +334,13 @@ function parseArgs(args: string[]): CliOptions {
     outputPath: "",
     attachmentId: "",
     messageId: "",
+    calendarDate: "",
+    calendarRange: 1,
+    eventStart: "",
+    eventEnd: "",
+    eventDuration: 30,
+    eventTitle: "",
+    eventId: "",
   };
 
   let i = 0;
@@ -368,6 +422,34 @@ function parseArgs(args: string[]): CliOptions {
           break;
         case "message":
           options.messageId = value;
+          i += 2;
+          break;
+        case "date":
+          options.calendarDate = value;
+          i += 2;
+          break;
+        case "range":
+          options.calendarRange = parseInt(value, 10);
+          i += 2;
+          break;
+        case "start":
+          options.eventStart = value;
+          i += 2;
+          break;
+        case "end":
+          options.eventEnd = value;
+          i += 2;
+          break;
+        case "duration":
+          options.eventDuration = parseInt(value, 10);
+          i += 2;
+          break;
+        case "title":
+          options.eventTitle = value;
+          i += 2;
+          break;
+        case "event":
+          options.eventId = value;
           i += 2;
           break;
         default:
@@ -1516,6 +1598,357 @@ async function cmdAccount(options: CliOptions) {
   await disconnect(conn);
 }
 
+/**
+ * Parse a date string into a Date object
+ * Supports: "today", "tomorrow", ISO date (YYYY-MM-DD), or any Date.parse-able string
+ */
+function parseCalendarDate(dateStr: string): Date {
+  const now = new Date();
+  const lowerDate = dateStr.toLowerCase();
+
+  if (lowerDate === "today") {
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  } else if (lowerDate === "tomorrow") {
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  }
+
+  // Try parsing as-is
+  const parsed = new Date(dateStr);
+  if (!isNaN(parsed.getTime())) {
+    return parsed;
+  }
+
+  throw new Error(`Invalid date: ${dateStr}`);
+}
+
+/**
+ * Parse a time string into a Date object
+ * Supports: ISO datetime, or simple times like "2pm", "14:00", "tomorrow 3pm"
+ */
+function parseEventTime(timeStr: string): Date {
+  const now = new Date();
+
+  // Try ISO format first
+  const iso = new Date(timeStr);
+  if (!isNaN(iso.getTime())) {
+    return iso;
+  }
+
+  // Simple time patterns
+  const lowerTime = timeStr.toLowerCase();
+
+  // Check for "tomorrow" prefix
+  let baseDate = now;
+  let timePart = lowerTime;
+  if (lowerTime.startsWith("tomorrow")) {
+    baseDate = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+    timePart = lowerTime.replace("tomorrow", "").trim();
+  }
+
+  // Parse time like "2pm", "14:00", "3:30pm"
+  const timeMatch = timePart.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i);
+  if (timeMatch) {
+    let hours = parseInt(timeMatch[1], 10);
+    const minutes = timeMatch[2] ? parseInt(timeMatch[2], 10) : 0;
+    const meridiem = timeMatch[3]?.toLowerCase();
+
+    if (meridiem === "pm" && hours < 12) hours += 12;
+    if (meridiem === "am" && hours === 12) hours = 0;
+
+    return new Date(
+      baseDate.getFullYear(),
+      baseDate.getMonth(),
+      baseDate.getDate(),
+      hours,
+      minutes
+    );
+  }
+
+  throw new Error(`Invalid time: ${timeStr}`);
+}
+
+/**
+ * Format a calendar event for display
+ */
+function formatCalendarEvent(event: CalendarEvent): string {
+  const lines: string[] = [];
+
+  // Time
+  let timeStr = "";
+  if (event.allDay || event.start.date) {
+    timeStr = "All Day";
+  } else if (event.start.dateTime) {
+    const start = new Date(event.start.dateTime);
+    const end = event.end.dateTime ? new Date(event.end.dateTime) : null;
+    timeStr = start.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    if (end) {
+      timeStr += ` - ${end.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
+    }
+  }
+
+  lines.push(`${colors.cyan}${timeStr}${colors.reset} ${colors.bold}${event.summary || "(No title)"}${colors.reset}`);
+
+  if (event.description) {
+    lines.push(`  ${colors.dim}${event.description.substring(0, 80)}${event.description.length > 80 ? "..." : ""}${colors.reset}`);
+  }
+
+  if (event.attendees && event.attendees.length > 0) {
+    const attendeeStr = event.attendees.map(a => a.email).slice(0, 3).join(", ");
+    const more = event.attendees.length > 3 ? ` +${event.attendees.length - 3} more` : "";
+    lines.push(`  ${colors.dim}With: ${attendeeStr}${more}${colors.reset}`);
+  }
+
+  lines.push(`  ${colors.dim}ID: ${event.id}${colors.reset}`);
+
+  return lines.join("\n");
+}
+
+async function cmdCalendar(options: CliOptions) {
+  const conn = await checkConnection(options.port);
+  if (!conn) {
+    process.exit(1);
+  }
+
+  // Parse date range
+  let timeMin: Date;
+  let timeMax: Date;
+
+  if (options.calendarDate) {
+    timeMin = parseCalendarDate(options.calendarDate);
+  } else {
+    timeMin = new Date();
+    timeMin.setHours(0, 0, 0, 0);
+  }
+
+  timeMax = new Date(timeMin);
+  timeMax.setDate(timeMax.getDate() + options.calendarRange);
+  timeMax.setHours(23, 59, 59, 999);
+
+  const events = await listEvents(conn, { timeMin, timeMax });
+
+  if (options.json) {
+    console.log(JSON.stringify(events, null, 2));
+  } else {
+    if (events.length === 0) {
+      info("No events found for the specified date range");
+    } else {
+      // Group events by date
+      const byDate = new Map<string, CalendarEvent[]>();
+      for (const event of events) {
+        const dateStr = event.start.date || (event.start.dateTime ? new Date(event.start.dateTime).toDateString() : "Unknown");
+        if (!byDate.has(dateStr)) {
+          byDate.set(dateStr, []);
+        }
+        byDate.get(dateStr)!.push(event);
+      }
+
+      for (const [date, dayEvents] of byDate) {
+        console.log(`\n${colors.bold}${date}${colors.reset}`);
+        for (const event of dayEvents) {
+          console.log(formatCalendarEvent(event));
+        }
+      }
+    }
+  }
+
+  await disconnect(conn);
+}
+
+async function cmdCalendarCreate(options: CliOptions) {
+  if (!options.eventTitle && !options.subject) {
+    error("Event title is required (--title)");
+    process.exit(1);
+  }
+
+  const conn = await checkConnection(options.port);
+  if (!conn) {
+    process.exit(1);
+  }
+
+  const title = options.eventTitle || options.subject;
+  let startTime: Date;
+  let endTime: Date;
+
+  // Determine if this is an all-day event
+  const isAllDay = options.calendarDate && !options.eventStart;
+
+  if (isAllDay) {
+    startTime = parseCalendarDate(options.calendarDate);
+    endTime = new Date(startTime);
+    endTime.setDate(endTime.getDate() + 1);
+  } else {
+    if (!options.eventStart) {
+      error("Event start time is required (--start) or use --date for all-day event");
+      await disconnect(conn);
+      process.exit(1);
+    }
+
+    startTime = parseEventTime(options.eventStart);
+
+    if (options.eventEnd) {
+      endTime = parseEventTime(options.eventEnd);
+    } else {
+      endTime = new Date(startTime.getTime() + options.eventDuration * 60 * 1000);
+    }
+  }
+
+  const eventInput: CreateEventInput = {
+    summary: title,
+    description: options.body || undefined,
+    start: isAllDay
+      ? { date: startTime.toISOString().split("T")[0] }
+      : { dateTime: startTime.toISOString() },
+    end: isAllDay
+      ? { date: endTime.toISOString().split("T")[0] }
+      : { dateTime: endTime.toISOString() },
+  };
+
+  // Add attendees from --to option
+  if (options.to.length > 0) {
+    eventInput.attendees = options.to.map(email => ({ email }));
+  }
+
+  const result = await createEvent(conn, eventInput);
+
+  if (result.success) {
+    success(`Event created: ${result.eventId}`);
+    if (options.json) {
+      console.log(JSON.stringify(result, null, 2));
+    }
+  } else {
+    error(`Failed to create event: ${result.error}`);
+    if (result.error?.includes("no-auth")) {
+      info("Calendar write access may not be authorized in Superhuman");
+    }
+  }
+
+  await disconnect(conn);
+}
+
+async function cmdCalendarUpdate(options: CliOptions) {
+  if (!options.eventId) {
+    error("Event ID is required (--event)");
+    process.exit(1);
+  }
+
+  const conn = await checkConnection(options.port);
+  if (!conn) {
+    process.exit(1);
+  }
+
+  const updates: UpdateEventInput = {};
+
+  if (options.eventTitle || options.subject) {
+    updates.summary = options.eventTitle || options.subject;
+  }
+  if (options.body) {
+    updates.description = options.body;
+  }
+  if (options.eventStart) {
+    const startTime = parseEventTime(options.eventStart);
+    updates.start = { dateTime: startTime.toISOString() };
+
+    // Also update end if not specified
+    if (!options.eventEnd) {
+      const endTime = new Date(startTime.getTime() + options.eventDuration * 60 * 1000);
+      updates.end = { dateTime: endTime.toISOString() };
+    }
+  }
+  if (options.eventEnd) {
+    const endTime = parseEventTime(options.eventEnd);
+    updates.end = { dateTime: endTime.toISOString() };
+  }
+  if (options.to.length > 0) {
+    updates.attendees = options.to.map(email => ({ email }));
+  }
+
+  if (Object.keys(updates).length === 0) {
+    error("No updates specified. Use --title, --start, --end, --body, or --to");
+    await disconnect(conn);
+    process.exit(1);
+  }
+
+  const result = await updateEvent(conn, options.eventId, updates);
+
+  if (result.success) {
+    success(`Event updated: ${result.eventId}`);
+    if (options.json) {
+      console.log(JSON.stringify(result, null, 2));
+    }
+  } else {
+    error(`Failed to update event: ${result.error}`);
+    if (result.error?.includes("no-auth")) {
+      info("Calendar write access may not be authorized in Superhuman");
+    }
+  }
+
+  await disconnect(conn);
+}
+
+async function cmdCalendarDelete(options: CliOptions) {
+  if (!options.eventId) {
+    error("Event ID is required (--event)");
+    process.exit(1);
+  }
+
+  const conn = await checkConnection(options.port);
+  if (!conn) {
+    process.exit(1);
+  }
+
+  const result = await deleteCalendarEvent(conn, options.eventId);
+
+  if (result.success) {
+    success(`Event deleted: ${options.eventId}`);
+  } else {
+    error(`Failed to delete event: ${result.error}`);
+    if (result.error?.includes("no-auth")) {
+      info("Calendar write access may not be authorized in Superhuman");
+    }
+  }
+
+  await disconnect(conn);
+}
+
+async function cmdCalendarFree(options: CliOptions) {
+  const conn = await checkConnection(options.port);
+  if (!conn) {
+    process.exit(1);
+  }
+
+  // Parse date range
+  let timeMin: Date;
+  let timeMax: Date;
+
+  if (options.calendarDate) {
+    timeMin = parseCalendarDate(options.calendarDate);
+  } else {
+    timeMin = new Date();
+  }
+
+  timeMax = new Date(timeMin);
+  timeMax.setDate(timeMax.getDate() + options.calendarRange);
+
+  const result = await getFreeBusy(conn, { timeMin, timeMax });
+
+  if (options.json) {
+    console.log(JSON.stringify(result, null, 2));
+  } else {
+    if (result.busy.length === 0) {
+      success("You are free for the specified time range!");
+    } else {
+      console.log(`\n${colors.bold}Busy times:${colors.reset}`);
+      for (const slot of result.busy) {
+        const start = new Date(slot.start);
+        const end = new Date(slot.end);
+        console.log(`  ${colors.red}●${colors.reset} ${start.toLocaleString()} - ${end.toLocaleTimeString()}`);
+      }
+    }
+  }
+
+  await disconnect(conn);
+}
+
 async function main() {
   const args = process.argv.slice(2);
 
@@ -1630,6 +2063,26 @@ async function main() {
 
     case "download":
       await cmdDownload(options);
+      break;
+
+    case "calendar":
+      await cmdCalendar(options);
+      break;
+
+    case "calendar-create":
+      await cmdCalendarCreate(options);
+      break;
+
+    case "calendar-update":
+      await cmdCalendarUpdate(options);
+      break;
+
+    case "calendar-delete":
+      await cmdCalendarDelete(options);
+      break;
+
+    case "calendar-free":
+      await cmdCalendarFree(options);
       break;
 
     case "compose":

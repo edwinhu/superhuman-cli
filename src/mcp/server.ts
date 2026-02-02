@@ -14,13 +14,15 @@ import {
   StarSchema, UnstarSchema, StarredSchema,
   SnoozeSchema, UnsnoozeSchema, SnoozedSchema,
   AttachmentsSchema, DownloadAttachmentSchema, AddAttachmentSchema,
+  CalendarListSchema, CalendarCreateSchema, CalendarUpdateSchema, CalendarDeleteSchema, CalendarFreeBusySchema,
   draftHandler, sendHandler, searchHandler, inboxHandler, readHandler,
   accountsHandler, switchAccountHandler, replyHandler, replyAllHandler, forwardHandler,
   archiveHandler, deleteHandler,
   markReadHandler, markUnreadHandler, labelsHandler, getLabelsHandler, addLabelHandler, removeLabelHandler,
   starHandler, unstarHandler, starredHandler,
   snoozeHandler, unsnoozeHandler, snoozedHandler,
-  attachmentsHandler, downloadAttachmentHandler, addAttachmentHandler
+  attachmentsHandler, downloadAttachmentHandler, addAttachmentHandler,
+  calendarListHandler, calendarCreateHandler, calendarUpdateHandler, calendarDeleteHandler, calendarFreeBusyHandler
 } from "./tools";
 
 function createMcpServer(): McpServer {
@@ -270,6 +272,51 @@ function createMcpServer(): McpServer {
       inputSchema: AddAttachmentSchema,
     },
     addAttachmentHandler
+  );
+
+  server.registerTool(
+    "superhuman_calendar_list",
+    {
+      description: "List calendar events from Superhuman. Returns events for a date range with details including title, time, attendees, and event ID.",
+      inputSchema: CalendarListSchema,
+    },
+    calendarListHandler
+  );
+
+  server.registerTool(
+    "superhuman_calendar_create",
+    {
+      description: "Create a new calendar event in Superhuman. Supports timed events and all-day events with optional attendees.",
+      inputSchema: CalendarCreateSchema,
+    },
+    calendarCreateHandler
+  );
+
+  server.registerTool(
+    "superhuman_calendar_update",
+    {
+      description: "Update an existing calendar event in Superhuman. Can modify title, times, description, or attendees.",
+      inputSchema: CalendarUpdateSchema,
+    },
+    calendarUpdateHandler
+  );
+
+  server.registerTool(
+    "superhuman_calendar_delete",
+    {
+      description: "Delete a calendar event from Superhuman by its event ID.",
+      inputSchema: CalendarDeleteSchema,
+    },
+    calendarDeleteHandler
+  );
+
+  server.registerTool(
+    "superhuman_calendar_free_busy",
+    {
+      description: "Check free/busy availability in the calendar. Returns busy time slots within the specified time range.",
+      inputSchema: CalendarFreeBusySchema,
+    },
+    calendarFreeBusyHandler
   );
 
   return server;

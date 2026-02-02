@@ -1,9 +1,9 @@
 ---
 name: superhuman
-description: This skill should be used when the user asks to "check email", "read inbox", "send email", "reply to email", "search emails", "archive email", "snooze email", "star email", "add label", "forward email", "download attachment", "switch email account", or needs to interact with Superhuman email client.
+description: This skill should be used when the user asks to "check email", "read inbox", "send email", "reply to email", "search emails", "archive email", "snooze email", "star email", "add label", "forward email", "download attachment", "switch email account", "check calendar", "list events", "create event", "schedule meeting", "check availability", "free busy", or needs to interact with Superhuman email client or calendar.
 ---
 
-# Superhuman Email Automation
+# Superhuman Email & Calendar Automation
 
 Automate Superhuman email client via CLI or MCP server using Chrome DevTools Protocol.
 
@@ -73,6 +73,17 @@ superhuman download <thread-id> --output ./downloads
 superhuman accounts
 superhuman account 2
 superhuman account user@example.com
+
+# Calendar
+superhuman calendar                              # List today's events
+superhuman calendar --date tomorrow              # List tomorrow's events
+superhuman calendar --range 7 --json             # List next 7 days as JSON
+superhuman calendar-create --title "Meeting" --start "2pm" --duration 30
+superhuman calendar-create --title "All Day" --date 2026-02-05
+superhuman calendar-update --event <event-id> --title "New Title"
+superhuman calendar-delete --event <event-id>
+superhuman calendar-free                         # Check today's availability
+superhuman calendar-free --date tomorrow --range 7
 ```
 
 ## MCP Server Usage
@@ -129,6 +140,11 @@ Configure in Claude Code settings:
 | `superhuman_add_attachment` | Add attachment to draft |
 | `superhuman_accounts` | List linked accounts |
 | `superhuman_switch_account` | Switch active account |
+| `superhuman_calendar_list` | List calendar events |
+| `superhuman_calendar_create` | Create calendar event |
+| `superhuman_calendar_update` | Update calendar event |
+| `superhuman_calendar_delete` | Delete calendar event |
+| `superhuman_calendar_free_busy` | Check availability |
 
 ## Common Workflows
 
@@ -186,6 +202,31 @@ superhuman account work@company.com
 superhuman account 2
 ```
 
+### Calendar Management
+
+```bash
+# Check today's schedule
+superhuman calendar
+
+# View the week ahead
+superhuman calendar --range 7
+
+# Check availability before scheduling
+superhuman calendar-free --date tomorrow
+
+# Create a meeting
+superhuman calendar-create --title "Team Sync" --start "2pm" --duration 60
+
+# Create all-day event
+superhuman calendar-create --title "Conference" --date 2026-02-15
+
+# Reschedule an event
+superhuman calendar-update --event <event-id> --start "3pm"
+
+# Cancel an event
+superhuman calendar-delete --event <event-id>
+```
+
 ## Snooze Presets
 
 | Preset | When |
@@ -229,3 +270,4 @@ Ensure the email is linked in Superhuman. List available accounts:
 ```bash
 superhuman accounts
 ```
+

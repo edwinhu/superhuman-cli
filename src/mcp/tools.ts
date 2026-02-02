@@ -27,6 +27,15 @@ import { markAsRead, markAsUnread } from "../read-status";
 import { listLabels, getThreadLabels, addLabel, removeLabel, starThread, unstarThread, listStarred } from "../labels";
 import { snoozeThread, unsnoozeThread, listSnoozed, parseSnoozeTime } from "../snooze";
 import { listAttachments, downloadAttachment, addAttachment } from "../attachments";
+import {
+  listEvents,
+  createEvent,
+  updateEvent,
+  deleteEvent as deleteCalendarEvent,
+  getFreeBusy,
+  type CreateEventInput,
+  type UpdateEventInput,
+} from "../calendar";
 
 const CDP_PORT = 9333;
 
@@ -229,6 +238,53 @@ export const AddAttachmentSchema = z.object({
   filename: z.string().describe("The filename for the attachment"),
   data: z.string().describe("The file content as a base64-encoded string"),
   mimeType: z.string().describe("The MIME type of the file (e.g., 'application/pdf', 'image/png')"),
+});
+
+/**
+ * Zod schema for listing calendar events
+ */
+export const CalendarListSchema = z.object({
+  date: z.string().optional().describe("Start date (YYYY-MM-DD or 'today', 'tomorrow'). Defaults to today."),
+  range: z.number().optional().describe("Number of days to show (default: 1)"),
+});
+
+/**
+ * Zod schema for creating a calendar event
+ */
+export const CalendarCreateSchema = z.object({
+  title: z.string().describe("Event title/summary"),
+  startTime: z.string().describe("Start time as ISO datetime (e.g., 2026-02-03T14:00:00Z)"),
+  endTime: z.string().optional().describe("End time as ISO datetime (optional, defaults to 30 minutes after start)"),
+  description: z.string().optional().describe("Event description"),
+  attendees: z.array(z.string()).optional().describe("List of attendee email addresses"),
+  allDay: z.boolean().optional().describe("Whether this is an all-day event (if true, use date format YYYY-MM-DD for startTime)"),
+});
+
+/**
+ * Zod schema for updating a calendar event
+ */
+export const CalendarUpdateSchema = z.object({
+  eventId: z.string().describe("The event ID to update"),
+  title: z.string().optional().describe("New event title/summary"),
+  startTime: z.string().optional().describe("New start time as ISO datetime"),
+  endTime: z.string().optional().describe("New end time as ISO datetime"),
+  description: z.string().optional().describe("New event description"),
+  attendees: z.array(z.string()).optional().describe("New list of attendee email addresses"),
+});
+
+/**
+ * Zod schema for deleting a calendar event
+ */
+export const CalendarDeleteSchema = z.object({
+  eventId: z.string().describe("The event ID to delete"),
+});
+
+/**
+ * Zod schema for checking free/busy availability
+ */
+export const CalendarFreeBusySchema = z.object({
+  timeMin: z.string().describe("Start of time range as ISO datetime"),
+  timeMax: z.string().describe("End of time range as ISO datetime"),
 });
 
 type TextContent = { type: "text"; text: string };
@@ -1304,6 +1360,198 @@ export async function addAttachmentHandler(args: z.infer<typeof AddAttachmentSch
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     return errorResult(`Failed to add attachment: ${message}`);
+  } finally {
+    if (conn) await disconnect(conn);
+  }
+}
+
+/**
+ * Handler for superhuman_calendar_list tool
+ */
+export async function calendarListHandler(args: z.infer<typeof CalendarListSchema>): Promise<ToolResult> {
+  let conn: SuperhumanConnection | null = null;
+
+  try {
+    conn = await connectToSuperhuman(CDP_PORT);
+    if (!conn) {
+      throw new Error("Could not connect to Superhuman. Make sure it's running with --remote-debugging-port=9333");
+    }
+
+    // Parse date
+    let timeMin: Date;
+    if (args.date) {
+      const lowerDate = args.date.toLowerCase();
+      if (lowerDate === "today") {
+        timeMin = new Date();
+        timeMin.setHours(0, 0, 0, 0);
+      } else if (lowerDate === "tomorrow") {
+        timeMin = new Date();
+        timeMin.setDate(timeMin.getDate() + 1);
+        timeMin.setHours(0, 0, 0, 0);
+      } else {
+        timeMin = new Date(args.date);
+      }
+    } else {
+      timeMin = new Date();
+      timeMin.setHours(0, 0, 0, 0);
+    }
+
+    const range = args.range || 1;
+    const timeMax = new Date(timeMin);
+    timeMax.setDate(timeMax.getDate() + range);
+    timeMax.setHours(23, 59, 59, 999);
+
+    const events = await listEvents(conn, { timeMin, timeMax });
+
+    return successResult(JSON.stringify(events, null, 2));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return errorResult(`Failed to list calendar events: ${message}`);
+  } finally {
+    if (conn) await disconnect(conn);
+  }
+}
+
+/**
+ * Handler for superhuman_calendar_create tool
+ */
+export async function calendarCreateHandler(args: z.infer<typeof CalendarCreateSchema>): Promise<ToolResult> {
+  let conn: SuperhumanConnection | null = null;
+
+  try {
+    conn = await connectToSuperhuman(CDP_PORT);
+    if (!conn) {
+      throw new Error("Could not connect to Superhuman. Make sure it's running with --remote-debugging-port=9333");
+    }
+
+    const startTime = new Date(args.startTime);
+    let endTime: Date;
+    if (args.endTime) {
+      endTime = new Date(args.endTime);
+    } else {
+      endTime = new Date(startTime.getTime() + 30 * 60 * 1000); // Default 30 minutes
+    }
+
+    const eventInput: CreateEventInput = {
+      summary: args.title,
+      description: args.description,
+      start: args.allDay
+        ? { date: args.startTime.split("T")[0] }
+        : { dateTime: startTime.toISOString() },
+      end: args.allDay
+        ? { date: endTime.toISOString().split("T")[0] }
+        : { dateTime: endTime.toISOString() },
+      attendees: args.attendees?.map(email => ({ email })),
+    };
+
+    const result = await createEvent(conn, eventInput);
+
+    if (result.success) {
+      return successResult(JSON.stringify({
+        success: true,
+        eventId: result.eventId,
+        message: "Event created successfully",
+      }));
+    } else {
+      return errorResult(`Failed to create event: ${result.error}`);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return errorResult(`Failed to create calendar event: ${message}`);
+  } finally {
+    if (conn) await disconnect(conn);
+  }
+}
+
+/**
+ * Handler for superhuman_calendar_update tool
+ */
+export async function calendarUpdateHandler(args: z.infer<typeof CalendarUpdateSchema>): Promise<ToolResult> {
+  let conn: SuperhumanConnection | null = null;
+
+  try {
+    conn = await connectToSuperhuman(CDP_PORT);
+    if (!conn) {
+      throw new Error("Could not connect to Superhuman. Make sure it's running with --remote-debugging-port=9333");
+    }
+
+    const updates: UpdateEventInput = {};
+    if (args.title) updates.summary = args.title;
+    if (args.description) updates.description = args.description;
+    if (args.startTime) updates.start = { dateTime: new Date(args.startTime).toISOString() };
+    if (args.endTime) updates.end = { dateTime: new Date(args.endTime).toISOString() };
+    if (args.attendees) updates.attendees = args.attendees.map(email => ({ email }));
+
+    const result = await updateEvent(conn, args.eventId, updates);
+
+    if (result.success) {
+      return successResult(JSON.stringify({
+        success: true,
+        eventId: result.eventId,
+        message: "Event updated successfully",
+      }));
+    } else {
+      return errorResult(`Failed to update event: ${result.error}`);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return errorResult(`Failed to update calendar event: ${message}`);
+  } finally {
+    if (conn) await disconnect(conn);
+  }
+}
+
+/**
+ * Handler for superhuman_calendar_delete tool
+ */
+export async function calendarDeleteHandler(args: z.infer<typeof CalendarDeleteSchema>): Promise<ToolResult> {
+  let conn: SuperhumanConnection | null = null;
+
+  try {
+    conn = await connectToSuperhuman(CDP_PORT);
+    if (!conn) {
+      throw new Error("Could not connect to Superhuman. Make sure it's running with --remote-debugging-port=9333");
+    }
+
+    const result = await deleteCalendarEvent(conn, args.eventId);
+
+    if (result.success) {
+      return successResult(JSON.stringify({
+        success: true,
+        message: `Event ${args.eventId} deleted successfully`,
+      }));
+    } else {
+      return errorResult(`Failed to delete event: ${result.error}`);
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return errorResult(`Failed to delete calendar event: ${message}`);
+  } finally {
+    if (conn) await disconnect(conn);
+  }
+}
+
+/**
+ * Handler for superhuman_calendar_free_busy tool
+ */
+export async function calendarFreeBusyHandler(args: z.infer<typeof CalendarFreeBusySchema>): Promise<ToolResult> {
+  let conn: SuperhumanConnection | null = null;
+
+  try {
+    conn = await connectToSuperhuman(CDP_PORT);
+    if (!conn) {
+      throw new Error("Could not connect to Superhuman. Make sure it's running with --remote-debugging-port=9333");
+    }
+
+    const result = await getFreeBusy(conn, {
+      timeMin: new Date(args.timeMin),
+      timeMax: new Date(args.timeMax),
+    });
+
+    return successResult(JSON.stringify(result, null, 2));
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return errorResult(`Failed to check free/busy: ${message}`);
   } finally {
     if (conn) await disconnect(conn);
   }
