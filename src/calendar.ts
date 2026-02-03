@@ -72,6 +72,7 @@ export interface FreeBusyResult {
  * Options for listing events
  */
 export interface ListEventsOptions {
+  calendarId?: string; // Optional: specific calendar to list from
   timeMin?: Date | string;
   timeMax?: Date | string;
   limit?: number;
@@ -81,6 +82,7 @@ export interface ListEventsOptions {
  * Input for creating a calendar event
  */
 export interface CreateEventInput {
+  calendarId?: string; // Optional: specific calendar to create in
   summary: string;
   description?: string;
   start: {
@@ -147,6 +149,7 @@ export async function listEvents(
         try {
           const timeMin = ${JSON.stringify(timeMin)};
           const timeMax = ${JSON.stringify(timeMax)};
+          const calendarIdOption = ${JSON.stringify(options?.calendarId || null)};
           const ga = window.GoogleAccount;
           const di = ga?.di;
 
@@ -166,12 +169,14 @@ export async function listEvents(
             const accountEmail = ga?.emailAddress;
 
             // Get primary calendar ID
-            let calendarId = 'primary';
-            try {
-              const calendars = await msgraph.getCalendars(accountEmail);
-              const primaryCal = calendars?.find(c => c.isDefaultCalendar) || calendars?.[0];
-              if (primaryCal?.id) calendarId = primaryCal.id;
-            } catch {}
+            let calendarId = calendarIdOption || 'primary';
+            if (calendarId === 'primary') {
+              try {
+                const calendars = await msgraph.getCalendars(accountEmail);
+                const primaryCal = calendars?.find(c => c.isDefaultCalendar) || calendars?.[0];
+                if (primaryCal?.id) calendarId = primaryCal.id;
+              } catch {}
+            }
 
             try {
               // calendarView(calendarId, accountEmail, {start, end})
@@ -222,11 +227,12 @@ export async function listEvents(
             }
 
             const accountEmail = ga?.emailAddress || 'primary';
+            const calendarId = calendarIdOption || accountEmail;
 
             try {
               // Correct signature: getEventsList({calendarId, calendarAccountEmail}, options)
               const gcalEvents = await gcal.getEventsList(
-                { calendarId: accountEmail, calendarAccountEmail: accountEmail },
+                { calendarId, calendarAccountEmail: accountEmail },
                 { timeMin, timeMax, singleEvents: true, orderBy: 'startTime' }
               );
 
@@ -316,13 +322,15 @@ export async function createEvent(
 
             const accountEmail = ga?.emailAddress;
 
-            // Get primary calendar ID
-            let calendarId = null;
-            try {
-              const calendars = await msgraph.getCalendars(accountEmail);
-              const primaryCal = calendars?.find(c => c.isDefaultCalendar) || calendars?.[0];
-              if (primaryCal?.id) calendarId = primaryCal.id;
-            } catch {}
+            // Get calendar ID (default to primary)
+            let calendarId = eventData.calendarId || null;
+            if (!calendarId) {
+              try {
+                const calendars = await msgraph.getCalendars(accountEmail);
+                const primaryCal = calendars?.find(c => c.isDefaultCalendar) || calendars?.[0];
+                if (primaryCal?.id) calendarId = primaryCal.id;
+              } catch {}
+            }
 
             if (!calendarId) {
               return { success: false, error: "Could not get calendar ID" };
@@ -367,6 +375,7 @@ export async function createEvent(
             }
 
             const accountEmail = ga?.emailAddress || 'primary';
+            const calendarId = eventData.calendarId || accountEmail;
 
             const gcalEvent = {
               summary: eventData.summary,
@@ -382,8 +391,8 @@ export async function createEvent(
             };
 
             try {
-              // Use _postAsync to POST to /events endpoint (not /events/import)
-              const url = 'https://www.googleapis.com/calendar/v3/calendars/' + encodeURIComponent(accountEmail) + '/events';
+              // Use _postAsync to POST to /events endpoint
+              const url = 'https://www.googleapis.com/calendar/v3/calendars/' + encodeURIComponent(calendarId) + '/events';
               const created = await gcal._postAsync(url, gcalEvent, {
                 calendarAccountEmail: accountEmail,
                 endpoint: 'gcal.events.insert'

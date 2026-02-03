@@ -44,6 +44,7 @@ import {
   type CreateEventInput,
   type UpdateEventInput,
 } from "./calendar";
+import { sendEmail } from "./send-api";
 
 const VERSION = "0.1.0";
 const CDP_PORT = 9333;
@@ -158,6 +159,7 @@ ${colors.bold}OPTIONS${colors.reset}
   --limit <number>   Number of results (default: 10, for inbox/search)
   --json             Output as JSON (for inbox/search/read)
   --date <date>      Date for calendar (YYYY-MM-DD or "today", "tomorrow")
+  --calendar <name>  Calendar name or ID (default: primary)
   --range <days>     Days to show for calendar (default: 1)
   --start <time>     Event start time (ISO datetime or natural: "2pm", "tomorrow 3pm")
   --end <time>       Event end time (ISO datetime, optional if --duration)
@@ -304,6 +306,7 @@ interface CliOptions {
   attachmentId: string; // specific attachment ID for single download
   messageId: string; // message ID for single attachment download
   // calendar options
+  calendarArg: string; // calendar name or ID
   calendarDate: string; // date for calendar listing (YYYY-MM-DD or "today", "tomorrow")
   calendarRange: number; // number of days to show
   allAccounts: boolean; // query all accounts for calendar
@@ -336,6 +339,7 @@ function parseArgs(args: string[]): CliOptions {
     outputPath: "",
     attachmentId: "",
     messageId: "",
+    calendarArg: "",
     calendarDate: "",
     calendarRange: 1,
     allAccounts: false,
@@ -425,6 +429,10 @@ function parseArgs(args: string[]): CliOptions {
           break;
         case "message":
           options.messageId = value;
+          i += 2;
+          break;
+        case "calendar":
+          options.calendarArg = value;
           i += 2;
           break;
         case "date":
@@ -591,7 +599,7 @@ async function cmdCompose(options: CliOptions, keepOpen = true) {
   // Add recipients
   for (const email of options.to) {
     info(`Adding recipient: ${email}`);
-    const added = await addRecipient(conn, email);
+    const added = await addRecipient(conn, email, undefined, draftKey);
     if (added) {
       success(`Added: ${email}`);
     } else {
@@ -602,7 +610,7 @@ async function cmdCompose(options: CliOptions, keepOpen = true) {
   // Set subject
   if (options.subject) {
     info(`Setting subject: ${options.subject}`);
-    await setSubject(conn, options.subject);
+    await setSubject(conn, options.subject, draftKey);
     success("Subject set");
   }
 
@@ -610,7 +618,7 @@ async function cmdCompose(options: CliOptions, keepOpen = true) {
   const bodyContent = options.html || options.body;
   if (bodyContent) {
     info("Setting body...");
-    await setBody(conn, textToHtml(bodyContent));
+    await setBody(conn, textToHtml(bodyContent), draftKey);
     success("Body set");
   }
 
@@ -645,7 +653,7 @@ async function cmdDraft(options: CliOptions) {
   }
 
   info("Saving draft...");
-  await saveDraft(conn);
+  await saveDraft(conn, state.id);
   success("Draft saved");
 
   await disconnect(conn);
@@ -662,38 +670,26 @@ async function cmdSend(options: CliOptions) {
     process.exit(1);
   }
 
-  info("Opening compose window...");
-  const draftKey = await openCompose(conn);
-  if (!draftKey) {
-    error("Failed to open compose window");
-    await disconnect(conn);
-    process.exit(1);
-  }
+  // Use HTML body if provided, otherwise convert plain text to HTML
+  const bodyContent = options.html || textToHtml(options.body);
 
-  // Add recipients
-  for (const email of options.to) {
-    await addRecipient(conn, email);
-  }
-
-  // Set subject
-  if (options.subject) {
-    await setSubject(conn, options.subject);
-  }
-
-  // Set body
-  const bodyContent = options.html || options.body;
-  if (bodyContent) {
-    await setBody(conn, textToHtml(bodyContent));
-  }
-
-  // Send the email
   info("Sending email...");
-  const sent = await sendDraft(conn);
+  const result = await sendEmail(conn, {
+    to: options.to,
+    cc: options.cc.length > 0 ? options.cc : undefined,
+    bcc: options.bcc.length > 0 ? options.bcc : undefined,
+    subject: options.subject || "",
+    body: bodyContent,
+    isHtml: true,
+  });
 
-  if (sent) {
+  if (result.success) {
     success("Email sent!");
+    if (result.messageId) {
+      log(`  ${colors.dim}Message ID: ${result.messageId}${colors.reset}`);
+    }
   } else {
-    error("Failed to send email");
+    error(`Failed to send: ${result.error}`);
   }
 
   await disconnect(conn);
@@ -1717,6 +1713,57 @@ function formatCalendarEvent(event: CalendarEvent & { account?: string }, showAc
   return lines.join("\n");
 }
 
+/**
+ * Resolve a calendar name or ID to a calendar ID
+ */
+async function resolveCalendarId(conn: SuperhumanConnection, arg: string): Promise<string | null> {
+  if (!arg) return null;
+
+  const result = await conn.Runtime.evaluate({
+    expression: `
+      (async () => {
+        try {
+          const arg = ${JSON.stringify(arg)};
+          const ga = window.GoogleAccount;
+          const di = ga?.di;
+          const accountEmail = ga?.emailAddress;
+          const isMicrosoft = di.get?.('isMicrosoft');
+
+          if (isMicrosoft) {
+            const msgraph = di.get?.('msgraph');
+            const calendars = await msgraph.getCalendars(accountEmail);
+            const found = calendars?.find(c => 
+              c.id === arg || 
+              c.name?.toLowerCase() === arg.toLowerCase() ||
+              c.displayName?.toLowerCase() === arg.toLowerCase()
+            );
+            return found?.id || arg;
+          } else {
+            const gcal = di.get?.('gcal');
+            const list = await gcal._getAsync(
+              'https://www.googleapis.com/calendar/v3/users/me/calendarList',
+              {},
+              { calendarAccountEmail: accountEmail, endpoint: 'gcal.calendarList.list', allowCachedResponses: true }
+            );
+            const found = list?.items?.find(c => 
+              c.id === arg || 
+              c.summary?.toLowerCase() === arg.toLowerCase() ||
+              c.summaryOverride?.toLowerCase() === arg.toLowerCase()
+            );
+            return found?.id || arg;
+          }
+        } catch (e) {
+          return null;
+        }
+      })()
+    `,
+    returnByValue: true,
+    awaitPromise: true
+  });
+
+  return result.result.value as string | null;
+}
+
 async function cmdCalendar(options: CliOptions) {
   const conn = await checkConnection(options.port);
   if (!conn) {
@@ -1737,6 +1784,9 @@ async function cmdCalendar(options: CliOptions) {
   timeMax = new Date(timeMin);
   timeMax.setDate(timeMax.getDate() + options.calendarRange);
   timeMax.setHours(23, 59, 59, 999);
+
+  // Resolve calendar ID if provided
+  const calendarId = await resolveCalendarId(conn, options.calendarArg);
 
   let allEvents: CalendarEvent[] = [];
 
@@ -1764,7 +1814,7 @@ async function cmdCalendar(options: CliOptions) {
       await switchAccount(conn, originalAccount);
     }
   } else {
-    allEvents = await listEvents(conn, { timeMin, timeMax });
+    allEvents = await listEvents(conn, { timeMin, timeMax, calendarId: calendarId || undefined });
   }
 
   // Sort all events by start time
@@ -1817,6 +1867,9 @@ async function cmdCalendarCreate(options: CliOptions) {
   let startTime: Date;
   let endTime: Date;
 
+  // Resolve calendar ID if provided
+  const calendarId = await resolveCalendarId(conn, options.calendarArg);
+
   // Determine if this is an all-day event
   const isAllDay = options.calendarDate && !options.eventStart;
 
@@ -1841,6 +1894,7 @@ async function cmdCalendarCreate(options: CliOptions) {
   }
 
   const eventInput: CreateEventInput = {
+    calendarId: calendarId || undefined,
     summary: title,
     description: options.body || undefined,
     start: isAllDay

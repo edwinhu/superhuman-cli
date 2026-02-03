@@ -190,7 +190,8 @@ export async function getDraftState(
  */
 async function withDraftController<T>(
   conn: SuperhumanConnection,
-  code: string
+  code: string,
+  draftId?: string
 ): Promise<T | null> {
   const { Runtime } = conn;
 
@@ -200,7 +201,14 @@ async function withDraftController<T>(
         try {
           const cfc = window.ViewState?._composeFormController;
           if (!cfc) return null;
-          const draftKey = Object.keys(cfc).find(k => k.startsWith('draft'));
+          
+          const draftId = ${JSON.stringify(draftId || null)};
+          let draftKey = draftId;
+          
+          if (!draftKey) {
+            draftKey = Object.keys(cfc).find(k => k.startsWith('draft'));
+          }
+          
           if (!draftKey) return null;
           const ctrl = cfc[draftKey];
           if (!ctrl) return null;
@@ -221,7 +229,8 @@ async function withDraftController<T>(
  */
 export async function setSubject(
   conn: SuperhumanConnection,
-  subject: string
+  subject: string,
+  draftId?: string
 ): Promise<boolean> {
   const result = await withDraftController<boolean>(
     conn,
@@ -229,7 +238,8 @@ export async function setSubject(
       if (typeof ctrl.setSubject !== 'function') return false;
       ctrl.setSubject(${JSON.stringify(subject)});
       return true;
-    `
+    `,
+    draftId
   );
   return result === true;
 }
@@ -240,7 +250,8 @@ export async function setSubject(
 export async function addRecipient(
   conn: SuperhumanConnection,
   email: string,
-  name?: string
+  name?: string,
+  draftId?: string
 ): Promise<boolean> {
   const result = await withDraftController<boolean>(
     conn,
@@ -263,7 +274,8 @@ export async function addRecipient(
 
       ctrl._updateDraft({ to: [...existingTo, newRecipient] });
       return true;
-    `
+    `,
+    draftId
   );
   return result === true;
 }
@@ -274,7 +286,8 @@ export async function addRecipient(
 export async function addCcRecipient(
   conn: SuperhumanConnection,
   email: string,
-  name?: string
+  name?: string,
+  draftId?: string
 ): Promise<boolean> {
   const result = await withDraftController<boolean>(
     conn,
@@ -297,7 +310,8 @@ export async function addCcRecipient(
 
       ctrl._updateDraft({ cc: [...existingCc, newRecipient] });
       return true;
-    `
+    `,
+    draftId
   );
   return result === true;
 }
@@ -307,7 +321,8 @@ export async function addCcRecipient(
  */
 export async function setBody(
   conn: SuperhumanConnection,
-  html: string
+  html: string,
+  draftId?: string
 ): Promise<boolean> {
   const result = await withDraftController<boolean>(
     conn,
@@ -315,7 +330,8 @@ export async function setBody(
       if (typeof ctrl._updateDraft !== 'function') return false;
       ctrl._updateDraft({ body: ${JSON.stringify(html)} });
       return true;
-    `
+    `,
+    draftId
   );
   return result === true;
 }
@@ -323,14 +339,15 @@ export async function setBody(
 /**
  * Save the current draft
  */
-export async function saveDraft(conn: SuperhumanConnection): Promise<boolean> {
+export async function saveDraft(conn: SuperhumanConnection, draftId?: string): Promise<boolean> {
   const result = await withDraftController<boolean>(
     conn,
     `
       if (typeof ctrl._saveDraftAsync !== 'function') return false;
       ctrl._saveDraftAsync();
       return true;
-    `
+    `,
+    draftId
   );
 
   await new Promise((r) => setTimeout(r, 2000));
@@ -354,14 +371,15 @@ export async function disconnect(conn: SuperhumanConnection): Promise<void> {
 /**
  * Send the current draft
  */
-export async function sendDraft(conn: SuperhumanConnection): Promise<boolean> {
+export async function sendDraft(conn: SuperhumanConnection, draftId?: string): Promise<boolean> {
   const result = await withDraftController<boolean>(
     conn,
     `
       if (typeof ctrl._sendDraft !== 'function') return false;
       ctrl._sendDraft();
       return true;
-    `
+    `,
+    draftId
   );
   return result === true;
 }
