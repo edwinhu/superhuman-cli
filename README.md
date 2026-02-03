@@ -68,7 +68,29 @@ bun src/cli.ts reply-all <thread-id> --body "Thanks everyone!"
 
 # Forward
 bun src/cli.ts forward <thread-id> --to colleague@example.com --body "FYI"
+
+# Update a draft
+bun src/cli.ts draft --update <draft-id> --body "Updated content"
+
+# Delete drafts
+bun src/cli.ts delete-draft <draft-id>
+bun src/cli.ts delete-draft <draft-id1> <draft-id2>
+
+# Send a draft by ID
+bun src/cli.ts send --draft <draft-id>
 ```
+
+#### Drafts Limitation
+
+Drafts are created via **native Gmail/Outlook APIs**, not Superhuman's proprietary draft system. This means:
+
+| Where | Visible? |
+|-------|----------|
+| Native Gmail/Outlook web | ✓ Yes |
+| Native mobile apps | ✓ Yes |
+| Superhuman UI | ✗ No |
+
+This is acceptable for CLI workflows where you iterate on drafts with LLMs and send via `--send` flag. If you need to edit in Superhuman UI, open the draft in native Gmail/Outlook first.
 
 ### Managing Threads
 
@@ -136,6 +158,8 @@ bun src/cli.ts download --attachment <attachment-id> --message <message-id> --ou
 | `--body <text>` | Email body (plain text, converted to HTML) |
 | `--html <text>` | Email body as raw HTML |
 | `--send` | Send immediately instead of saving draft (for reply/reply-all/forward) |
+| `--update <id>` | Draft ID to update (for draft command) |
+| `--draft <id>` | Draft ID to send (for send command) |
 | `--label <id>` | Label ID (for add-label/remove-label) |
 | `--until <time>` | Snooze until time: preset or ISO datetime |
 | `--output <path>` | Output path for downloads |
