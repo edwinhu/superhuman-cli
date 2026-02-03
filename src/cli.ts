@@ -44,7 +44,7 @@ import {
   type CreateEventInput,
   type UpdateEventInput,
 } from "./calendar";
-import { sendEmail, createDraft } from "./send-api";
+import { sendEmail, createDraft, updateDraft, sendDraftById } from "./send-api";
 
 const VERSION = "0.1.0";
 const CDP_PORT = 9333;
@@ -138,8 +138,8 @@ ${colors.bold}COMMANDS${colors.reset}
   ${colors.cyan}calendar-delete${colors.reset} Delete a calendar event
   ${colors.cyan}calendar-free${colors.reset} Check free/busy availability
   ${colors.cyan}compose${colors.reset}    Open compose window and fill in email (keeps window open)
-  ${colors.cyan}draft${colors.reset}      Create and save a draft
-  ${colors.cyan}send${colors.reset}       Compose and send an email immediately
+  ${colors.cyan}draft${colors.reset}      Create or update a draft
+  ${colors.cyan}send${colors.reset}       Compose and send an email, or send an existing draft
   ${colors.cyan}status${colors.reset}     Check Superhuman connection status
   ${colors.cyan}help${colors.reset}       Show this help message
 
@@ -151,6 +151,8 @@ ${colors.bold}OPTIONS${colors.reset}
   --body <text>      Email body (plain text, converted to HTML)
   --html <text>      Email body as HTML
   --send             Send immediately instead of saving as draft (for reply/reply-all/forward)
+  --update <id>      Draft ID to update (for draft command)
+  --draft <id>       Draft ID to send (for send command)
   --label <id>       Label ID to add or remove (for add-label/remove-label)
   --until <time>     Snooze until time: preset (tomorrow, next-week, weekend, evening) or ISO datetime
   --output <path>    Output directory or file path (for download)
@@ -266,11 +268,18 @@ ${colors.bold}EXAMPLES${colors.reset}
   ${colors.dim}# Create a draft${colors.reset}
   superhuman draft --to user@example.com --subject "Hello" --body "Hi there!"
 
+  ${colors.dim}# Update an existing draft${colors.reset}
+  superhuman draft --update <draft-id> --body "Updated content"
+  superhuman draft --update <draft-id> --subject "New Subject" --to new@example.com
+
   ${colors.dim}# Open compose window with pre-filled content${colors.reset}
   superhuman compose --to user@example.com --subject "Meeting"
 
   ${colors.dim}# Send an email immediately${colors.reset}
   superhuman send --to user@example.com --subject "Quick note" --body "FYI"
+
+  ${colors.dim}# Send an existing draft by ID${colors.reset}
+  superhuman send --draft <draft-id>
 
 ${colors.bold}REQUIREMENTS${colors.reset}
   Superhuman must be running with remote debugging enabled:
@@ -297,6 +306,10 @@ interface CliOptions {
   accountArg: string; // index or email for account command
   // reply/forward options
   send: boolean; // send immediately instead of saving as draft
+  // draft update option
+  updateDraftId: string; // draft ID to update (for draft command)
+  // send draft option
+  sendDraftId: string; // draft ID to send (for send command)
   // label options
   labelId: string; // label ID for add-label/remove-label
   // snooze options
@@ -334,6 +347,8 @@ function parseArgs(args: string[]): CliOptions {
     json: false,
     accountArg: "",
     send: false,
+    updateDraftId: "",
+    sendDraftId: "",
     labelId: "",
     snoozeUntil: "",
     outputPath: "",
@@ -410,6 +425,14 @@ function parseArgs(args: string[]): CliOptions {
         case "send":
           options.send = true;
           i += 1;
+          break;
+        case "update":
+          options.updateDraftId = value;
+          i += 2;
+          break;
+        case "draft":
+          options.sendDraftId = value;
+          i += 2;
           break;
         case "label":
           options.labelId = value;
@@ -640,6 +663,40 @@ async function cmdCompose(options: CliOptions, keepOpen = true) {
 }
 
 async function cmdDraft(options: CliOptions) {
+  // If updating an existing draft
+  if (options.updateDraftId) {
+    const conn = await checkConnection(options.port);
+    if (!conn) {
+      process.exit(1);
+    }
+
+    // Use HTML body if provided, otherwise convert plain text to HTML (if body provided)
+    const bodyContent = options.html || (options.body ? textToHtml(options.body) : undefined);
+
+    info(`Updating draft ${options.updateDraftId}...`);
+    const result = await updateDraft(conn, options.updateDraftId, {
+      to: options.to.length > 0 ? options.to : undefined,
+      cc: options.cc.length > 0 ? options.cc : undefined,
+      bcc: options.bcc.length > 0 ? options.bcc : undefined,
+      subject: options.subject || undefined,
+      body: bodyContent,
+      isHtml: true,
+    });
+
+    if (result.success) {
+      success("Draft updated!");
+      if (result.draftId) {
+        log(`  ${colors.dim}Draft ID: ${result.draftId}${colors.reset}`);
+      }
+    } else {
+      error(`Failed to update draft: ${result.error}`);
+    }
+
+    await disconnect(conn);
+    return;
+  }
+
+  // Creating a new draft - requires at least one recipient
   if (options.to.length === 0) {
     error("At least one recipient is required (--to)");
     process.exit(1);
@@ -676,6 +733,30 @@ async function cmdDraft(options: CliOptions) {
 }
 
 async function cmdSend(options: CliOptions) {
+  // If sending an existing draft by ID
+  if (options.sendDraftId) {
+    const conn = await checkConnection(options.port);
+    if (!conn) {
+      process.exit(1);
+    }
+
+    info(`Sending draft ${options.sendDraftId}...`);
+    const result = await sendDraftById(conn, options.sendDraftId);
+
+    if (result.success) {
+      success("Draft sent!");
+      if (result.messageId) {
+        log(`  ${colors.dim}Message ID: ${result.messageId}${colors.reset}`);
+      }
+    } else {
+      error(`Failed to send draft: ${result.error}`);
+    }
+
+    await disconnect(conn);
+    return;
+  }
+
+  // Composing and sending a new email - requires at least one recipient
   if (options.to.length === 0) {
     error("At least one recipient is required (--to)");
     process.exit(1);

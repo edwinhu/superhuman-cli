@@ -895,6 +895,463 @@ export async function sendReplyMsgraph(
 }
 
 /**
+ * Options for updating a draft
+ */
+export interface UpdateDraftOptions {
+  /** Recipient email addresses (optional - keep existing if not provided) */
+  to?: string[];
+  /** CC recipients (optional) */
+  cc?: string[];
+  /** BCC recipients (optional) */
+  bcc?: string[];
+  /** Email subject (optional) */
+  subject?: string;
+  /** Email body (plain text or HTML) */
+  body?: string;
+  /** Whether the body is HTML (default: true) */
+  isHtml?: boolean;
+}
+
+/**
+ * Update an existing draft via Gmail API
+ *
+ * Uses gmail._putAsync() to update a draft through Gmail's REST API.
+ * Rebuilds the RFC 2822 formatted email with updated content.
+ *
+ * @param conn - The Superhuman connection
+ * @param draftId - The draft ID to update
+ * @param options - Updated email options
+ * @returns Result with draftId on success
+ */
+export async function updateDraftGmail(
+  conn: SuperhumanConnection,
+  draftId: string,
+  options: UpdateDraftOptions
+): Promise<DraftResult> {
+  const { Runtime } = conn;
+
+  const result = await Runtime.evaluate({
+    expression: `
+      (async () => {
+        try {
+          const gmail = window.GoogleAccount?.di?.get?.('gmail');
+          if (!gmail) {
+            return { success: false, error: 'Gmail service not found' };
+          }
+
+          const draftId = ${JSON.stringify(draftId)};
+
+          // First, get the existing draft to preserve fields not being updated
+          const existingDraft = await gmail._getAsync(
+            'https://content.googleapis.com/gmail/v1/users/me/drafts/' + draftId,
+            { format: 'full' },
+            { endpoint: 'gmail.users.drafts.get', cost: 5 }
+          );
+
+          if (!existingDraft?.message) {
+            return { success: false, error: 'Draft not found' };
+          }
+
+          // Get sender email from profile
+          const profile = await gmail.getProfile();
+          const fromEmail = profile?.emailAddress;
+          if (!fromEmail) {
+            return { success: false, error: 'Could not get sender email' };
+          }
+
+          // Extract existing headers from the draft
+          const existingHeaders = existingDraft.message.payload?.headers || [];
+          const getHeader = (name) => existingHeaders.find(h => h.name.toLowerCase() === name.toLowerCase())?.value || '';
+
+          // Parse existing recipients
+          const parseRecipients = (headerVal) => {
+            if (!headerVal) return [];
+            return headerVal.split(',').map(s => s.trim()).filter(Boolean);
+          };
+
+          // Use provided options or fall back to existing values
+          const to = ${JSON.stringify(options.to)} || parseRecipients(getHeader('To'));
+          const cc = ${JSON.stringify(options.cc)} || parseRecipients(getHeader('Cc'));
+          const bcc = ${JSON.stringify(options.bcc)} || parseRecipients(getHeader('Bcc'));
+          const subject = ${JSON.stringify(options.subject)} || getHeader('Subject');
+          const body = ${JSON.stringify(options.body)};
+          const isHtml = ${JSON.stringify(options.isHtml ?? true)};
+
+          // If no body provided, try to extract existing body
+          let finalBody = body;
+          if (!finalBody && existingDraft.message.payload) {
+            // Get body from payload
+            const part = existingDraft.message.payload.parts?.find(p =>
+              p.mimeType === 'text/html' || p.mimeType === 'text/plain'
+            ) || existingDraft.message.payload;
+            if (part?.body?.data) {
+              finalBody = atob(part.body.data.replace(/-/g, '+').replace(/_/g, '/'));
+            }
+          }
+          finalBody = finalBody || '';
+
+          // Build RFC 2822 email headers
+          const headers = [
+            'MIME-Version: 1.0',
+            'From: ' + fromEmail,
+            'To: ' + to.join(', ')
+          ];
+
+          if (cc.length > 0) {
+            headers.push('Cc: ' + cc.join(', '));
+          }
+
+          if (bcc.length > 0) {
+            headers.push('Bcc: ' + bcc.join(', '));
+          }
+
+          headers.push('Subject: ' + subject);
+
+          if (isHtml) {
+            headers.push('Content-Type: text/html; charset=utf-8');
+          } else {
+            headers.push('Content-Type: text/plain; charset=utf-8');
+          }
+
+          // Preserve threading headers if they exist
+          const inReplyTo = getHeader('In-Reply-To');
+          const references = getHeader('References');
+          if (inReplyTo) {
+            headers.push('In-Reply-To: ' + inReplyTo);
+          }
+          if (references) {
+            headers.push('References: ' + references);
+          }
+
+          // Add empty line separator and body
+          headers.push('');
+          headers.push(finalBody);
+
+          const rawEmail = headers.join('\\r\\n');
+
+          // Base64url encode the email (handle UTF-8 properly)
+          const base64Email = btoa(unescape(encodeURIComponent(rawEmail)))
+            .replace(/\\+/g, '-')
+            .replace(/\\//g, '_')
+            .replace(/=+$/, '');
+
+          // Build update payload
+          const payload = {
+            message: { raw: base64Email }
+          };
+
+          // Preserve threadId if it exists
+          if (existingDraft.message.threadId) {
+            payload.message.threadId = existingDraft.message.threadId;
+          }
+
+          // Update draft via Gmail API (PUT request)
+          const response = await gmail._putAsync(
+            'https://content.googleapis.com/gmail/v1/users/me/drafts/' + draftId,
+            payload,
+            { endpoint: 'gmail.users.drafts.update', cost: 100 }
+          );
+
+          return {
+            success: true,
+            draftId: response?.id,
+            messageId: response?.message?.id
+          };
+        } catch (e) {
+          return { success: false, error: e.message };
+        }
+      })()
+    `,
+    returnByValue: true,
+    awaitPromise: true,
+  });
+
+  return result.result.value as DraftResult;
+}
+
+/**
+ * Update an existing draft via Microsoft Graph API
+ *
+ * Uses PATCH /me/messages/{id} to update a draft.
+ * Only updates the fields that are provided.
+ *
+ * @param conn - The Superhuman connection
+ * @param draftId - The draft/message ID to update
+ * @param options - Updated email options
+ * @returns Result with draftId on success
+ */
+export async function updateDraftMsgraph(
+  conn: SuperhumanConnection,
+  draftId: string,
+  options: UpdateDraftOptions
+): Promise<DraftResult> {
+  const { Runtime } = conn;
+
+  const result = await Runtime.evaluate({
+    expression: `
+      (async () => {
+        try {
+          const ga = window.GoogleAccount;
+          const di = ga?.di;
+          const msgraph = di?.get?.('msgraph');
+
+          if (!msgraph) {
+            return { success: false, error: 'Microsoft Graph service not found' };
+          }
+
+          if (!msgraph._fetchJSONWithRetry) {
+            return { success: false, error: 'msgraph._fetchJSONWithRetry not found' };
+          }
+
+          const draftId = ${JSON.stringify(draftId)};
+          const to = ${JSON.stringify(options.to)};
+          const cc = ${JSON.stringify(options.cc)};
+          const bcc = ${JSON.stringify(options.bcc)};
+          const subject = ${JSON.stringify(options.subject)};
+          const body = ${JSON.stringify(options.body)};
+          const isHtml = ${JSON.stringify(options.isHtml ?? true)};
+
+          // Build update payload with only provided fields
+          const updates = {};
+
+          if (subject !== null && subject !== undefined) {
+            updates.subject = subject;
+          }
+
+          if (body !== null && body !== undefined) {
+            updates.body = {
+              contentType: isHtml ? 'HTML' : 'Text',
+              content: body
+            };
+          }
+
+          if (to && to.length > 0) {
+            updates.toRecipients = to.map(email => ({
+              emailAddress: { address: email }
+            }));
+          }
+
+          if (cc && cc.length > 0) {
+            updates.ccRecipients = cc.map(email => ({
+              emailAddress: { address: email }
+            }));
+          }
+
+          if (bcc && bcc.length > 0) {
+            updates.bccRecipients = bcc.map(email => ({
+              emailAddress: { address: email }
+            }));
+          }
+
+          // Build the full URL
+          let url;
+          if (typeof msgraph._fullURL === 'function') {
+            url = msgraph._fullURL('/v1.0/me/messages/' + draftId, {});
+          } else {
+            url = 'https://graph.microsoft.com/v1.0/me/messages/' + draftId;
+          }
+
+          // Update draft via PATCH request
+          const response = await msgraph._fetchJSONWithRetry(url, {
+            method: 'PATCH',
+            body: JSON.stringify(updates),
+            headers: { 'Content-Type': 'application/json' },
+            endpoint: 'mail.update'
+          });
+
+          if (response?.id) {
+            return {
+              success: true,
+              draftId: response.id,
+              messageId: response.id
+            };
+          } else {
+            return { success: false, error: 'No draft ID returned' };
+          }
+        } catch (e) {
+          return { success: false, error: e.message };
+        }
+      })()
+    `,
+    returnByValue: true,
+    awaitPromise: true,
+  });
+
+  return result.result.value as DraftResult;
+}
+
+/**
+ * Update a draft using the appropriate provider (Gmail or Microsoft Graph)
+ *
+ * Automatically detects the account type and routes to the correct implementation.
+ *
+ * @param conn - The Superhuman connection
+ * @param draftId - The draft ID to update
+ * @param options - Updated email options
+ * @returns Result with draftId on success
+ */
+export async function updateDraft(
+  conn: SuperhumanConnection,
+  draftId: string,
+  options: UpdateDraftOptions
+): Promise<DraftResult> {
+  // Detect account type
+  const accountInfo = await getAccountInfo(conn);
+
+  if (!accountInfo) {
+    return { success: false, error: "Could not detect account type" };
+  }
+
+  if (accountInfo.isMicrosoft) {
+    return updateDraftMsgraph(conn, draftId, options);
+  } else {
+    return updateDraftGmail(conn, draftId, options);
+  }
+}
+
+/**
+ * Send an existing draft via Gmail API
+ *
+ * Uses POST /gmail/v1/users/me/drafts/{id}/send to send a draft.
+ *
+ * @param conn - The Superhuman connection
+ * @param draftId - The draft ID to send
+ * @returns Result with messageId on success
+ */
+export async function sendDraftGmail(
+  conn: SuperhumanConnection,
+  draftId: string
+): Promise<SendResult> {
+  const { Runtime } = conn;
+
+  const result = await Runtime.evaluate({
+    expression: `
+      (async () => {
+        try {
+          const gmail = window.GoogleAccount?.di?.get?.('gmail');
+          if (!gmail) {
+            return { success: false, error: 'Gmail service not found' };
+          }
+
+          const draftId = ${JSON.stringify(draftId)};
+
+          // Send draft via Gmail API
+          const response = await gmail._postAsync(
+            'https://content.googleapis.com/gmail/v1/users/me/drafts/' + draftId + '/send',
+            {},
+            { endpoint: 'gmail.users.drafts.send', cost: 100 }
+          );
+
+          return {
+            success: true,
+            messageId: response?.id,
+            threadId: response?.threadId
+          };
+        } catch (e) {
+          return { success: false, error: e.message };
+        }
+      })()
+    `,
+    returnByValue: true,
+    awaitPromise: true,
+  });
+
+  return result.result.value as SendResult;
+}
+
+/**
+ * Send an existing draft via Microsoft Graph API
+ *
+ * Uses POST /me/messages/{id}/send to send a draft.
+ *
+ * @param conn - The Superhuman connection
+ * @param draftId - The draft/message ID to send
+ * @returns Result with messageId on success
+ */
+export async function sendDraftMsgraph(
+  conn: SuperhumanConnection,
+  draftId: string
+): Promise<SendResult> {
+  const { Runtime } = conn;
+
+  const result = await Runtime.evaluate({
+    expression: `
+      (async () => {
+        try {
+          const ga = window.GoogleAccount;
+          const di = ga?.di;
+          const msgraph = di?.get?.('msgraph');
+
+          if (!msgraph) {
+            return { success: false, error: 'Microsoft Graph service not found' };
+          }
+
+          const draftId = ${JSON.stringify(draftId)};
+
+          // Build the full URL
+          let url;
+          if (typeof msgraph._fullURL === 'function') {
+            url = msgraph._fullURL('/v1.0/me/messages/' + draftId + '/send', {});
+          } else {
+            url = 'https://graph.microsoft.com/v1.0/me/messages/' + draftId + '/send';
+          }
+
+          // Send draft - returns 202 Accepted with no body
+          const response = await msgraph._fetchWithRetry(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            endpoint: 'mail.send'
+          });
+
+          if (response.ok || response.status === 202) {
+            return {
+              success: true,
+              messageId: draftId
+            };
+          } else {
+            const errorText = await response.text().catch(() => 'Unknown error');
+            return { success: false, error: 'HTTP ' + response.status + ': ' + errorText };
+          }
+        } catch (e) {
+          return { success: false, error: e.message };
+        }
+      })()
+    `,
+    returnByValue: true,
+    awaitPromise: true,
+  });
+
+  return result.result.value as SendResult;
+}
+
+/**
+ * Send an existing draft by ID using the appropriate provider
+ *
+ * Automatically detects the account type and routes to the correct implementation.
+ *
+ * @param conn - The Superhuman connection
+ * @param draftId - The draft ID to send
+ * @returns Result with messageId on success
+ */
+export async function sendDraftById(
+  conn: SuperhumanConnection,
+  draftId: string
+): Promise<SendResult> {
+  // Detect account type
+  const accountInfo = await getAccountInfo(conn);
+
+  if (!accountInfo) {
+    return { success: false, error: "Could not detect account type" };
+  }
+
+  if (accountInfo.isMicrosoft) {
+    return sendDraftMsgraph(conn, draftId);
+  } else {
+    return sendDraftGmail(conn, draftId);
+  }
+}
+
+/**
  * Send a reply to a thread using the direct API
  *
  * Convenience function that gets thread info and sends a properly threaded reply.
