@@ -779,24 +779,35 @@ export async function sendReplyMsgraph(
 
           const model = thread._threadModel;
 
-          // Get the last message ID (Microsoft Graph ID, not RFC 2822 Message-ID)
-          // messageIds array contains the Graph API message IDs
-          const messageIds = model.messageIds || [];
-          const lastMessageId = messageIds[messageIds.length - 1];
+          // Get the last valid message ID (Microsoft Graph ID, not RFC 2822 Message-ID)
+          // Filter out draft IDs which start with "draft" - they're invalid for createReply
+          const messageIds = (model.messageIds || []).filter(id =>
+            id && typeof id === 'string' && !id.startsWith('draft')
+          );
 
-          if (!lastMessageId) {
-            // Fallback: try to get from messages array
-            const messages = model.messages || [];
-            const lastMsg = messages[messages.length - 1];
-            if (!lastMsg?.id) {
-              return { success: false, error: 'Could not find last message ID' };
-            }
-            // Note: lastMsg.id might be the same as messageIds entry
+          // Also check messages array for valid IDs
+          const messages = model.messages || [];
+          let messageIdToReply = null;
+
+          // First try messageIds array (last valid one)
+          if (messageIds.length > 0) {
+            messageIdToReply = messageIds[messageIds.length - 1];
           }
 
-          const messageIdToReply = lastMessageId || model.messages?.[model.messages.length - 1]?.id;
+          // Fallback: iterate messages in reverse to find a valid ID
           if (!messageIdToReply) {
-            return { success: false, error: 'Could not determine message ID for reply' };
+            for (let i = messages.length - 1; i >= 0; i--) {
+              const msg = messages[i];
+              const msgId = msg?.id;
+              if (msgId && typeof msgId === 'string' && !msgId.startsWith('draft')) {
+                messageIdToReply = msgId;
+                break;
+              }
+            }
+          }
+
+          if (!messageIdToReply) {
+            return { success: false, error: 'Could not find valid message ID for reply (all messages are drafts?)' };
           }
 
           // Step 1: Create reply draft using createReply or createReplyAll endpoint
@@ -892,6 +903,288 @@ export async function sendReplyMsgraph(
   });
 
   return result.result.value as SendResult;
+}
+
+/**
+ * Create a reply draft via Microsoft Graph using the createReply endpoint
+ *
+ * This uses the proper Microsoft Graph reply flow (without sending):
+ * 1. POST /me/messages/{messageId}/createReply (or createReplyAll) to create a reply draft
+ * 2. PATCH /me/messages/{draftId} to update the body
+ *
+ * The draft will appear in the native Outlook Drafts folder.
+ *
+ * @param conn - The Superhuman connection
+ * @param threadId - The thread ID to reply to
+ * @param body - The reply body
+ * @param options - Additional options (replyAll, cc, bcc, isHtml)
+ * @returns Result with draftId on success
+ */
+export async function createReplyDraftMsgraph(
+  conn: SuperhumanConnection,
+  threadId: string,
+  body: string,
+  options?: {
+    replyAll?: boolean;
+    cc?: string[];
+    bcc?: string[];
+    isHtml?: boolean;
+  }
+): Promise<DraftResult> {
+  const { Runtime } = conn;
+
+  const result = await Runtime.evaluate({
+    expression: `
+      (async () => {
+        try {
+          const threadId = ${JSON.stringify(threadId)};
+          const body = ${JSON.stringify(body)};
+          const replyAll = ${JSON.stringify(options?.replyAll ?? false)};
+          const cc = ${JSON.stringify(options?.cc || [])};
+          const bcc = ${JSON.stringify(options?.bcc || [])};
+          const isHtml = ${JSON.stringify(options?.isHtml ?? true)};
+
+          const ga = window.GoogleAccount;
+          const di = ga?.di;
+          const msgraph = di?.get?.('msgraph');
+
+          if (!msgraph) {
+            return { success: false, error: 'Microsoft Graph service not found' };
+          }
+
+          if (!msgraph._fetchJSONWithRetry) {
+            return { success: false, error: 'msgraph._fetchJSONWithRetry not found' };
+          }
+
+          // Get the thread from identity map to find the last message ID
+          const thread = ga?.threads?.identityMap?.get?.(threadId);
+          if (!thread?._threadModel) {
+            return { success: false, error: 'Thread not found' };
+          }
+
+          const model = thread._threadModel;
+
+          // Get the last valid message ID (Microsoft Graph ID, not RFC 2822 Message-ID)
+          // Filter out draft IDs which start with "draft" - they're invalid for createReply
+          const messageIds = (model.messageIds || []).filter(id =>
+            id && typeof id === 'string' && !id.startsWith('draft')
+          );
+
+          // Also check messages array for valid IDs
+          const messages = model.messages || [];
+          let messageIdToReply = null;
+
+          // First try messageIds array (last valid one)
+          if (messageIds.length > 0) {
+            messageIdToReply = messageIds[messageIds.length - 1];
+          }
+
+          // Fallback: iterate messages in reverse to find a valid ID
+          if (!messageIdToReply) {
+            for (let i = messages.length - 1; i >= 0; i--) {
+              const msg = messages[i];
+              const msgId = msg?.id;
+              if (msgId && typeof msgId === 'string' && !msgId.startsWith('draft')) {
+                messageIdToReply = msgId;
+                break;
+              }
+            }
+          }
+
+          if (!messageIdToReply) {
+            return { success: false, error: 'Could not find valid message ID for reply (all messages are drafts?)' };
+          }
+
+          // Step 1: Create reply draft using createReply or createReplyAll endpoint
+          const createEndpoint = replyAll ? 'createReplyAll' : 'createReply';
+          let createUrl;
+          if (typeof msgraph._fullURL === 'function') {
+            createUrl = msgraph._fullURL('/v1.0/me/messages/' + messageIdToReply + '/' + createEndpoint, {});
+          } else {
+            createUrl = 'https://graph.microsoft.com/v1.0/me/messages/' + messageIdToReply + '/' + createEndpoint;
+          }
+
+          const draftResponse = await msgraph._fetchJSONWithRetry(createUrl, {
+            method: 'POST',
+            body: JSON.stringify({}),
+            headers: { 'Content-Type': 'application/json' },
+            endpoint: 'mail.' + createEndpoint
+          });
+
+          if (!draftResponse?.id) {
+            return { success: false, error: 'Failed to create reply draft' };
+          }
+
+          const draftId = draftResponse.id;
+
+          // Step 2: Update the draft with our body (and any additional recipients)
+          let patchUrl;
+          if (typeof msgraph._fullURL === 'function') {
+            patchUrl = msgraph._fullURL('/v1.0/me/messages/' + draftId, {});
+          } else {
+            patchUrl = 'https://graph.microsoft.com/v1.0/me/messages/' + draftId;
+          }
+
+          const patchBody = {
+            body: {
+              contentType: isHtml ? 'HTML' : 'Text',
+              content: body
+            }
+          };
+
+          // Add CC recipients if specified
+          if (cc.length > 0) {
+            patchBody.ccRecipients = cc.map(email => ({
+              emailAddress: { address: email }
+            }));
+          }
+
+          // Add BCC recipients if specified
+          if (bcc.length > 0) {
+            patchBody.bccRecipients = bcc.map(email => ({
+              emailAddress: { address: email }
+            }));
+          }
+
+          await msgraph._fetchJSONWithRetry(patchUrl, {
+            method: 'PATCH',
+            body: JSON.stringify(patchBody),
+            headers: { 'Content-Type': 'application/json' },
+            endpoint: 'mail.update'
+          });
+
+          // Don't send - just return the draft
+          return {
+            success: true,
+            draftId: draftId,
+            messageId: draftId
+          };
+        } catch (e) {
+          return { success: false, error: e.message };
+        }
+      })()
+    `,
+    returnByValue: true,
+    awaitPromise: true,
+  });
+
+  return result.result.value as DraftResult;
+}
+
+/**
+ * Create a reply draft via Gmail API
+ *
+ * Uses the existing createDraftGmail function with proper threading headers.
+ *
+ * @param conn - The Superhuman connection
+ * @param threadId - The thread ID to reply to
+ * @param body - The reply body
+ * @param options - Additional options (replyAll, cc, bcc, isHtml)
+ * @returns Result with draftId on success
+ */
+export async function createReplyDraftGmail(
+  conn: SuperhumanConnection,
+  threadId: string,
+  body: string,
+  options?: {
+    replyAll?: boolean;
+    cc?: string[];
+    bcc?: string[];
+    isHtml?: boolean;
+  }
+): Promise<DraftResult> {
+  // Get thread info for proper threading
+  const threadInfo = await getThreadInfoForReply(conn, threadId);
+  if (!threadInfo) {
+    return { success: false, error: "Could not get thread information" };
+  }
+
+  // Build recipient list
+  const to: string[] = [];
+  const cc: string[] = options?.cc || [];
+
+  if (options?.replyAll) {
+    // For reply-all, include original sender plus all To and Cc
+    if (threadInfo.replyTo) {
+      to.push(threadInfo.replyTo);
+    }
+    // Add other To recipients (excluding self)
+    for (const email of threadInfo.allTo) {
+      if (email !== threadInfo.myEmail && !to.includes(email)) {
+        to.push(email);
+      }
+    }
+    // Add original Cc recipients (excluding self)
+    for (const email of threadInfo.allCc) {
+      if (email !== threadInfo.myEmail && !cc.includes(email)) {
+        cc.push(email);
+      }
+    }
+  } else {
+    // For regular reply, just the sender
+    if (threadInfo.replyTo) {
+      to.push(threadInfo.replyTo);
+    }
+  }
+
+  if (to.length === 0) {
+    return { success: false, error: "No recipient found for reply" };
+  }
+
+  // Build subject with Re: prefix if needed
+  const subject = threadInfo.subject.startsWith("Re:")
+    ? threadInfo.subject
+    : `Re: ${threadInfo.subject}`;
+
+  // Create the draft with threading info
+  return createDraftGmail(conn, {
+    to,
+    cc,
+    bcc: options?.bcc,
+    subject,
+    body,
+    isHtml: options?.isHtml ?? true,
+    threadId: threadInfo.threadId,
+    inReplyTo: threadInfo.lastMessageId || undefined,
+    references: threadInfo.references,
+  });
+}
+
+/**
+ * Create a reply draft using the appropriate provider
+ *
+ * Automatically detects the account type and routes to the correct implementation.
+ * Creates a draft in the native email provider's Drafts folder.
+ *
+ * @param conn - The Superhuman connection
+ * @param threadId - The thread ID to reply to
+ * @param body - The reply body
+ * @param options - Additional options (replyAll, cc, bcc, isHtml)
+ * @returns Result with draftId on success
+ */
+export async function createReplyDraft(
+  conn: SuperhumanConnection,
+  threadId: string,
+  body: string,
+  options?: {
+    replyAll?: boolean;
+    cc?: string[];
+    bcc?: string[];
+    isHtml?: boolean;
+  }
+): Promise<DraftResult> {
+  // Detect account type
+  const accountInfo = await getAccountInfo(conn);
+
+  if (!accountInfo) {
+    return { success: false, error: "Could not detect account type" };
+  }
+
+  if (accountInfo.isMicrosoft) {
+    return createReplyDraftMsgraph(conn, threadId, body, options);
+  } else {
+    return createReplyDraftGmail(conn, threadId, body, options);
+  }
 }
 
 /**

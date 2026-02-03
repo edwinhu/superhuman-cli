@@ -15,7 +15,7 @@ import {
   saveDraft,
   textToHtml,
 } from "./superhuman-api.js";
-import { sendReply, sendEmail, getThreadInfoForReply } from "./send-api.js";
+import { sendReply, sendEmail, getThreadInfoForReply, createReplyDraft } from "./send-api.js";
 
 export interface ReplyResult {
   success: boolean;
@@ -90,21 +90,16 @@ export async function replyToThread(
     return { success: false, error: result.error };
   }
 
-  // For drafts, use the UI approach (creates proper draft in Superhuman)
-  const draftKey = await withRetry(() => openReplyCompose(conn, threadId), 3, 500);
-  if (!draftKey) {
-    return {
-      success: false,
-      error: "Failed to open reply compose (UI may be blocked by existing compose window or overlay)"
-    };
-  }
+  // For drafts, use the native API (creates draft in native email provider)
+  const result = await createReplyDraft(conn, threadId, textToHtml(body), {
+    replyAll: false,
+    isHtml: true,
+  });
 
-  const bodySet = await setBody(conn, textToHtml(body), draftKey);
-  if (!bodySet) {
-    return { success: false, error: "Failed to set reply body" };
+  if (result.success) {
+    return { success: true, draftId: result.draftId };
   }
-
-  return saveDraftAndClose(conn, draftKey);
+  return { success: false, error: result.error };
 }
 
 /**
@@ -143,21 +138,16 @@ export async function replyAllToThread(
     return { success: false, error: result.error };
   }
 
-  // For drafts, use the UI approach (creates proper draft with all recipients)
-  const draftKey = await withRetry(() => openReplyAllCompose(conn, threadId), 3, 500);
-  if (!draftKey) {
-    return {
-      success: false,
-      error: "Failed to open reply-all compose (UI may be blocked by existing compose window or overlay)"
-    };
-  }
+  // For drafts, use the native API (creates draft in native email provider)
+  const result = await createReplyDraft(conn, threadId, textToHtml(body), {
+    replyAll: true,
+    isHtml: true,
+  });
 
-  const bodySet = await setBody(conn, textToHtml(body), draftKey);
-  if (!bodySet) {
-    return { success: false, error: "Failed to set reply body" };
+  if (result.success) {
+    return { success: true, draftId: result.draftId };
   }
-
-  return saveDraftAndClose(conn, draftKey);
+  return { success: false, error: result.error };
 }
 
 /**
