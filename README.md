@@ -53,7 +53,24 @@ bun src/cli.ts read <thread-id> --json
 # Search contacts by name
 bun src/cli.ts contacts search "john"
 bun src/cli.ts contacts search "john" --limit 5 --json
+
+# Search contacts in a specific account (without switching UI)
+bun src/cli.ts contacts search "john" --account user@gmail.com
 ```
+
+### Multi-Account Support
+
+The `--account` flag allows operations on any linked account without switching the Superhuman UI:
+
+```bash
+# Search contacts in a specific account
+bun src/cli.ts contacts search "john" --account user@gmail.com
+
+# Works with both Gmail and Microsoft/Outlook accounts
+bun src/cli.ts contacts search "john" --account user@company.com
+```
+
+**How it works:** The CLI extracts OAuth tokens directly from Superhuman and makes API calls to Gmail or Microsoft Graph. Tokens are cached in memory with automatic refresh when expired.
 
 ### Composing Email
 
@@ -163,6 +180,7 @@ bun src/cli.ts download --attachment <attachment-id> --message <message-id> --ou
 
 | Option | Description |
 |--------|-------------|
+| `--account <email>` | Account to operate on (default: current account) |
 | `--to <email\|name>` | Recipient email or name (names auto-resolved via contacts) |
 | `--cc <email\|name>` | CC recipient (can be used multiple times) |
 | `--bcc <email\|name>` | BCC recipient (can be used multiple times) |

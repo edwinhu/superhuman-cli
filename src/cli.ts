@@ -48,7 +48,7 @@ import {
 import { sendEmail, createDraft, updateDraft, sendDraftById, deleteDraft } from "./send-api";
 import { searchContacts, resolveRecipient, type Contact } from "./contacts";
 
-const VERSION = "0.3.0";
+const VERSION = "0.4.0";
 const CDP_PORT = 9333;
 
 // ANSI colors
@@ -148,6 +148,7 @@ ${colors.bold}COMMANDS${colors.reset}
   ${colors.cyan}help${colors.reset}       Show this help message
 
 ${colors.bold}OPTIONS${colors.reset}
+  ${colors.cyan}--account <email>${colors.reset}  Account to operate on (default: current)
   --to <email|name>  Recipient email or name (names are resolved via contact search)
   --cc <email|name>  CC recipient (can be used multiple times)
   --bcc <email|name> BCC recipient (can be used multiple times)
@@ -319,6 +320,8 @@ interface CliOptions {
   threadIds: string[]; // for bulk operations (archive/delete)
   draftIds: string[]; // for delete-draft
   json: boolean;
+  // account selection
+  account: string; // email of account to use (optional, defaults to current)
   // account switching
   accountArg: string; // index or email for account command
   // reply/forward options
@@ -366,6 +369,7 @@ function parseArgs(args: string[]): CliOptions {
     threadIds: [],
     draftIds: [],
     json: false,
+    account: "",
     accountArg: "",
     send: false,
     updateDraftId: "",
@@ -511,6 +515,10 @@ function parseArgs(args: string[]): CliOptions {
           break;
         case "event":
           options.eventId = unescapeString(value);
+          i += 2;
+          break;
+        case "account":
+          options.account = unescapeString(value);
           i += 2;
           break;
         default:
@@ -2242,21 +2250,34 @@ async function cmdContacts(options: CliOptions) {
     process.exit(1);
   }
 
-  const contacts = await searchContacts(conn, options.contactsQuery, { limit: options.limit });
+  try {
+    let contacts: Contact[];
 
-  if (options.json) {
-    console.log(JSON.stringify(contacts, null, 2));
-  } else {
-    if (contacts.length === 0) {
-      info(`No contacts found for "${options.contactsQuery}"`);
+    if (options.account) {
+      // Use direct API with specified account
+      const { getToken, searchContactsDirect, clearTokenCache } = await import("./token-api");
+      const token = await getToken(conn, options.account);
+      contacts = await searchContactsDirect(token, options.contactsQuery, options.limit);
+      info(`Searching contacts in account: ${options.account}`);
     } else {
-      for (const contact of contacts) {
-        console.log(formatContact(contact));
+      // Use existing DI-based approach (current account)
+      contacts = await searchContacts(conn, options.contactsQuery, { limit: options.limit });
+    }
+
+    if (options.json) {
+      console.log(JSON.stringify(contacts, null, 2));
+    } else {
+      if (contacts.length === 0) {
+        info("No contacts found");
+      } else {
+        for (const contact of contacts) {
+          console.log(formatContact(contact));
+        }
       }
     }
+  } finally {
+    await disconnect(conn);
   }
-
-  await disconnect(conn);
 }
 
 async function cmdCalendarFree(options: CliOptions) {
