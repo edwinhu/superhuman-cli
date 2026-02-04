@@ -47,14 +47,26 @@ bun src/cli.ts read <thread-id>
 bun src/cli.ts read <thread-id> --json
 ```
 
-### Composing Email
+### Contacts
 
 ```bash
-# Create a draft
+# Search contacts by name
+bun src/cli.ts contacts search "john"
+bun src/cli.ts contacts search "john" --limit 5 --json
+```
+
+### Composing Email
+
+Recipients can be specified as email addresses or contact names. Names are automatically resolved to email addresses via contact search.
+
+```bash
+# Create a draft (using email or name)
 bun src/cli.ts draft --to user@example.com --subject "Hello" --body "Hi there!"
+bun src/cli.ts draft --to "john" --subject "Hello" --body "Hi there!"
 
 # Open compose window (keeps it open for editing)
 bun src/cli.ts compose --to user@example.com --subject "Meeting"
+bun src/cli.ts compose --to "john" --cc "jane" --subject "Meeting"
 
 # Send an email
 bun src/cli.ts send --to user@example.com --subject "Quick note" --body "FYI"
@@ -151,9 +163,9 @@ bun src/cli.ts download --attachment <attachment-id> --message <message-id> --ou
 
 | Option | Description |
 |--------|-------------|
-| `--to <email>` | Recipient email address |
-| `--cc <email>` | CC recipient (can be used multiple times) |
-| `--bcc <email>` | BCC recipient (can be used multiple times) |
+| `--to <email\|name>` | Recipient email or name (names auto-resolved via contacts) |
+| `--cc <email\|name>` | CC recipient (can be used multiple times) |
+| `--bcc <email\|name>` | BCC recipient (can be used multiple times) |
 | `--subject <text>` | Email subject |
 | `--body <text>` | Email body (plain text, converted to HTML) |
 | `--html <text>` | Email body as raw HTML |

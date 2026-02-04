@@ -46,8 +46,9 @@ import {
   type UpdateEventInput,
 } from "./calendar";
 import { sendEmail, createDraft, updateDraft, sendDraftById, deleteDraft } from "./send-api";
+import { searchContacts, resolveRecipient, type Contact } from "./contacts";
 
-const VERSION = "0.2.1";
+const VERSION = "0.3.0";
 const CDP_PORT = 9333;
 
 // ANSI colors
@@ -138,6 +139,7 @@ ${colors.bold}COMMANDS${colors.reset}
   ${colors.cyan}calendar-update${colors.reset} Update a calendar event
   ${colors.cyan}calendar-delete${colors.reset} Delete a calendar event
   ${colors.cyan}calendar-free${colors.reset} Check free/busy availability
+  ${colors.cyan}contacts${colors.reset}   Search contacts by name
   ${colors.cyan}compose${colors.reset}    Open compose window and fill in email (keeps window open)
   ${colors.cyan}draft${colors.reset}      Create or update a draft
   ${colors.cyan}delete-draft${colors.reset} Delete draft(s) by ID
@@ -146,9 +148,9 @@ ${colors.bold}COMMANDS${colors.reset}
   ${colors.cyan}help${colors.reset}       Show this help message
 
 ${colors.bold}OPTIONS${colors.reset}
-  --to <email>       Recipient email address (required for compose/draft/send/forward)
-  --cc <email>       CC recipient (can be used multiple times)
-  --bcc <email>      BCC recipient (can be used multiple times)
+  --to <email|name>  Recipient email or name (names are resolved via contact search)
+  --cc <email|name>  CC recipient (can be used multiple times)
+  --bcc <email|name> BCC recipient (can be used multiple times)
   --subject <text>   Email subject
   --body <text>      Email body (plain text, converted to HTML)
   --html <text>      Email body as HTML
@@ -267,6 +269,10 @@ ${colors.bold}EXAMPLES${colors.reset}
   superhuman calendar-free
   superhuman calendar-free --date tomorrow --range 7
 
+  ${colors.dim}# Search contacts by name${colors.reset}
+  superhuman contacts search "john"
+  superhuman contacts search "john" --limit 5 --json
+
   ${colors.dim}# Create a draft${colors.reset}
   superhuman draft --to user@example.com --subject "Hello" --body "Hi there!"
 
@@ -280,6 +286,10 @@ ${colors.bold}EXAMPLES${colors.reset}
 
   ${colors.dim}# Open compose window with pre-filled content${colors.reset}
   superhuman compose --to user@example.com --subject "Meeting"
+
+  ${colors.dim}# Compose using contact name instead of email (auto-resolved)${colors.reset}
+  superhuman compose --to "john" --subject "Meeting"
+  superhuman draft --to "john" --cc "jane" --subject "Update"
 
   ${colors.dim}# Send an email immediately${colors.reset}
   superhuman send --to user@example.com --subject "Quick note" --body "FYI"
@@ -335,6 +345,9 @@ interface CliOptions {
   eventDuration: number; // event duration in minutes
   eventTitle: string; // event title
   eventId: string; // event ID for update/delete
+  // contacts options
+  contactsSubcommand: string; // subcommand for contacts (search)
+  contactsQuery: string; // search query for contacts
 }
 
 function parseArgs(args: string[]): CliOptions {
@@ -371,6 +384,8 @@ function parseArgs(args: string[]): CliOptions {
     eventDuration: 30,
     eventTitle: "",
     eventId: "",
+    contactsSubcommand: "",
+    contactsQuery: "",
   };
 
   let i = 0;
@@ -560,6 +575,14 @@ function parseArgs(args: string[]): CliOptions {
       // Allow thread ID as positional argument for download (when not using --attachment)
       options.threadId = unescapeString(arg);
       i += 1;
+    } else if (options.command === "contacts" && !options.contactsSubcommand) {
+      // First positional arg after 'contacts' is the subcommand (e.g., 'search')
+      options.contactsSubcommand = arg;
+      i += 1;
+    } else if (options.command === "contacts" && options.contactsSubcommand === "search" && !options.contactsQuery) {
+      // Allow search query as positional argument for contacts search
+      options.contactsQuery = unescapeString(arg);
+      i += 1;
     } else {
       error(`Unexpected argument: ${arg}`);
       process.exit(1);
@@ -583,6 +606,25 @@ async function checkConnection(port: number): Promise<SuperhumanConnection | nul
     info("Superhuman may not be installed at /Applications/Superhuman.app");
     return null;
   }
+}
+
+/**
+ * Resolve all recipients in arrays (to, cc, bcc) from names to email addresses.
+ * Names without @ are looked up in contacts; emails are passed through unchanged.
+ */
+async function resolveAllRecipients(
+  conn: SuperhumanConnection,
+  recipients: string[]
+): Promise<string[]> {
+  const resolved: string[] = [];
+  for (const recipient of recipients) {
+    const email = await resolveRecipient(conn, recipient);
+    if (email !== recipient && !recipient.includes("@")) {
+      info(`Resolved "${recipient}" to ${email}`);
+    }
+    resolved.push(email);
+  }
+  return resolved;
 }
 
 async function cmdStatus(options: CliOptions) {
@@ -622,6 +664,9 @@ async function cmdCompose(options: CliOptions, keepOpen = true) {
     process.exit(1);
   }
 
+  // Resolve names to emails
+  const resolvedTo = await resolveAllRecipients(conn, options.to);
+
   info("Opening compose window...");
   const draftKey = await openCompose(conn);
   if (!draftKey) {
@@ -632,7 +677,7 @@ async function cmdCompose(options: CliOptions, keepOpen = true) {
   success(`Compose opened (${draftKey})`);
 
   // Add recipients
-  for (const email of options.to) {
+  for (const email of resolvedTo) {
     info(`Adding recipient: ${email}`);
     const added = await addRecipient(conn, email, undefined, draftKey);
     if (added) {
@@ -682,14 +727,19 @@ async function cmdDraft(options: CliOptions) {
       process.exit(1);
     }
 
+    // Resolve names to emails
+    const resolvedTo = options.to.length > 0 ? await resolveAllRecipients(conn, options.to) : undefined;
+    const resolvedCc = options.cc.length > 0 ? await resolveAllRecipients(conn, options.cc) : undefined;
+    const resolvedBcc = options.bcc.length > 0 ? await resolveAllRecipients(conn, options.bcc) : undefined;
+
     // Use HTML body if provided, otherwise convert plain text to HTML (if body provided)
     const bodyContent = options.html || (options.body ? textToHtml(options.body) : undefined);
 
     info(`Updating draft ${options.updateDraftId}...`);
     const result = await updateDraft(conn, options.updateDraftId, {
-      to: options.to.length > 0 ? options.to : undefined,
-      cc: options.cc.length > 0 ? options.cc : undefined,
-      bcc: options.bcc.length > 0 ? options.bcc : undefined,
+      to: resolvedTo,
+      cc: resolvedCc,
+      bcc: resolvedBcc,
       subject: options.subject || undefined,
       body: bodyContent,
       isHtml: true,
@@ -719,14 +769,19 @@ async function cmdDraft(options: CliOptions) {
     process.exit(1);
   }
 
+  // Resolve names to emails
+  const resolvedTo = await resolveAllRecipients(conn, options.to);
+  const resolvedCc = options.cc.length > 0 ? await resolveAllRecipients(conn, options.cc) : undefined;
+  const resolvedBcc = options.bcc.length > 0 ? await resolveAllRecipients(conn, options.bcc) : undefined;
+
   // Use HTML body if provided, otherwise convert plain text to HTML
   const bodyContent = options.html || textToHtml(options.body);
 
   info("Creating draft...");
   const result = await createDraft(conn, {
-    to: options.to,
-    cc: options.cc.length > 0 ? options.cc : undefined,
-    bcc: options.bcc.length > 0 ? options.bcc : undefined,
+    to: resolvedTo,
+    cc: resolvedCc,
+    bcc: resolvedBcc,
     subject: options.subject || "",
     body: bodyContent,
     isHtml: true,
@@ -807,14 +862,19 @@ async function cmdSend(options: CliOptions) {
     process.exit(1);
   }
 
+  // Resolve names to emails
+  const resolvedTo = await resolveAllRecipients(conn, options.to);
+  const resolvedCc = options.cc.length > 0 ? await resolveAllRecipients(conn, options.cc) : undefined;
+  const resolvedBcc = options.bcc.length > 0 ? await resolveAllRecipients(conn, options.bcc) : undefined;
+
   // Use HTML body if provided, otherwise convert plain text to HTML
   const bodyContent = options.html || textToHtml(options.body);
 
   info("Sending email...");
   const result = await sendEmail(conn, {
-    to: options.to,
-    cc: options.cc.length > 0 ? options.cc : undefined,
-    bcc: options.bcc.length > 0 ? options.bcc : undefined,
+    to: resolvedTo,
+    cc: resolvedCc,
+    bcc: resolvedBcc,
     subject: options.subject || "",
     body: bodyContent,
     isHtml: true,
@@ -1047,8 +1107,11 @@ async function cmdForward(options: CliOptions) {
     process.exit(1);
   }
 
+  // Resolve name to email
+  const resolvedTo = await resolveAllRecipients(conn, options.to);
+  const toEmail = resolvedTo[0]; // Use first recipient for forward
+
   const body = options.body || "";
-  const toEmail = options.to[0]; // Use first recipient for forward
   const action = options.send ? "Sending" : "Creating draft for";
   info(`${action} forward to ${toEmail}...`);
 
@@ -2042,9 +2105,10 @@ async function cmdCalendarCreate(options: CliOptions) {
       : { dateTime: endTime.toISOString() },
   };
 
-  // Add attendees from --to option
+  // Add attendees from --to option (resolve names to emails)
   if (options.to.length > 0) {
-    eventInput.attendees = options.to.map(email => ({ email }));
+    const resolvedAttendees = await resolveAllRecipients(conn, options.to);
+    eventInput.attendees = resolvedAttendees.map(email => ({ email }));
   }
 
   const result = await createEvent(conn, eventInput);
@@ -2098,7 +2162,8 @@ async function cmdCalendarUpdate(options: CliOptions) {
     updates.end = { dateTime: endTime.toISOString() };
   }
   if (options.to.length > 0) {
-    updates.attendees = options.to.map(email => ({ email }));
+    const resolvedAttendees = await resolveAllRecipients(conn, options.to);
+    updates.attendees = resolvedAttendees.map(email => ({ email }));
   }
 
   if (Object.keys(updates).length === 0) {
@@ -2143,6 +2208,51 @@ async function cmdCalendarDelete(options: CliOptions) {
     error(`Failed to delete event: ${result.error}`);
     if (result.error?.includes("no-auth")) {
       info("Calendar write access may not be authorized in Superhuman");
+    }
+  }
+
+  await disconnect(conn);
+}
+
+/**
+ * Format a contact for display in RFC 5322 style: "Name <email>"
+ */
+function formatContact(contact: Contact): string {
+  if (contact.name) {
+    return `${contact.name} <${contact.email}>`;
+  }
+  return contact.email;
+}
+
+async function cmdContacts(options: CliOptions) {
+  if (options.contactsSubcommand !== "search") {
+    error("Unknown contacts subcommand: " + (options.contactsSubcommand || "(none)"));
+    console.log(`Usage: superhuman contacts search <query>`);
+    process.exit(1);
+  }
+
+  if (!options.contactsQuery) {
+    error("Search query is required");
+    console.log(`Usage: superhuman contacts search <query>`);
+    process.exit(1);
+  }
+
+  const conn = await checkConnection(options.port);
+  if (!conn) {
+    process.exit(1);
+  }
+
+  const contacts = await searchContacts(conn, options.contactsQuery, { limit: options.limit });
+
+  if (options.json) {
+    console.log(JSON.stringify(contacts, null, 2));
+  } else {
+    if (contacts.length === 0) {
+      info(`No contacts found for "${options.contactsQuery}"`);
+    } else {
+      for (const contact of contacts) {
+        console.log(formatContact(contact));
+      }
     }
   }
 
@@ -2322,6 +2432,10 @@ async function main() {
 
     case "calendar-free":
       await cmdCalendarFree(options);
+      break;
+
+    case "contacts":
+      await cmdContacts(options);
       break;
 
     case "compose":
