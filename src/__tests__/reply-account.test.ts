@@ -5,8 +5,8 @@ import { test, expect, describe } from "bun:test";
 describe("reply command with --account flag", () => {
   describe("command registration", () => {
     test("reply command appears in help", async () => {
-      const proc = Bun.spawn(["bun", "run", "src/cli.ts", "--help"], {
-        cwd: "/Users/vwh7mb/projects/superhuman-cli/.worktrees/reply-forward-cached",
+      const proc = Bun.spawn([process.execPath, "run", "src/cli.ts", "--help"], {
+        cwd: import.meta.dir + "/../..",
         stdout: "pipe",
         stderr: "pipe",
       });
@@ -24,7 +24,7 @@ describe("reply command with --account flag", () => {
       const proc = Bun.spawn(
         ["bun", "run", "src/cli.ts", "reply", "--account=test@example.com", "--body=Test reply"],
         {
-          cwd: "/Users/vwh7mb/projects/superhuman-cli/.worktrees/reply-forward-cached",
+          cwd: import.meta.dir + "/../..",
           stdout: "pipe",
           stderr: "pipe",
         }
@@ -46,7 +46,7 @@ describe("reply command with --account flag", () => {
       const proc = Bun.spawn(
         ["bun", "run", "src/cli.ts", "reply", "test-thread-123", "--account=nonexistent@example.com", "--body=Test reply"],
         {
-          cwd: "/Users/vwh7mb/projects/superhuman-cli/.worktrees/reply-forward-cached",
+          cwd: import.meta.dir + "/../..",
           stdout: "pipe",
           stderr: "pipe",
         }
@@ -66,7 +66,7 @@ describe("reply command with --account flag", () => {
       const proc = Bun.spawn(
         ["bun", "run", "src/cli.ts", "reply", "thread123", "--account=test@example.com", "--body=Reply text"],
         {
-          cwd: "/Users/vwh7mb/projects/superhuman-cli/.worktrees/reply-forward-cached",
+          cwd: import.meta.dir + "/../..",
           stdout: "pipe",
           stderr: "pipe",
         }
@@ -86,7 +86,7 @@ describe("reply command with --account flag", () => {
       const proc = Bun.spawn(
         ["bun", "run", "src/cli.ts", "reply", "thread123", "--account=test@example.com", "--body=Reply text", "--send"],
         {
-          cwd: "/Users/vwh7mb/projects/superhuman-cli/.worktrees/reply-forward-cached",
+          cwd: import.meta.dir + "/../..",
           stdout: "pipe",
           stderr: "pipe",
         }

@@ -66,7 +66,7 @@ import {
   sendEmailDirect,
 } from "./token-api";
 
-const VERSION = "0.9.0";
+const VERSION = "0.10.0";
 const CDP_PORT = 9333;
 
 // ANSI colors
@@ -129,50 +129,34 @@ function printHelp() {
 ${colors.bold}Superhuman CLI${colors.reset} v${VERSION}
 
 ${colors.bold}USAGE${colors.reset}
-  superhuman <command> [options]
+  superhuman <command> [subcommand] [options]
 
 ${colors.bold}COMMANDS${colors.reset}
-  ${colors.cyan}auth${colors.reset}       Extract and save tokens for offline use
-  ${colors.cyan}accounts${colors.reset}   List all linked accounts
-  ${colors.cyan}account${colors.reset}    Switch to a different account
-  ${colors.cyan}inbox${colors.reset}      List recent emails from inbox
-  ${colors.cyan}search${colors.reset}     Search emails
-  ${colors.cyan}read${colors.reset}       Read a specific email thread
-  ${colors.cyan}reply${colors.reset}      Reply to an email thread
-  ${colors.cyan}reply-all${colors.reset}  Reply-all to an email thread
-  ${colors.cyan}forward${colors.reset}    Forward an email thread
-  ${colors.cyan}archive${colors.reset}    Archive email thread(s)
-  ${colors.cyan}delete${colors.reset}     Delete (trash) email thread(s)
-  ${colors.cyan}mark-read${colors.reset}  Mark thread(s) as read
-  ${colors.cyan}mark-unread${colors.reset} Mark thread(s) as unread
-  ${colors.cyan}labels${colors.reset}     List all available labels
-  ${colors.cyan}get-labels${colors.reset} Get labels on a specific thread
-  ${colors.cyan}add-label${colors.reset}  Add a label to thread(s)
-  ${colors.cyan}remove-label${colors.reset} Remove a label from thread(s)
-  ${colors.cyan}star${colors.reset}       Star thread(s)
-  ${colors.cyan}unstar${colors.reset}     Unstar thread(s)
-  ${colors.cyan}starred${colors.reset}    List all starred threads
-  ${colors.cyan}snooze${colors.reset}     Snooze thread(s) until a specific time
-  ${colors.cyan}unsnooze${colors.reset}   Unsnooze (cancel snooze) thread(s)
-  ${colors.cyan}snoozed${colors.reset}    List all snoozed threads
-  ${colors.cyan}attachments${colors.reset} List attachments for a thread
-  ${colors.cyan}download${colors.reset}   Download attachments from a thread
-  ${colors.cyan}calendar${colors.reset}   List calendar events
-  ${colors.cyan}calendar-create${colors.reset} Create a calendar event
-  ${colors.cyan}calendar-update${colors.reset} Update a calendar event
-  ${colors.cyan}calendar-delete${colors.reset} Delete a calendar event
-  ${colors.cyan}calendar-free${colors.reset} Check free/busy availability
-  ${colors.cyan}contacts${colors.reset}   Search contacts by name
-  ${colors.cyan}snippets${colors.reset}   List all snippets (reusable email templates)
-  ${colors.cyan}snippet${colors.reset}    Use a snippet to compose or send an email
-  ${colors.cyan}ai${colors.reset}         Ask AI about an email thread (summarize, action items, etc.)
-  ${colors.cyan}compose${colors.reset}    Open compose window and fill in email (keeps window open)
-  ${colors.cyan}draft${colors.reset}      Create or update a draft
-  ${colors.cyan}delete-draft${colors.reset} Delete draft(s) by ID
-  ${colors.cyan}send-draft${colors.reset} Send a Superhuman draft with specified content
-  ${colors.cyan}send${colors.reset}       Compose and send an email, or send an existing draft
-  ${colors.cyan}status${colors.reset}     Check Superhuman connection status
-  ${colors.cyan}help${colors.reset}       Show this help message
+  ${colors.cyan}inbox${colors.reset}              List recent emails from inbox
+  ${colors.cyan}search${colors.reset} <query>      Search emails
+  ${colors.cyan}read${colors.reset} <id>           Read a specific email thread
+  ${colors.cyan}reply${colors.reset} <id>          Reply to an email thread
+  ${colors.cyan}reply-all${colors.reset} <id>      Reply-all to an email thread
+  ${colors.cyan}forward${colors.reset} <id>        Forward an email thread
+  ${colors.cyan}archive${colors.reset} <id>        Archive email thread(s)
+  ${colors.cyan}delete${colors.reset} <id>         Delete (trash) email thread(s)
+  ${colors.cyan}compose${colors.reset}             Open compose window (keeps window open)
+  ${colors.cyan}send${colors.reset}                Compose and send, or send an existing draft
+  ${colors.cyan}ai${colors.reset} <id> <query>     Ask AI about an email thread
+  ${colors.cyan}status${colors.reset}              Check Superhuman connection status
+  ${colors.cyan}help${colors.reset}                Show this help message
+
+${colors.bold}SUBCOMMAND GROUPS${colors.reset}
+  ${colors.cyan}account${colors.reset}  list | switch <email|index> | auth
+  ${colors.cyan}calendar${colors.reset} list | create | update | delete | free
+  ${colors.cyan}draft${colors.reset}    create | update <id> | delete <id> | send <id>
+  ${colors.cyan}label${colors.reset}    list | get <id> | add <id> | remove <id>
+  ${colors.cyan}mark${colors.reset}     read <id> | unread <id>
+  ${colors.cyan}star${colors.reset}     add <id> | remove <id> | list
+  ${colors.cyan}snooze${colors.reset}   set <id> --until <time> | cancel <id> | list
+  ${colors.cyan}attachment${colors.reset} list <id> | download <id>
+  ${colors.cyan}snippet${colors.reset}  list | use <name>
+  ${colors.cyan}contact${colors.reset}  search <query>
 
 ${colors.bold}OPTIONS${colors.reset}
   ${colors.cyan}--account <email>${colors.reset}  Account to operate on (default: current)
@@ -183,41 +167,36 @@ ${colors.bold}OPTIONS${colors.reset}
   --body <text>      Email body (plain text, converted to HTML)
   --html <text>      Email body as HTML
   --send             Send immediately instead of saving as draft (for reply/reply-all/forward)
-  --update <id>      Draft ID to update (for draft command)
-  --vars <pairs>     Template variable substitution: "key1=val1,key2=val2" (for snippet)
+  --vars <pairs>     Template variable substitution: "key1=val1,key2=val2" (for snippet use)
   --provider <type>  Draft API: "superhuman" (default), "gmail", or "outlook"
   --draft <id>       Draft ID to send (for send command)
-  --thread <id>      Thread ID for reply/forward drafts (for send-draft command)
-  --delay <seconds>  Delay before sending in seconds (for send-draft, default: 20)
-  --label <id>       Label ID to add or remove (for add-label/remove-label)
-  --until <time>     Snooze until time: preset (tomorrow, next-week, weekend, evening) or ISO datetime
-  --output <path>    Output directory or file path (for download)
-  --attachment <id>  Specific attachment ID (for download)
+  --thread <id>      Thread ID for reply/forward drafts (for draft send)
+  --delay <seconds>  Delay before sending in seconds (for draft send, default: 20)
+  --label <id>       Label ID (for label add/remove)
+  --until <time>     Snooze until: preset (tomorrow, next-week, weekend, evening) or ISO datetime
+  --output <path>    Output directory or file path (for attachment download)
+  --attachment <id>  Specific attachment ID (for attachment download)
   --message <id>     Message ID (required with --attachment)
   --limit <number>   Number of results (default: 10, for inbox/search)
   --include-done     Search all emails including archived/done (uses Gmail API directly)
-  --json             Output as JSON (for inbox/search/read)
+  --json             Output as JSON
   --date <date>      Date for calendar (YYYY-MM-DD or "today", "tomorrow")
   --calendar <name>  Calendar name or ID (default: primary)
   --range <days>     Days to show for calendar (default: 1)
   --start <time>     Event start time (ISO datetime or natural: "2pm", "tomorrow 3pm")
   --end <time>       Event end time (ISO datetime, optional if --duration)
   --duration <mins>  Event duration in minutes (default: 30)
-  --title <text>     Event title (for calendar-create/update)
-  --event <id>       Event ID (for calendar-update/delete)
+  --title <text>     Event title (for calendar create/update)
+  --event <id>       Event ID (for calendar update/delete)
   --port <number>    CDP port (default: ${CDP_PORT})
 
 ${colors.bold}EXAMPLES${colors.reset}
-  ${colors.dim}# Extract tokens for offline use${colors.reset}
-  superhuman auth
-
-  ${colors.dim}# List linked accounts${colors.reset}
-  superhuman accounts
-  superhuman accounts --json
-
-  ${colors.dim}# Switch account${colors.reset}
-  superhuman account 2
-  superhuman account user@example.com
+  ${colors.dim}# Account management${colors.reset}
+  superhuman account auth
+  superhuman account list
+  superhuman account list --json
+  superhuman account switch 2
+  superhuman account switch user@example.com
 
   ${colors.dim}# List recent emails${colors.reset}
   superhuman inbox
@@ -226,7 +205,7 @@ ${colors.bold}EXAMPLES${colors.reset}
   ${colors.dim}# Search emails${colors.reset}
   superhuman search "from:john subject:meeting"
   superhuman search "project update" --limit 20
-  superhuman search "from:anthropic" --include-done  # Search all emails including archived
+  superhuman search "from:anthropic" --include-done
 
   ${colors.dim}# Read an email thread${colors.reset}
   superhuman read <thread-id>
@@ -236,120 +215,84 @@ ${colors.bold}EXAMPLES${colors.reset}
   superhuman reply <thread-id> --body "Thanks for the update!"
   superhuman reply <thread-id> --body "Got it!" --send
 
-  ${colors.dim}# Reply-all to an email${colors.reset}
+  ${colors.dim}# Reply-all / Forward${colors.reset}
   superhuman reply-all <thread-id> --body "Thanks everyone!"
+  superhuman forward <thread-id> --to colleague@example.com --body "FYI" --send
 
-  ${colors.dim}# Forward an email${colors.reset}
-  superhuman forward <thread-id> --to colleague@example.com --body "FYI"
-  superhuman forward <thread-id> --to colleague@example.com --send
-
-  ${colors.dim}# Archive emails${colors.reset}
+  ${colors.dim}# Archive / Delete${colors.reset}
   superhuman archive <thread-id>
-  superhuman archive <thread-id1> <thread-id2> <thread-id3>
-
-  ${colors.dim}# Delete (trash) emails${colors.reset}
-  superhuman delete <thread-id>
-  superhuman delete <thread-id1> <thread-id2> <thread-id3>
+  superhuman delete <thread-id1> <thread-id2>
 
   ${colors.dim}# Mark as read/unread${colors.reset}
-  superhuman mark-read <thread-id>
-  superhuman mark-unread <thread-id1> <thread-id2>
+  superhuman mark read <thread-id>
+  superhuman mark unread <thread-id1> <thread-id2>
 
-  ${colors.dim}# List all labels${colors.reset}
-  superhuman labels
-  superhuman labels --json
+  ${colors.dim}# Labels${colors.reset}
+  superhuman label list
+  superhuman label list --json
+  superhuman label get <thread-id>
+  superhuman label add <thread-id> --label Label_123
+  superhuman label remove <thread-id> --label Label_123
 
-  ${colors.dim}# Get labels on a thread${colors.reset}
-  superhuman get-labels <thread-id>
-  superhuman get-labels <thread-id> --json
+  ${colors.dim}# Star / Unstar${colors.reset}
+  superhuman star add <thread-id>
+  superhuman star add <thread-id1> <thread-id2>
+  superhuman star remove <thread-id>
+  superhuman star list
+  superhuman star list --json
 
-  ${colors.dim}# Add/remove labels${colors.reset}
-  superhuman add-label <thread-id> --label Label_123
-  superhuman remove-label <thread-id> --label Label_123
+  ${colors.dim}# Snooze / Unsnooze${colors.reset}
+  superhuman snooze set <thread-id> --until tomorrow
+  superhuman snooze set <thread-id> --until "2024-02-15T14:00:00Z"
+  superhuman snooze cancel <thread-id>
+  superhuman snooze list
+  superhuman snooze list --json
 
-  ${colors.dim}# Star/unstar threads${colors.reset}
-  superhuman star <thread-id>
-  superhuman star <thread-id1> <thread-id2>
-  superhuman unstar <thread-id>
-  superhuman starred
-  superhuman starred --json
+  ${colors.dim}# Attachments${colors.reset}
+  superhuman attachment list <thread-id>
+  superhuman attachment list <thread-id> --json
+  superhuman attachment download <thread-id>
+  superhuman attachment download <thread-id> --output ./downloads
+  superhuman attachment download --attachment <attachment-id> --message <message-id> --output ./file.pdf
 
-  ${colors.dim}# Snooze/unsnooze threads${colors.reset}
-  superhuman snooze <thread-id> --until tomorrow
-  superhuman snooze <thread-id> --until next-week
-  superhuman snooze <thread-id> --until "2024-02-15T14:00:00Z"
-  superhuman unsnooze <thread-id>
-  superhuman snoozed
-  superhuman snoozed --json
+  ${colors.dim}# Calendar${colors.reset}
+  superhuman calendar list
+  superhuman calendar list --date tomorrow --range 7 --json
+  superhuman calendar create --title "Meeting" --start "2pm" --duration 30
+  superhuman calendar create --title "All Day" --date 2026-02-05
+  superhuman calendar update --event <event-id> --title "New Title"
+  superhuman calendar delete --event <event-id>
+  superhuman calendar free
+  superhuman calendar free --date tomorrow --range 7
 
-  ${colors.dim}# List and download attachments${colors.reset}
-  superhuman attachments <thread-id>
-  superhuman attachments <thread-id> --json
-  superhuman download <thread-id>
-  superhuman download <thread-id> --output ./downloads
-  superhuman download --attachment <attachment-id> --message <message-id> --output ./file.pdf
+  ${colors.dim}# Contacts${colors.reset}
+  superhuman contact search "john"
+  superhuman contact search "john" --limit 5 --json
 
-  ${colors.dim}# List calendar events${colors.reset}
-  superhuman calendar
-  superhuman calendar --date tomorrow
-  superhuman calendar --range 7 --json
-
-  ${colors.dim}# Create calendar event${colors.reset}
-  superhuman calendar-create --title "Meeting" --start "2pm" --duration 30
-  superhuman calendar-create --title "All Day" --date 2026-02-05
-
-  ${colors.dim}# Update/delete calendar event${colors.reset}
-  superhuman calendar-update --event <event-id> --title "New Title"
-  superhuman calendar-delete --event <event-id>
-
-  ${colors.dim}# Check availability${colors.reset}
-  superhuman calendar-free
-  superhuman calendar-free --date tomorrow --range 7
-
-  ${colors.dim}# Search contacts by name${colors.reset}
-  superhuman contacts search "john"
-  superhuman contacts search "john" --limit 5 --json
-
-  ${colors.dim}# List snippets${colors.reset}
-  superhuman snippets
-  superhuman snippets --json
-
-  ${colors.dim}# Use a snippet to compose${colors.reset}
-  superhuman snippet "zoom link" --to user@example.com
-  superhuman snippet "share recordings" --to user@example.com --vars "date=Feb 5,student_name=Jane"
-  superhuman snippet "share recordings" --to user@example.com --vars "date=Feb 5" --send
+  ${colors.dim}# Snippets${colors.reset}
+  superhuman snippet list
+  superhuman snippet list --json
+  superhuman snippet use "zoom link" --to user@example.com
+  superhuman snippet use "share recordings" --to user@example.com --vars "date=Feb 5,student_name=Jane"
+  superhuman snippet use "share recordings" --to user@example.com --vars "date=Feb 5" --send
 
   ${colors.dim}# Ask AI about an email thread${colors.reset}
   superhuman ai <thread-id> "summarize this thread"
   superhuman ai <thread-id> "what are the action items?"
-  superhuman ai <thread-id> "draft a reply"
-  superhuman ai <thread-id> "who sent the last message?"
 
-  ${colors.dim}# Create a draft (default: appears in Superhuman UI, syncs across devices)${colors.reset}
-  superhuman draft --to user@example.com --subject "Hello" --body "Hi there!"
+  ${colors.dim}# Drafts${colors.reset}
+  superhuman draft create --to user@example.com --subject "Hello" --body "Hi there!"
+  superhuman draft create --provider=gmail --to user@example.com --subject "Hello" --body "Hi there!"
+  superhuman draft update <draft-id> --body "Updated content"
+  superhuman draft update <draft-id> --subject "New Subject" --to new@example.com
+  superhuman draft delete <draft-id>
+  superhuman draft delete <draft-id1> <draft-id2>
+  superhuman draft send <draft-id> --account=user@example.com --to=recipient@example.com --subject="Subject" --body="Body"
+  superhuman draft send <draft-id> --thread=<thread-id> --account=... ${colors.dim}# For reply/forward drafts${colors.reset}
 
-  ${colors.dim}# Create draft via direct Gmail API (faster, but may not sync immediately)${colors.reset}
-  superhuman draft --provider=gmail --to user@example.com --subject "Hello" --body "Hi there!"
-
-  ${colors.dim}# Update an existing draft${colors.reset}
-  superhuman draft --update <draft-id> --body "Updated content"
-  superhuman draft --update <draft-id> --subject "New Subject" --to new@example.com
-
-  ${colors.dim}# Delete drafts${colors.reset}
-  superhuman delete-draft <draft-id>
-  superhuman delete-draft <draft-id1> <draft-id2>
-
-  ${colors.dim}# Send a Superhuman draft (with content)${colors.reset}
-  superhuman send-draft <draft-id> --account=user@example.com --to=recipient@example.com --subject="Subject" --body="Body"
-  superhuman send-draft <draft-id> --account=user@example.com --to=recipient@example.com --subject="Subject" --body="Body" --delay=60
-  superhuman send-draft <draft-id> --thread=<original-thread-id> --account=... ${colors.dim}# For reply/forward drafts${colors.reset}
-
-  ${colors.dim}# Open compose window with pre-filled content${colors.reset}
+  ${colors.dim}# Compose (opens Superhuman UI)${colors.reset}
   superhuman compose --to user@example.com --subject "Meeting"
-
-  ${colors.dim}# Compose using contact name instead of email (auto-resolved)${colors.reset}
   superhuman compose --to "john" --subject "Meeting"
-  superhuman draft --to "john" --cc "jane" --subject "Update"
 
   ${colors.dim}# Send an email immediately${colors.reset}
   superhuman send --to user@example.com --subject "Quick note" --body "FYI"
@@ -363,8 +306,15 @@ ${colors.bold}REQUIREMENTS${colors.reset}
 `);
 }
 
+// Commands that use noun+verb subcommand groups (e.g., "calendar create", "draft delete")
+const GROUPED_COMMANDS = new Set([
+  "calendar", "draft", "label", "star", "snooze", "mark",
+  "attachment", "snippet", "account", "contact",
+]);
+
 interface CliOptions {
   command: string;
+  subcommand: string;
   to: string[];
   cc: string[];
   bcc: string[];
@@ -412,7 +362,6 @@ interface CliOptions {
   eventTitle: string; // event title
   eventId: string; // event ID for update/delete
   // contacts options
-  contactsSubcommand: string; // subcommand for contacts (search)
   contactsQuery: string; // search query for contacts
   // search options
   includeDone: boolean; // use direct Gmail API to search all emails including archived
@@ -428,6 +377,7 @@ interface CliOptions {
 function parseArgs(args: string[]): CliOptions {
   const options: CliOptions = {
     command: "",
+    subcommand: "",
     to: [],
     cc: [],
     bcc: [],
@@ -463,7 +413,6 @@ function parseArgs(args: string[]): CliOptions {
     eventDuration: 30,
     eventTitle: "",
     eventId: "",
-    contactsSubcommand: "",
     contactsQuery: "",
     includeDone: false,
     aiQuery: "",
@@ -646,83 +595,89 @@ function parseArgs(args: string[]): CliOptions {
     } else if (!options.command) {
       options.command = arg;
       i += 1;
+    } else if (GROUPED_COMMANDS.has(options.command) && !options.subcommand) {
+      // Second positional arg for grouped commands is the subcommand
+      options.subcommand = arg;
+      i += 1;
     } else if (options.command === "search" && !options.query) {
-      // Allow search query as positional argument
       options.query = unescapeString(arg);
       i += 1;
     } else if (options.command === "read" && !options.threadId) {
-      // Allow thread ID as positional argument
       options.threadId = unescapeString(arg);
       i += 1;
     } else if (options.command === "reply" && !options.threadId) {
-      // Allow thread ID as positional argument for reply
       options.threadId = unescapeString(arg);
       i += 1;
     } else if (options.command === "reply-all" && !options.threadId) {
-      // Allow thread ID as positional argument for reply-all
       options.threadId = unescapeString(arg);
       i += 1;
     } else if (options.command === "forward" && !options.threadId) {
-      // Allow thread ID as positional argument for forward
       options.threadId = unescapeString(arg);
       i += 1;
     } else if (options.command === "ai" && !options.threadId) {
-      // First positional arg for ai is thread ID
       options.threadId = unescapeString(arg);
       i += 1;
     } else if (options.command === "ai" && !options.aiQuery) {
-      // Second positional arg for ai is the question
       options.aiQuery = unescapeString(arg);
       i += 1;
-    } else if (options.command === "account" && !options.accountArg) {
-      // Allow account index or email as positional argument
-      options.accountArg = unescapeString(arg);
-      i += 1;
-    } else if (
-      options.command === "archive" ||
-      options.command === "delete" ||
-      options.command === "mark-read" ||
-      options.command === "mark-unread" ||
-      options.command === "add-label" ||
-      options.command === "remove-label" ||
-      options.command === "star" ||
-      options.command === "unstar" ||
-      options.command === "snooze" ||
-      options.command === "unsnooze"
-    ) {
-      // Collect multiple thread IDs for bulk operations
+    } else if (options.command === "archive" || options.command === "delete") {
+      // Collect multiple thread IDs for bulk top-level operations
       options.threadIds.push(unescapeString(arg));
       i += 1;
-    } else if (options.command === "delete-draft") {
-      // Collect multiple draft IDs for delete-draft
-      options.draftIds.push(unescapeString(arg));
+    } else if (options.command === "account" && options.subcommand === "switch" && !options.accountArg) {
+      // account switch <email|index>
+      options.accountArg = unescapeString(arg);
       i += 1;
-    } else if (options.command === "get-labels" && !options.threadId) {
-      // Allow thread ID as positional argument for get-labels
+    } else if (options.command === "mark" && (options.subcommand === "read" || options.subcommand === "unread")) {
+      // mark read/unread <thread-id> [thread-id...]
+      options.threadIds.push(unescapeString(arg));
+      i += 1;
+    } else if (options.command === "label" && options.subcommand === "get" && !options.threadId) {
+      // label get <thread-id>
       options.threadId = unescapeString(arg);
       i += 1;
-    } else if (options.command === "attachments" && !options.threadId) {
-      // Allow thread ID as positional argument for attachments
+    } else if (options.command === "label" && (options.subcommand === "add" || options.subcommand === "remove")) {
+      // label add/remove <thread-id> [thread-id...]
+      options.threadIds.push(unescapeString(arg));
+      i += 1;
+    } else if (options.command === "star" && (options.subcommand === "add" || options.subcommand === "remove")) {
+      // star add/remove <thread-id> [thread-id...]
+      options.threadIds.push(unescapeString(arg));
+      i += 1;
+    } else if (options.command === "snooze" && options.subcommand === "set") {
+      // snooze set <thread-id> [thread-id...]
+      options.threadIds.push(unescapeString(arg));
+      i += 1;
+    } else if (options.command === "snooze" && options.subcommand === "cancel") {
+      // snooze cancel <thread-id> [thread-id...]
+      options.threadIds.push(unescapeString(arg));
+      i += 1;
+    } else if (options.command === "attachment" && options.subcommand === "list" && !options.threadId) {
+      // attachment list <thread-id>
       options.threadId = unescapeString(arg);
       i += 1;
-    } else if (options.command === "download" && !options.threadId && !options.attachmentId) {
-      // Allow thread ID as positional argument for download (when not using --attachment)
+    } else if (options.command === "attachment" && options.subcommand === "download" && !options.threadId && !options.attachmentId) {
+      // attachment download <thread-id>
       options.threadId = unescapeString(arg);
       i += 1;
-    } else if (options.command === "contacts" && !options.contactsSubcommand) {
-      // First positional arg after 'contacts' is the subcommand (e.g., 'search')
-      options.contactsSubcommand = arg;
-      i += 1;
-    } else if (options.command === "contacts" && options.contactsSubcommand === "search" && !options.contactsQuery) {
-      // Allow search query as positional argument for contacts search
+    } else if (options.command === "contact" && options.subcommand === "search" && !options.contactsQuery) {
+      // contact search <query>
       options.contactsQuery = unescapeString(arg);
       i += 1;
-    } else if (options.command === "snippet" && !options.snippetQuery) {
-      // Allow snippet name as positional argument
+    } else if (options.command === "snippet" && options.subcommand === "use" && !options.snippetQuery) {
+      // snippet use <name>
       options.snippetQuery = unescapeString(arg);
       i += 1;
-    } else if (options.command === "send-draft" && !options.sendDraftDraftId) {
-      // Allow draft ID as positional argument for send-draft
+    } else if (options.command === "draft" && options.subcommand === "update" && !options.updateDraftId) {
+      // draft update <draft-id>
+      options.updateDraftId = unescapeString(arg);
+      i += 1;
+    } else if (options.command === "draft" && options.subcommand === "delete") {
+      // draft delete <draft-id> [draft-id...]
+      options.draftIds.push(unescapeString(arg));
+      i += 1;
+    } else if (options.command === "draft" && options.subcommand === "send" && !options.sendDraftDraftId) {
+      // draft send <draft-id>
       options.sendDraftDraftId = unescapeString(arg);
       i += 1;
     } else {
@@ -865,7 +820,7 @@ async function cmdSnippets(options: CliOptions) {
 async function cmdSnippet(options: CliOptions) {
   if (!options.snippetQuery) {
     error("Snippet name is required");
-    console.log(`Usage: superhuman snippet <name> [--to <email>] [--vars "key=val,..."] [--send]`);
+    console.log(`Usage: superhuman snippet use <name> [--to <email>] [--vars "key=val,..."] [--send]`);
     process.exit(1);
   }
 
@@ -1180,7 +1135,7 @@ async function cmdDeleteDraft(options: CliOptions) {
 
   if (draftIds.length === 0) {
     error("At least one draft ID is required");
-    error("Usage: superhuman delete-draft <draft-id> [draft-id...]");
+    error("Usage: superhuman draft delete <draft-id> [draft-id...]");
     process.exit(1);
   }
 
@@ -1209,7 +1164,7 @@ async function cmdSendDraft(options: CliOptions) {
   // Validate draft ID is provided
   if (!draftId) {
     error("Draft ID is required");
-    error("Usage: superhuman send-draft <draft-id> --account=<email> --to=<recipient> --subject=<subject> --body=<body>");
+    error("Usage: superhuman draft send <draft-id> --account=<email> --to=<recipient> --subject=<subject> --body=<body>");
     process.exit(1);
   }
 
@@ -1935,7 +1890,7 @@ async function cmdDelete(options: CliOptions) {
 async function cmdMarkRead(options: CliOptions) {
   if (options.threadIds.length === 0) {
     error("At least one thread ID is required");
-    console.log(`Usage: superhuman mark-read <thread-id> [thread-id...]`);
+    console.log(`Usage: superhuman mark read <thread-id> [thread-id...]`);
     process.exit(1);
   }
 
@@ -1968,7 +1923,7 @@ async function cmdMarkRead(options: CliOptions) {
 async function cmdMarkUnread(options: CliOptions) {
   if (options.threadIds.length === 0) {
     error("At least one thread ID is required");
-    console.log(`Usage: superhuman mark-unread <thread-id> [thread-id...]`);
+    console.log(`Usage: superhuman mark unread <thread-id> [thread-id...]`);
     process.exit(1);
   }
 
@@ -2027,7 +1982,7 @@ async function cmdLabels(options: CliOptions) {
 async function cmdGetLabels(options: CliOptions) {
   if (!options.threadId) {
     error("Thread ID is required");
-    console.log(`Usage: superhuman get-labels <thread-id>`);
+    console.log(`Usage: superhuman label get <thread-id>`);
     process.exit(1);
   }
 
@@ -2059,13 +2014,13 @@ async function cmdGetLabels(options: CliOptions) {
 async function cmdAddLabel(options: CliOptions) {
   if (options.threadIds.length === 0) {
     error("At least one thread ID is required");
-    console.log(`Usage: superhuman add-label <thread-id> [thread-id...] --label <label-id>`);
+    console.log(`Usage: superhuman label add <thread-id> [thread-id...] --label <label-id>`);
     process.exit(1);
   }
 
   if (!options.labelId) {
     error("Label ID is required (--label)");
-    console.log(`Usage: superhuman add-label <thread-id> [thread-id...] --label <label-id>`);
+    console.log(`Usage: superhuman label add <thread-id> [thread-id...] --label <label-id>`);
     process.exit(1);
   }
 
@@ -2098,13 +2053,13 @@ async function cmdAddLabel(options: CliOptions) {
 async function cmdRemoveLabel(options: CliOptions) {
   if (options.threadIds.length === 0) {
     error("At least one thread ID is required");
-    console.log(`Usage: superhuman remove-label <thread-id> [thread-id...] --label <label-id>`);
+    console.log(`Usage: superhuman label remove <thread-id> [thread-id...] --label <label-id>`);
     process.exit(1);
   }
 
   if (!options.labelId) {
     error("Label ID is required (--label)");
-    console.log(`Usage: superhuman remove-label <thread-id> [thread-id...] --label <label-id>`);
+    console.log(`Usage: superhuman label remove <thread-id> [thread-id...] --label <label-id>`);
     process.exit(1);
   }
 
@@ -2137,7 +2092,7 @@ async function cmdRemoveLabel(options: CliOptions) {
 async function cmdStar(options: CliOptions) {
   if (options.threadIds.length === 0) {
     error("At least one thread ID is required");
-    console.log(`Usage: superhuman star <thread-id> [thread-id...]`);
+    console.log(`Usage: superhuman star add <thread-id> [thread-id...]`);
     process.exit(1);
   }
 
@@ -2170,7 +2125,7 @@ async function cmdStar(options: CliOptions) {
 async function cmdUnstar(options: CliOptions) {
   if (options.threadIds.length === 0) {
     error("At least one thread ID is required");
-    console.log(`Usage: superhuman unstar <thread-id> [thread-id...]`);
+    console.log(`Usage: superhuman star remove <thread-id> [thread-id...]`);
     process.exit(1);
   }
 
@@ -2227,13 +2182,13 @@ async function cmdStarred(options: CliOptions) {
 async function cmdSnooze(options: CliOptions) {
   if (options.threadIds.length === 0) {
     error("At least one thread ID is required");
-    console.log(`Usage: superhuman snooze <thread-id> [thread-id...] --until <time>`);
+    console.log(`Usage: superhuman snooze set <thread-id> [thread-id...] --until <time>`);
     process.exit(1);
   }
 
   if (!options.snoozeUntil) {
     error("Snooze time is required (--until)");
-    console.log(`Usage: superhuman snooze <thread-id> --until <time>`);
+    console.log(`Usage: superhuman snooze set <thread-id> --until <time>`);
     console.log(`  Presets: tomorrow, next-week, weekend, evening`);
     console.log(`  Or use ISO datetime: 2024-02-15T14:00:00Z`);
     process.exit(1);
@@ -2276,7 +2231,7 @@ async function cmdSnooze(options: CliOptions) {
 async function cmdUnsnooze(options: CliOptions) {
   if (options.threadIds.length === 0) {
     error("At least one thread ID is required");
-    console.log(`Usage: superhuman unsnooze <thread-id> [thread-id...]`);
+    console.log(`Usage: superhuman snooze cancel <thread-id> [thread-id...]`);
     process.exit(1);
   }
 
@@ -2342,7 +2297,7 @@ function formatFileSize(bytes: number): string {
 async function cmdAttachments(options: CliOptions) {
   if (!options.threadId) {
     error("Thread ID is required");
-    console.log(`Usage: superhuman attachments <thread-id>`);
+    console.log(`Usage: superhuman attachment list <thread-id>`);
     process.exit(1);
   }
 
@@ -2377,7 +2332,7 @@ async function cmdDownload(options: CliOptions) {
   if (options.attachmentId) {
     if (!options.messageId) {
       error("Message ID is required when using --attachment");
-      console.log(`Usage: superhuman download --attachment <attachment-id> --message <message-id> --output <path>`);
+      console.log(`Usage: superhuman attachment download --attachment <attachment-id> --message <message-id> --output <path>`);
       process.exit(1);
     }
 
@@ -2403,8 +2358,8 @@ async function cmdDownload(options: CliOptions) {
   // Mode 2: Download all attachments from a thread
   if (!options.threadId) {
     error("Thread ID is required, or use --attachment with --message");
-    console.log(`Usage: superhuman download <thread-id> [--output <dir>]`);
-    console.log(`       superhuman download --attachment <id> --message <id> --output <path>`);
+    console.log(`Usage: superhuman attachment download <thread-id> [--output <dir>]`);
+    console.log(`       superhuman attachment download --attachment <id> --message <id> --output <path>`);
     process.exit(1);
   }
 
@@ -2512,7 +2467,7 @@ async function cmdAccounts(options: CliOptions) {
 async function cmdAccount(options: CliOptions) {
   if (!options.accountArg) {
     error("Account index or email is required");
-    console.log(`Usage: superhuman account <index|email>`);
+    console.log(`Usage: superhuman account switch <index|email>`);
     process.exit(1);
   }
 
@@ -2997,15 +2952,15 @@ function formatContact(contact: Contact): string {
 }
 
 async function cmdContacts(options: CliOptions) {
-  if (options.contactsSubcommand !== "search") {
-    error("Unknown contacts subcommand: " + (options.contactsSubcommand || "(none)"));
-    console.log(`Usage: superhuman contacts search <query>`);
+  if (options.subcommand !== "search") {
+    error("Unknown subcommand: contact " + (options.subcommand || "(none)"));
+    console.log(`Usage: superhuman contact search <query>`);
     process.exit(1);
   }
 
   if (!options.contactsQuery) {
     error("Search query is required");
-    console.log(`Usage: superhuman contacts search <query>`);
+    console.log(`Usage: superhuman contact search <query>`);
     process.exit(1);
   }
 
@@ -3179,16 +3134,23 @@ async function main() {
       await cmdStatus(options);
       break;
 
-    case "auth":
-      await cmdAuth(options);
-      break;
-
-    case "accounts":
-      await cmdAccounts(options);
-      break;
-
+    // account list|switch|auth
     case "account":
-      await cmdAccount(options);
+      switch (options.subcommand) {
+        case "list":
+          await cmdAccounts(options);
+          break;
+        case "switch":
+          await cmdAccount(options);
+          break;
+        case "auth":
+          await cmdAuth(options);
+          break;
+        default:
+          error(`Unknown subcommand: account ${options.subcommand || "(none)"}`);
+          log(`Usage: superhuman account list|switch|auth`);
+          process.exit(1);
+      }
       break;
 
     case "inbox":
@@ -3223,96 +3185,155 @@ async function main() {
       await cmdDelete(options);
       break;
 
-    case "mark-read":
-      await cmdMarkRead(options);
+    // mark read|unread
+    case "mark":
+      switch (options.subcommand) {
+        case "read":
+          await cmdMarkRead(options);
+          break;
+        case "unread":
+          await cmdMarkUnread(options);
+          break;
+        default:
+          error(`Unknown subcommand: mark ${options.subcommand || "(none)"}`);
+          log(`Usage: superhuman mark read|unread <thread-id>`);
+          process.exit(1);
+      }
       break;
 
-    case "mark-unread":
-      await cmdMarkUnread(options);
+    // label list|get|add|remove
+    case "label":
+      switch (options.subcommand) {
+        case "list":
+          await cmdLabels(options);
+          break;
+        case "get":
+          await cmdGetLabels(options);
+          break;
+        case "add":
+          await cmdAddLabel(options);
+          break;
+        case "remove":
+          await cmdRemoveLabel(options);
+          break;
+        default:
+          error(`Unknown subcommand: label ${options.subcommand || "(none)"}`);
+          log(`Usage: superhuman label list|get|add|remove`);
+          process.exit(1);
+      }
       break;
 
-    case "labels":
-      await cmdLabels(options);
-      break;
-
-    case "get-labels":
-      await cmdGetLabels(options);
-      break;
-
-    case "add-label":
-      await cmdAddLabel(options);
-      break;
-
-    case "remove-label":
-      await cmdRemoveLabel(options);
-      break;
-
+    // star add|remove|list
     case "star":
-      await cmdStar(options);
+      switch (options.subcommand) {
+        case "add":
+          await cmdStar(options);
+          break;
+        case "remove":
+          await cmdUnstar(options);
+          break;
+        case "list":
+          await cmdStarred(options);
+          break;
+        default:
+          error(`Unknown subcommand: star ${options.subcommand || "(none)"}`);
+          log(`Usage: superhuman star add|remove|list`);
+          process.exit(1);
+      }
       break;
 
-    case "unstar":
-      await cmdUnstar(options);
-      break;
-
-    case "starred":
-      await cmdStarred(options);
-      break;
-
+    // snooze set|cancel|list
     case "snooze":
-      await cmdSnooze(options);
+      switch (options.subcommand) {
+        case "set":
+          await cmdSnooze(options);
+          break;
+        case "cancel":
+          await cmdUnsnooze(options);
+          break;
+        case "list":
+          await cmdSnoozed(options);
+          break;
+        default:
+          error(`Unknown subcommand: snooze ${options.subcommand || "(none)"}`);
+          log(`Usage: superhuman snooze set|cancel|list`);
+          process.exit(1);
+      }
       break;
 
-    case "unsnooze":
-      await cmdUnsnooze(options);
+    // attachment list|download
+    case "attachment":
+      switch (options.subcommand) {
+        case "list":
+          await cmdAttachments(options);
+          break;
+        case "download":
+          await cmdDownload(options);
+          break;
+        default:
+          error(`Unknown subcommand: attachment ${options.subcommand || "(none)"}`);
+          log(`Usage: superhuman attachment list|download`);
+          process.exit(1);
+      }
       break;
 
-    case "snoozed":
-      await cmdSnoozed(options);
-      break;
-
-    case "attachments":
-      await cmdAttachments(options);
-      break;
-
-    case "download":
-      await cmdDownload(options);
-      break;
-
+    // calendar list|create|update|delete|free
     case "calendar":
-      await cmdCalendar(options);
+      switch (options.subcommand) {
+        case "list":
+        case "":
+          await cmdCalendar(options);
+          break;
+        case "create":
+          await cmdCalendarCreate(options);
+          break;
+        case "update":
+          await cmdCalendarUpdate(options);
+          break;
+        case "delete":
+          await cmdCalendarDelete(options);
+          break;
+        case "free":
+          await cmdCalendarFree(options);
+          break;
+        default:
+          error(`Unknown subcommand: calendar ${options.subcommand}`);
+          log(`Usage: superhuman calendar list|create|update|delete|free`);
+          process.exit(1);
+      }
       break;
 
-    case "calendar-create":
-      await cmdCalendarCreate(options);
-      break;
-
-    case "calendar-update":
-      await cmdCalendarUpdate(options);
-      break;
-
-    case "calendar-delete":
-      await cmdCalendarDelete(options);
-      break;
-
-    case "calendar-free":
-      await cmdCalendarFree(options);
-      break;
-
-    case "contacts":
-      await cmdContacts(options);
+    // contact search
+    case "contact":
+      switch (options.subcommand) {
+        case "search":
+          await cmdContacts(options);
+          break;
+        default:
+          error(`Unknown subcommand: contact ${options.subcommand || "(none)"}`);
+          log(`Usage: superhuman contact search <query>`);
+          process.exit(1);
+      }
       break;
 
     case "ai":
       await cmdAi(options);
       break;
 
-    case "snippets":
-      await cmdSnippets(options);
-      break;
-
+    // snippet list|use
     case "snippet":
-      await cmdSnippet(options);
+      switch (options.subcommand) {
+        case "list":
+          await cmdSnippets(options);
+          break;
+        case "use":
+          await cmdSnippet(options);
+          break;
+        default:
+          error(`Unknown subcommand: snippet ${options.subcommand || "(none)"}`);
+          log(`Usage: superhuman snippet list|use`);
+          process.exit(1);
+      }
       break;
 
     case "compose":
@@ -3320,16 +3341,26 @@ async function main() {
       log(`\n${colors.dim}Compose window left open for editing${colors.reset}`);
       break;
 
+    // draft create|update|delete|send
     case "draft":
-      await cmdDraft(options);
-      break;
-
-    case "delete-draft":
-      await cmdDeleteDraft(options);
-      break;
-
-    case "send-draft":
-      await cmdSendDraft(options);
+      switch (options.subcommand) {
+        case "create":
+          await cmdDraft(options);
+          break;
+        case "update":
+          await cmdDraft(options);
+          break;
+        case "delete":
+          await cmdDeleteDraft(options);
+          break;
+        case "send":
+          await cmdSendDraft(options);
+          break;
+        default:
+          error(`Unknown subcommand: draft ${options.subcommand || "(none)"}`);
+          log(`Usage: superhuman draft create|update|delete|send`);
+          process.exit(1);
+      }
       break;
 
     case "send":

@@ -1,14 +1,14 @@
 // src/__tests__/send-draft-cli.test.ts
-// Tests for the send-draft CLI command
+// Tests for the draft send CLI command (formerly send-draft)
 import { test, expect, describe, mock, afterEach, beforeEach } from "bun:test";
 import { $ } from "bun";
 
-describe("send-draft CLI command", () => {
+describe("draft send CLI command", () => {
   describe("command registration", () => {
-    test("send-draft command appears in help", async () => {
-      // Run the CLI with --help and check that send-draft is listed
-      const proc = Bun.spawn(["bun", "run", "src/cli.ts", "--help"], {
-        cwd: "/Users/vwh7mb/projects/superhuman-cli/.worktrees/reply-forward-cached",
+    test("draft send command appears in help", async () => {
+      // Run the CLI with --help and check that draft group (which includes send) is listed
+      const proc = Bun.spawn([process.execPath, "run", "src/cli.ts", "--help"], {
+        cwd: import.meta.dir + "/../..",
         stdout: "pipe",
         stderr: "pipe",
       });
@@ -16,15 +16,15 @@ describe("send-draft CLI command", () => {
       const exitCode = await proc.exited;
 
       expect(exitCode).toBe(0);
-      expect(stdout).toContain("send-draft");
+      expect(stdout).toContain("draft");
     });
 
-    test("send-draft command requires draft-id argument", async () => {
-      // Run send-draft without a draft-id - should show usage error
+    test("draft send command requires draft-id argument", async () => {
+      // Run draft send without a draft-id - should show usage error
       const proc = Bun.spawn(
-        ["bun", "run", "src/cli.ts", "send-draft", "--account=test@example.com", "--to=recipient@example.com", "--subject=Test", "--body=Test body"],
+        [process.execPath, "run", "src/cli.ts", "draft", "send", "--account=test@example.com", "--to=recipient@example.com", "--subject=Test", "--body=Test body"],
         {
-          cwd: "/Users/vwh7mb/projects/superhuman-cli/.worktrees/reply-forward-cached",
+          cwd: import.meta.dir + "/../..",
           stdout: "pipe",
           stderr: "pipe",
         }
@@ -38,12 +38,12 @@ describe("send-draft CLI command", () => {
       expect(output).toMatch(/draft.*id|required/i);
     });
 
-    test("send-draft validates draft-id format", async () => {
-      // Run send-draft with an invalid draft ID
+    test("draft send validates draft-id format", async () => {
+      // Run draft send with an invalid draft ID
       const proc = Bun.spawn(
-        ["bun", "run", "src/cli.ts", "send-draft", "invalid-id", "--account=test@example.com", "--to=recipient@example.com", "--subject=Test", "--body=Test body"],
+        [process.execPath, "run", "src/cli.ts", "draft", "send", "invalid-id", "--account=test@example.com", "--to=recipient@example.com", "--subject=Test", "--body=Test body"],
         {
-          cwd: "/Users/vwh7mb/projects/superhuman-cli/.worktrees/reply-forward-cached",
+          cwd: import.meta.dir + "/../..",
           stdout: "pipe",
           stderr: "pipe",
         }
@@ -58,12 +58,12 @@ describe("send-draft CLI command", () => {
       expect(exitCode).not.toBe(0);
     });
 
-    test("send-draft requires --account flag", async () => {
-      // Run send-draft without --account flag
+    test("draft send requires --account flag", async () => {
+      // Run draft send without --account flag
       const proc = Bun.spawn(
-        ["bun", "run", "src/cli.ts", "send-draft", "draft00abcdef123456", "--to=recipient@example.com", "--subject=Test", "--body=Test body"],
+        [process.execPath, "run", "src/cli.ts", "draft", "send", "draft00abcdef123456", "--to=recipient@example.com", "--subject=Test", "--body=Test body"],
         {
-          cwd: "/Users/vwh7mb/projects/superhuman-cli/.worktrees/reply-forward-cached",
+          cwd: import.meta.dir + "/../..",
           stdout: "pipe",
           stderr: "pipe",
         }
@@ -78,12 +78,12 @@ describe("send-draft CLI command", () => {
       expect(exitCode).not.toBe(0);
     });
 
-    test("send-draft requires --to flag", async () => {
-      // Run send-draft without --to flag
+    test("draft send requires --to flag", async () => {
+      // Run draft send without --to flag
       const proc = Bun.spawn(
-        ["bun", "run", "src/cli.ts", "send-draft", "draft00abcdef123456", "--account=test@example.com", "--subject=Test", "--body=Test body"],
+        [process.execPath, "run", "src/cli.ts", "draft", "send", "draft00abcdef123456", "--account=test@example.com", "--subject=Test", "--body=Test body"],
         {
-          cwd: "/Users/vwh7mb/projects/superhuman-cli/.worktrees/reply-forward-cached",
+          cwd: import.meta.dir + "/../..",
           stdout: "pipe",
           stderr: "pipe",
         }
@@ -98,12 +98,12 @@ describe("send-draft CLI command", () => {
       expect(exitCode).not.toBe(0);
     });
 
-    test("send-draft requires --subject flag", async () => {
-      // Run send-draft without --subject flag
+    test("draft send requires --subject flag", async () => {
+      // Run draft send without --subject flag
       const proc = Bun.spawn(
-        ["bun", "run", "src/cli.ts", "send-draft", "draft00abcdef123456", "--account=test@example.com", "--to=recipient@example.com", "--body=Test body"],
+        [process.execPath, "run", "src/cli.ts", "draft", "send", "draft00abcdef123456", "--account=test@example.com", "--to=recipient@example.com", "--body=Test body"],
         {
-          cwd: "/Users/vwh7mb/projects/superhuman-cli/.worktrees/reply-forward-cached",
+          cwd: import.meta.dir + "/../..",
           stdout: "pipe",
           stderr: "pipe",
         }
@@ -118,12 +118,12 @@ describe("send-draft CLI command", () => {
       expect(exitCode).not.toBe(0);
     });
 
-    test("send-draft requires --body flag", async () => {
-      // Run send-draft without --body flag
+    test("draft send requires --body flag", async () => {
+      // Run draft send without --body flag
       const proc = Bun.spawn(
-        ["bun", "run", "src/cli.ts", "send-draft", "draft00abcdef123456", "--account=test@example.com", "--to=recipient@example.com", "--subject=Test"],
+        [process.execPath, "run", "src/cli.ts", "draft", "send", "draft00abcdef123456", "--account=test@example.com", "--to=recipient@example.com", "--subject=Test"],
         {
-          cwd: "/Users/vwh7mb/projects/superhuman-cli/.worktrees/reply-forward-cached",
+          cwd: import.meta.dir + "/../..",
           stdout: "pipe",
           stderr: "pipe",
         }
@@ -138,10 +138,10 @@ describe("send-draft CLI command", () => {
       expect(exitCode).not.toBe(0);
     });
 
-    test("send-draft shows --thread option in help examples", async () => {
+    test("draft send shows --thread option in help examples", async () => {
       // Run the CLI with --help and check that --thread is documented
-      const proc = Bun.spawn(["bun", "run", "src/cli.ts", "--help"], {
-        cwd: "/Users/vwh7mb/projects/superhuman-cli/.worktrees/reply-forward-cached",
+      const proc = Bun.spawn([process.execPath, "run", "src/cli.ts", "--help"], {
+        cwd: import.meta.dir + "/../..",
         stdout: "pipe",
         stderr: "pipe",
       });
@@ -149,7 +149,7 @@ describe("send-draft CLI command", () => {
       const exitCode = await proc.exited;
 
       expect(exitCode).toBe(0);
-      // Check that --thread option is documented in send-draft examples
+      // Check that --thread option is documented in draft send examples
       expect(stdout).toMatch(/--thread/);
     });
   });
