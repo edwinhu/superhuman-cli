@@ -256,13 +256,39 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ## How It Works
 
-This tool uses Chrome DevTools Protocol (CDP) to connect to Superhuman's Electron renderer process and interact with its internal React state:
+This tool uses a hybrid approach for maximum reliability:
 
-- `window.ViewState._composeFormController` - Access compose form controllers
-- `window.GoogleAccount.portal` - Invoke internal APIs (threadInternal, gmail, msgraph)
-- `window.GoogleAccount.threads.identityMap` - Access cached thread models
+### Direct API (Primary)
 
-This approach is more reliable than DOM/keyboard automation because it uses Superhuman's internal APIs directly.
+Most operations use **direct Gmail API and Microsoft Graph API** calls:
+
+| Operation | Gmail API | MS Graph API |
+|-----------|-----------|--------------|
+| List inbox | `GET /messages?q=label:INBOX` | `GET /mailFolders/Inbox/messages` |
+| Search | `GET /messages?q=...` | `GET /messages?$search=...` |
+| Labels | `POST /threads/{id}/modify` | `PATCH /messages/{id}` |
+| Read status | Add/remove UNREAD label | `PATCH /messages/{id}` with `isRead` |
+| Archive | Remove INBOX label | `POST /messages/{id}/move` |
+| Star | Add STARRED label | `PATCH /messages/{id}` with `flag` |
+| Attachments | `GET /messages/{id}/attachments/{id}` | `GET /messages/{id}/attachments/{id}` |
+| Contacts | Google People API | MS Graph People API |
+
+OAuth tokens are extracted from Superhuman and cached with automatic refresh.
+
+### CDP (Secondary)
+
+Chrome DevTools Protocol is used for operations that require Superhuman's UI state:
+
+- `window.ViewState._composeFormController` - Compose form and draft management
+- `window.GoogleAccount` - Token extraction and account switching
+- Calendar operations (uses Superhuman's gcal/msgraph internal APIs)
+
+### Benefits
+
+- **Reliability**: Direct API calls don't depend on Superhuman's UI state
+- **Speed**: No CDP round-trips for most operations
+- **Testability**: API calls can be unit tested without running Superhuman
+- **Multi-account**: Token extraction enables operating on any linked account
 
 Supports both Gmail and Microsoft/Outlook accounts.
 

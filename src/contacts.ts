@@ -1,14 +1,20 @@
 /**
  * Contacts Module
  *
- * Functions for searching contacts via Superhuman's internal APIs.
+ * Functions for searching contacts via direct Gmail/MS Graph API.
  * Works with both Google and Microsoft/Outlook accounts.
  */
 
 import type { SuperhumanConnection } from "./superhuman-api";
+import {
+  type TokenInfo,
+  getToken,
+  searchContactsDirect,
+} from "./token-api";
+import { listAccounts } from "./accounts";
 
 /**
- * Represents a contact returned from Superhuman's contact search.
+ * Represents a contact returned from contact search.
  *
  * @property email - The contact's email address
  * @property name - The contact's display name (optional)
@@ -23,8 +29,9 @@ export interface Contact {
 /**
  * Options for searching contacts.
  *
- * @property limit - Maximum number of contacts to return (default varies by implementation)
+ * @property limit - Maximum number of contacts to return (default: 20)
  * @property includeTeamMembers - Whether to include team members in results (default: true)
+ *                                Note: This option is not supported by direct API, kept for compatibility.
  */
 export interface SearchContactsOptions {
   limit?: number;
@@ -32,88 +39,37 @@ export interface SearchContactsOptions {
 }
 
 /**
- * Search contacts by name prefix.
+ * Get token for the current account.
+ */
+async function getCurrentToken(conn: SuperhumanConnection): Promise<TokenInfo> {
+  const accounts = await listAccounts(conn);
+  const currentAccount = accounts.find((a) => a.isCurrent);
+
+  if (!currentAccount) {
+    throw new Error("No current account found");
+  }
+
+  return getToken(conn, currentAccount.email);
+}
+
+/**
+ * Search contacts by name or email prefix.
  *
- * Uses Superhuman's internal contacts service which provides autocomplete
- * functionality for both Google and Microsoft accounts.
+ * Uses direct Google People API or MS Graph People API for contact search.
  *
  * @param conn - The Superhuman connection
- * @param query - The search query (name prefix)
+ * @param query - The search query (name or email prefix)
  * @param options - Optional search options
- * @returns Array of matching contacts sorted by relevance score
+ * @returns Array of matching contacts sorted by relevance
  */
 export async function searchContacts(
   conn: SuperhumanConnection,
   query: string,
   options?: SearchContactsOptions
 ): Promise<Contact[]> {
-  const { Runtime } = conn;
-
   const limit = options?.limit ?? 20;
-  const includeTeamMembers = options?.includeTeamMembers ?? true;
-
-  const result = await Runtime.evaluate({
-    expression: `
-      (async () => {
-        try {
-          const query = ${JSON.stringify(query)};
-          const limit = ${limit};
-          const includeTeamMembers = ${includeTeamMembers};
-
-          const di = window.GoogleAccount?.di;
-          if (!di) {
-            return { error: "DI container not found", contacts: [] };
-          }
-
-          const contacts = di.get?.('contacts');
-          if (!contacts) {
-            return { error: "contacts service not found", contacts: [] };
-          }
-
-          // Ensure contacts are loaded
-          await contacts.loadAsync?.();
-
-          // Use the autocomplete API
-          if (typeof contacts.recipientListAutoCompleteAsync === 'function') {
-            const results = await contacts.recipientListAutoCompleteAsync({
-              query,
-              limit,
-              includeTeamMembers,
-            });
-
-            return {
-              contacts: (results || []).map(c => ({
-                email: c.email,
-                name: c.name || c.displayName,
-                score: c.score,
-              })),
-            };
-          }
-
-          // Fallback to topContactsAsync if available
-          if (typeof contacts.topContactsAsync === 'function') {
-            const results = await contacts.topContactsAsync({ query, limit });
-            return {
-              contacts: (results || []).map(c => ({
-                email: c.email,
-                name: c.name || c.displayName,
-                score: c.score,
-              })),
-            };
-          }
-
-          return { error: "No autocomplete method found", contacts: [] };
-        } catch (e) {
-          return { error: e.message || "Unknown error", contacts: [] };
-        }
-      })()
-    `,
-    returnByValue: true,
-    awaitPromise: true,
-  });
-
-  const value = result.result.value as { contacts: Contact[]; error?: string } | null;
-  return value?.contacts ?? [];
+  const token = await getCurrentToken(conn);
+  return searchContactsDirect(token, query, limit);
 }
 
 /**
@@ -140,8 +96,9 @@ export async function resolveRecipient(
   const contacts = await searchContacts(conn, recipient, { limit: 1 });
 
   // Return best match's email, or original if no matches
-  if (contacts.length > 0 && contacts[0].email) {
-    return contacts[0].email;
+  const first = contacts[0];
+  if (first && first.email) {
+    return first.email;
   }
 
   return recipient;

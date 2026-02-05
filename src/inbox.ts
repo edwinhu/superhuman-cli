@@ -1,11 +1,16 @@
 /**
  * Inbox Module
  *
- * Functions for listing and searching inbox threads via Superhuman's internal APIs.
+ * Functions for listing and searching inbox threads via direct Gmail/MS Graph API.
  */
 
 import type { SuperhumanConnection } from "./superhuman-api";
-import { getToken, searchGmailDirect } from "./token-api";
+import {
+  type TokenInfo,
+  getToken,
+  searchGmailDirect,
+  listInboxDirect,
+} from "./token-api";
 import { listAccounts } from "./accounts";
 
 export interface InboxThread {
@@ -32,8 +37,25 @@ export interface SearchOptions {
    * When true, use direct Gmail/MS Graph API for search.
    * This searches ALL emails including archived/done items.
    * Default (false) uses Superhuman's inbox-only search.
+   *
+   * Note: With direct API migration, both modes now use direct API.
+   * The difference is that includeDone=true removes label:INBOX filter.
    */
   includeDone?: boolean;
+}
+
+/**
+ * Get token for the current account.
+ */
+async function getCurrentToken(conn: SuperhumanConnection): Promise<TokenInfo> {
+  const accounts = await listAccounts(conn);
+  const currentAccount = accounts.find((a) => a.isCurrent);
+
+  if (!currentAccount) {
+    throw new Error("No current account found");
+  }
+
+  return getToken(conn, currentAccount.email);
 }
 
 /**
@@ -43,143 +65,99 @@ export async function listInbox(
   conn: SuperhumanConnection,
   options: ListInboxOptions = {}
 ): Promise<InboxThread[]> {
-  const { Runtime } = conn;
   const limit = options.limit ?? 10;
-
-  const result = await Runtime.evaluate({
-    expression: `
-      (() => {
-        try {
-          // Get thread list from current view
-          const threadList = window.ViewState?.threadListState?._list?._sortedList?.sorted;
-          if (!threadList || !Array.isArray(threadList)) return [];
-
-          const threads = [];
-          const identityMap = window.GoogleAccount?.threads?.identityMap;
-          if (!identityMap) return [];
-
-          for (let i = 0; i < Math.min(threadList.length, ${limit}); i++) {
-            const ref = threadList[i];
-            if (!ref?.id) continue;
-
-            const thread = identityMap.get(ref.id);
-            if (!thread?._threadModel) continue;
-
-            const model = thread._threadModel;
-            const messages = model.messages || [];
-            const lastMessage = messages[messages.length - 1];
-
-            // Name might be a function or string
-            const fromObj = lastMessage?.from;
-            let fromName = '';
-            if (fromObj) {
-              if (typeof fromObj.displayName === 'string') fromName = fromObj.displayName;
-              else if (typeof fromObj.displayName === 'function') fromName = fromObj.displayName();
-              else if (typeof fromObj.name === 'string') fromName = fromObj.name;
-              else if (typeof fromObj.name === 'function') fromName = fromObj.name();
-            }
-            // Date might be in rawJson.date or date (as string or object)
-            const msgDate = lastMessage?.rawJson?.date ||
-                           (typeof lastMessage?.date === 'string' ? lastMessage.date : '');
-            threads.push({
-              id: model.id,
-              subject: model.subject || '(no subject)',
-              from: {
-                email: lastMessage?.from?.email || '',
-                name: fromName,
-              },
-              date: msgDate,
-              snippet: lastMessage?.snippet || '',
-              labelIds: model.labelIds || [],
-              messageCount: messages.length,
-            });
-          }
-
-          return threads;
-        } catch (e) {
-          return [];
-        }
-      })()
-    `,
-    returnByValue: true,
-  });
-
-  return (result.result.value as InboxThread[]) || [];
+  const token = await getCurrentToken(conn);
+  return listInboxDirect(token, limit);
 }
 
 /**
- * Search threads using Superhuman's internal search API or direct Gmail/MS Graph API.
+ * Search threads using direct Gmail/MS Graph API.
  *
- * By default, uses Superhuman's internal API which only searches inbox.
- * When includeDone is true, uses direct Gmail/MS Graph API which searches
- * ALL emails including archived/done items.
- *
- * Note: Superhuman's threadInternal.listAsync ignores the query parameter,
- * so the default mode effectively returns top inbox threads regardless of query.
- * Use includeDone=true for actual search functionality.
+ * When includeDone is false (default), only searches inbox threads.
+ * When includeDone is true, searches ALL emails including archived/done items.
  */
 export async function searchInbox(
   conn: SuperhumanConnection,
   options: SearchOptions
 ): Promise<InboxThread[]> {
   const { query, limit = 10, includeDone = false } = options;
+  const token = await getCurrentToken(conn);
 
-  // Use direct API when includeDone is requested
   if (includeDone) {
-    // Get current account email to extract token
-    const accounts = await listAccounts(conn);
-    const currentAccount = accounts.find(a => a.isCurrent);
-
-    if (!currentAccount) {
-      throw new Error("No current account found");
-    }
-
-    const token = await getToken(conn, currentAccount.email);
+    // Search all emails (no inbox filter)
     return searchGmailDirect(token, query, limit);
-  }
-
-  // Default: use Superhuman's internal API (note: query is ignored by the API)
-  const { Runtime } = conn;
-
-  const result = await Runtime.evaluate({
-    expression: `
-      (async () => {
-        try {
-          const response = await window.GoogleAccount.portal.invoke(
-            "threadInternal",
-            "listAsync",
-            ["INBOX", { limit: ${limit}, filters: [], query: ${JSON.stringify(query)} }]
-          );
-
-          if (!response?.threads) return [];
-
-          return response.threads.map(t => {
-            // Thread data is nested in json property
-            const thread = t.json || t;
-            const messages = thread.messages || [];
-            const lastMessage = messages[messages.length - 1];
-
-            return {
-              id: thread.id,
-              subject: thread.subject || lastMessage?.subject || '(no subject)',
-              from: {
-                email: lastMessage?.from?.email || '',
-                name: lastMessage?.from?.name || lastMessage?.from?.displayName || '',
-              },
-              date: lastMessage?.date || '',
-              snippet: lastMessage?.snippet || '',
-              labelIds: thread.labelIds || lastMessage?.labelIds || [],
-              messageCount: messages.length,
-            };
-          });
-        } catch (e) {
-          return [];
+  } else {
+    // Search only inbox threads
+    // For Gmail, add label:INBOX to query
+    // For MS Graph, listInboxDirect already filters to inbox
+    if (token.isMicrosoft) {
+      // MS Graph: search within inbox folder
+      // Note: MS Graph $search works across all messages, so we use folder filter
+      const path = `/me/mailFolders/Inbox/messages?$search="${encodeURIComponent(query)}"&$top=${limit}&$select=id,conversationId,subject,from,receivedDateTime,bodyPreview`;
+      const response = await fetch(
+        `https://graph.microsoft.com/v1.0${path}`,
+        {
+          headers: { Authorization: `Bearer ${token.accessToken}` },
         }
-      })()
-    `,
-    returnByValue: true,
-    awaitPromise: true,
-  });
+      );
 
-  return (result.result.value as InboxThread[]) || [];
+      if (!response.ok) {
+        return [];
+      }
+
+      interface MSGraphMessage {
+        id: string;
+        conversationId: string;
+        subject?: string;
+        from?: { emailAddress?: { address?: string; name?: string } };
+        receivedDateTime: string;
+        bodyPreview?: string;
+      }
+
+      const result = await response.json() as { value?: MSGraphMessage[] };
+      if (!result.value) {
+        return [];
+      }
+
+      // Group by conversationId
+      const conversationMap = new Map<string, MSGraphMessage[]>();
+      for (const msg of result.value) {
+        const existing = conversationMap.get(msg.conversationId);
+        if (!existing) {
+          conversationMap.set(msg.conversationId, [msg]);
+        } else {
+          existing.push(msg);
+        }
+      }
+
+      const threads: InboxThread[] = [];
+      for (const [convId, messages] of conversationMap) {
+        messages.sort((a, b) =>
+          new Date(b.receivedDateTime).getTime() - new Date(a.receivedDateTime).getTime()
+        );
+        const latest = messages[0];
+
+        threads.push({
+          id: convId,
+          subject: latest.subject || "(no subject)",
+          from: {
+            email: latest.from?.emailAddress?.address || "",
+            name: latest.from?.emailAddress?.name || "",
+          },
+          date: latest.receivedDateTime,
+          snippet: latest.bodyPreview || "",
+          labelIds: [],
+          messageCount: messages.length,
+        });
+
+        if (threads.length >= limit) break;
+      }
+
+      return threads;
+    } else {
+      // Gmail: Add label:INBOX to the query
+      const inboxQuery = `label:INBOX ${query}`;
+      return searchGmailDirect(token, inboxQuery, limit);
+    }
+  }
 }

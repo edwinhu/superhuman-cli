@@ -464,3 +464,459 @@ async function searchMSGraphDirect(
 
   return threads;
 }
+
+// ============================================================================
+// Direct API Functions for Labels, Read Status, Archive, etc.
+// ============================================================================
+
+/**
+ * Label type for direct API operations.
+ */
+export interface Label {
+  id: string;
+  name: string;
+  type?: string;
+}
+
+/**
+ * Attachment metadata from thread/message.
+ */
+export interface AttachmentInfo {
+  id: string;
+  attachmentId: string;
+  filename: string;
+  mimeType: string;
+  size: number;
+  messageId: string;
+}
+
+/**
+ * Gmail thread response with full message details.
+ */
+interface GmailThreadFullResponse {
+  id: string;
+  historyId: string;
+  messages: Array<{
+    id: string;
+    threadId: string;
+    labelIds: string[];
+    snippet: string;
+    payload: {
+      mimeType?: string;
+      filename?: string;
+      headers: Array<{ name: string; value: string }>;
+      parts?: Array<{
+        partId: string;
+        mimeType: string;
+        filename?: string;
+        body?: {
+          attachmentId?: string;
+          size?: number;
+          data?: string;
+        };
+        parts?: any[];
+      }>;
+      body?: {
+        attachmentId?: string;
+        size?: number;
+        data?: string;
+      };
+    };
+    internalDate: string;
+  }>;
+}
+
+/**
+ * Modify labels on a Gmail thread (add/remove labels).
+ *
+ * @param token - Token info with accessToken
+ * @param threadId - The Gmail thread ID
+ * @param addLabelIds - Label IDs to add
+ * @param removeLabelIds - Label IDs to remove
+ * @returns true on success
+ */
+export async function modifyThreadLabels(
+  token: TokenInfo,
+  threadId: string,
+  addLabelIds: string[],
+  removeLabelIds: string[]
+): Promise<boolean> {
+  if (token.isMicrosoft) {
+    throw new Error("modifyThreadLabels is Gmail-only. Use updateMessage for MS Graph.");
+  }
+
+  const path = `/threads/${threadId}/modify`;
+  const body = {
+    addLabelIds,
+    removeLabelIds,
+  };
+
+  const result = await gmailFetch(token.accessToken, path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+
+  return result !== null;
+}
+
+/**
+ * Update message properties via MS Graph (isRead, flag, etc.).
+ *
+ * @param token - Token info with accessToken
+ * @param messageId - The MS Graph message ID
+ * @param updates - Properties to update
+ * @returns true on success
+ */
+export async function updateMessage(
+  token: TokenInfo,
+  messageId: string,
+  updates: { isRead?: boolean; flag?: { flagStatus: string } }
+): Promise<boolean> {
+  if (!token.isMicrosoft) {
+    throw new Error("updateMessage is MS Graph-only. Use modifyThreadLabels for Gmail.");
+  }
+
+  const path = `/me/messages/${messageId}`;
+  const result = await msgraphFetch(token.accessToken, path, {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(updates),
+  });
+
+  return result !== null;
+}
+
+/**
+ * Move a message to a folder via MS Graph.
+ *
+ * @param token - Token info with accessToken
+ * @param messageId - The MS Graph message ID
+ * @param destinationFolderId - The target folder ID
+ * @returns true on success
+ */
+export async function moveMessageToFolder(
+  token: TokenInfo,
+  messageId: string,
+  destinationFolderId: string
+): Promise<boolean> {
+  if (!token.isMicrosoft) {
+    throw new Error("moveMessageToFolder is MS Graph-only. Use modifyThreadLabels for Gmail.");
+  }
+
+  const path = `/me/messages/${messageId}/move`;
+  const result = await msgraphFetch(token.accessToken, path, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ destinationId: destinationFolderId }),
+  });
+
+  return result !== null;
+}
+
+/**
+ * List all labels (Gmail) or mail folders (MS Graph).
+ *
+ * @param token - Token info with accessToken and isMicrosoft flag
+ * @returns Array of labels/folders
+ */
+export async function listLabelsDirect(token: TokenInfo): Promise<Label[]> {
+  if (token.isMicrosoft) {
+    // MS Graph: List mail folders
+    const result = await msgraphFetch(token.accessToken, "/me/mailFolders?$top=100");
+
+    if (!result || !result.value) {
+      return [];
+    }
+
+    return result.value.map((f: any) => ({
+      id: f.id,
+      name: f.displayName,
+      type: "folder",
+    }));
+  } else {
+    // Gmail: List labels
+    const result = await gmailFetch(token.accessToken, "/labels");
+
+    if (!result || !result.labels) {
+      return [];
+    }
+
+    return result.labels.map((l: any) => ({
+      id: l.id,
+      name: l.name,
+      type: l.type,
+    }));
+  }
+}
+
+/**
+ * Get a specific folder by well-known name (MS Graph).
+ *
+ * @param token - Token info
+ * @param wellKnownName - e.g., "archive", "deleteditems", "inbox"
+ * @returns Folder info or null
+ */
+export async function getWellKnownFolder(
+  token: TokenInfo,
+  wellKnownName: string
+): Promise<{ id: string; displayName: string } | null> {
+  if (!token.isMicrosoft) {
+    return null;
+  }
+
+  const result = await msgraphFetch(token.accessToken, `/me/mailFolders/${wellKnownName}`);
+  if (!result) {
+    return null;
+  }
+
+  return {
+    id: result.id,
+    displayName: result.displayName,
+  };
+}
+
+/**
+ * List inbox threads directly via Gmail/MS Graph API.
+ *
+ * @param token - Token info
+ * @param limit - Maximum threads to return
+ * @returns Array of InboxThread
+ */
+export async function listInboxDirect(
+  token: TokenInfo,
+  limit: number = 10
+): Promise<InboxThread[]> {
+  if (token.isMicrosoft) {
+    // MS Graph: Get messages from Inbox folder
+    const path = `/me/mailFolders/Inbox/messages?$top=${limit}&$select=id,conversationId,subject,from,receivedDateTime,bodyPreview,isRead`;
+    const result = await msgraphFetch(token.accessToken, path);
+
+    if (!result || !result.value) {
+      return [];
+    }
+
+    // Group by conversationId
+    const conversationMap = new Map<string, any[]>();
+    for (const msg of result.value) {
+      const existing = conversationMap.get(msg.conversationId);
+      if (!existing) {
+        conversationMap.set(msg.conversationId, [msg]);
+      } else {
+        existing.push(msg);
+      }
+    }
+
+    const threads: InboxThread[] = [];
+    for (const [convId, messages] of conversationMap) {
+      messages.sort((a, b) =>
+        new Date(b.receivedDateTime).getTime() - new Date(a.receivedDateTime).getTime()
+      );
+      const latest = messages[0];
+
+      threads.push({
+        id: convId,
+        subject: latest.subject || "(no subject)",
+        from: {
+          email: latest.from?.emailAddress?.address || "",
+          name: latest.from?.emailAddress?.name || "",
+        },
+        date: latest.receivedDateTime,
+        snippet: latest.bodyPreview || "",
+        labelIds: latest.isRead ? [] : ["UNREAD"],
+        messageCount: messages.length,
+      });
+
+      if (threads.length >= limit) break;
+    }
+
+    return threads;
+  } else {
+    // Gmail: Search for inbox messages
+    return searchGmailDirect(token, "label:INBOX", limit);
+  }
+}
+
+/**
+ * Get a Gmail thread with full message details including attachments.
+ *
+ * @param token - Token info
+ * @param threadId - The thread ID
+ * @returns Thread with messages and attachment info
+ */
+export async function getThreadDirect(
+  token: TokenInfo,
+  threadId: string
+): Promise<{
+  id: string;
+  messages: Array<{
+    id: string;
+    labelIds: string[];
+    attachments: AttachmentInfo[];
+  }>;
+} | null> {
+  if (token.isMicrosoft) {
+    // MS Graph: Get conversation messages
+    const path = `/me/messages?$filter=conversationId eq '${threadId}'&$select=id,hasAttachments&$expand=attachments`;
+    const result = await msgraphFetch(token.accessToken, path);
+
+    if (!result || !result.value) {
+      return null;
+    }
+
+    return {
+      id: threadId,
+      messages: result.value.map((msg: any) => ({
+        id: msg.id,
+        labelIds: [],
+        attachments: (msg.attachments || []).map((att: any) => ({
+          id: att.id,
+          attachmentId: att.id,
+          filename: att.name,
+          mimeType: att.contentType,
+          size: att.size || 0,
+          messageId: msg.id,
+        })),
+      })),
+    };
+  } else {
+    // Gmail: Get thread with full format
+    const path = `/threads/${threadId}?format=full`;
+    const result = await gmailFetch(token.accessToken, path) as GmailThreadFullResponse | null;
+
+    if (!result || !result.messages) {
+      return null;
+    }
+
+    return {
+      id: result.id,
+      messages: result.messages.map((msg) => ({
+        id: msg.id,
+        labelIds: msg.labelIds || [],
+        attachments: extractAttachments(msg),
+      })),
+    };
+  }
+}
+
+/**
+ * Extract attachment info from a Gmail message payload.
+ */
+function extractAttachments(message: GmailThreadFullResponse["messages"][0]): AttachmentInfo[] {
+  const attachments: AttachmentInfo[] = [];
+
+  function processParts(parts: any[] | undefined, messageId: string) {
+    if (!parts) return;
+
+    for (const part of parts) {
+      if (part.filename && part.body?.attachmentId) {
+        attachments.push({
+          id: part.body.attachmentId,
+          attachmentId: part.body.attachmentId,
+          filename: part.filename,
+          mimeType: part.mimeType || "application/octet-stream",
+          size: part.body.size || 0,
+          messageId,
+        });
+      }
+
+      // Recurse into nested parts
+      if (part.parts) {
+        processParts(part.parts, messageId);
+      }
+    }
+  }
+
+  // Check top-level body
+  if (message.payload.body?.attachmentId && message.payload.filename) {
+    attachments.push({
+      id: message.payload.body.attachmentId,
+      attachmentId: message.payload.body.attachmentId,
+      filename: message.payload.filename || "attachment",
+      mimeType: message.payload.mimeType || "application/octet-stream",
+      size: message.payload.body.size || 0,
+      messageId: message.id,
+    });
+  }
+
+  // Process parts
+  processParts(message.payload.parts, message.id);
+
+  return attachments;
+}
+
+/**
+ * Download an attachment from Gmail or MS Graph.
+ *
+ * @param token - Token info
+ * @param messageId - The message ID containing the attachment
+ * @param attachmentId - The attachment ID
+ * @returns Base64-encoded attachment data and size
+ */
+export async function downloadAttachmentDirect(
+  token: TokenInfo,
+  messageId: string,
+  attachmentId: string
+): Promise<{ data: string; size: number }> {
+  if (token.isMicrosoft) {
+    // MS Graph: Get attachment content
+    const path = `/me/messages/${messageId}/attachments/${attachmentId}`;
+    const result = await msgraphFetch(token.accessToken, path);
+
+    if (!result) {
+      throw new Error("Failed to download attachment");
+    }
+
+    // MS Graph returns contentBytes as base64
+    return {
+      data: result.contentBytes || "",
+      size: result.size || 0,
+    };
+  } else {
+    // Gmail: Get attachment
+    const path = `/messages/${messageId}/attachments/${attachmentId}`;
+    const result = await gmailFetch(token.accessToken, path);
+
+    if (!result) {
+      throw new Error("Failed to download attachment");
+    }
+
+    // Gmail returns data as URL-safe base64, need to convert
+    const urlSafeBase64 = result.data || "";
+    // Convert URL-safe base64 to standard base64
+    const standardBase64 = urlSafeBase64
+      .replace(/-/g, "+")
+      .replace(/_/g, "/");
+
+    return {
+      data: standardBase64,
+      size: result.size || 0,
+    };
+  }
+}
+
+/**
+ * Get message IDs for a conversation (MS Graph helper).
+ * MS Graph operations work on messages, not threads/conversations.
+ *
+ * @param token - Token info
+ * @param conversationId - The conversation ID
+ * @returns Array of message IDs
+ */
+export async function getConversationMessageIds(
+  token: TokenInfo,
+  conversationId: string
+): Promise<string[]> {
+  if (!token.isMicrosoft) {
+    throw new Error("getConversationMessageIds is MS Graph-only");
+  }
+
+  const path = `/me/messages?$filter=conversationId eq '${conversationId}'&$select=id`;
+  const result = await msgraphFetch(token.accessToken, path);
+
+  if (!result || !result.value) {
+    return [];
+  }
+
+  return result.value.map((m: any) => m.id);
+}

@@ -1,11 +1,21 @@
 /**
  * Labels Module
  *
- * Functions for managing email labels/folders via Superhuman's internal APIs.
- * Supports both Microsoft/Outlook accounts (via msgraph folders) and Gmail accounts (via gmail labels).
+ * Functions for managing email labels/folders via direct Gmail/MS Graph API.
+ * Supports both Microsoft/Outlook accounts (via MS Graph folders) and Gmail accounts (via Gmail labels).
  */
 
 import type { SuperhumanConnection } from "./superhuman-api";
+import {
+  type TokenInfo,
+  getToken,
+  modifyThreadLabels,
+  updateMessage,
+  listLabelsDirect,
+  searchGmailDirect,
+  getConversationMessageIds,
+} from "./token-api";
+import { listAccounts } from "./accounts";
 
 export interface Label {
   id: string;
@@ -19,70 +29,28 @@ export interface LabelResult {
 }
 
 /**
+ * Get token for the current account.
+ */
+async function getCurrentToken(conn: SuperhumanConnection): Promise<TokenInfo> {
+  const accounts = await listAccounts(conn);
+  const currentAccount = accounts.find((a) => a.isCurrent);
+
+  if (!currentAccount) {
+    throw new Error("No current account found");
+  }
+
+  return getToken(conn, currentAccount.email);
+}
+
+/**
  * List all available labels/folders in the account
  *
  * @param conn - The Superhuman connection
  * @returns Array of labels with id and name
  */
 export async function listLabels(conn: SuperhumanConnection): Promise<Label[]> {
-  const { Runtime } = conn;
-
-  const result = await Runtime.evaluate({
-    expression: `
-      (async () => {
-        try {
-          const ga = window.GoogleAccount;
-          const di = ga?.di;
-
-          if (!di) {
-            return { error: "DI container not found", labels: [] };
-          }
-
-          // Check if this is a Microsoft account
-          const isMicrosoft = di.get?.('isMicrosoft');
-
-          if (isMicrosoft) {
-            // Microsoft account: Get folders via msgraph
-            const msgraph = di.get?.('msgraph');
-            if (!msgraph) {
-              return { error: "msgraph service not found", labels: [] };
-            }
-
-            const folders = await msgraph.getAllFolders();
-            return {
-              labels: (folders || []).map(f => ({
-                id: f.id,
-                name: f.displayName,
-                type: 'folder'
-              }))
-            };
-          } else {
-            // Gmail account: Get labels via gmail API
-            const gmail = di.get?.('gmail');
-            if (!gmail) {
-              return { error: "gmail service not found", labels: [] };
-            }
-
-            const gmailLabels = await gmail.getLabels();
-            return {
-              labels: (gmailLabels || []).map(l => ({
-                id: l.id,
-                name: l.name,
-                type: l.type
-              }))
-            };
-          }
-        } catch (e) {
-          return { error: e.message || "Unknown error", labels: [] };
-        }
-      })()
-    `,
-    returnByValue: true,
-    awaitPromise: true,
-  });
-
-  const value = result.result.value as { labels: Label[]; error?: string } | null;
-  return value?.labels ?? [];
+  const token = await getCurrentToken(conn);
+  return listLabelsDirect(token);
 }
 
 /**
@@ -96,93 +64,54 @@ export async function getThreadLabels(
   conn: SuperhumanConnection,
   threadId: string
 ): Promise<Label[]> {
-  const { Runtime } = conn;
+  const token = await getCurrentToken(conn);
 
-  const result = await Runtime.evaluate({
-    expression: `
-      (async () => {
-        try {
-          const threadId = ${JSON.stringify(threadId)};
-          const ga = window.GoogleAccount;
-          const di = ga?.di;
+  // Get all labels to build name mapping
+  const allLabels = await listLabelsDirect(token);
+  const labelMap = new Map(allLabels.map((l) => [l.id, l]));
 
-          if (!di) {
-            return { error: "DI container not found", labels: [] };
-          }
+  if (token.isMicrosoft) {
+    // For MS Graph, we need to get the message and check its folder
+    const messageIds = await getConversationMessageIds(token, threadId);
+    if (messageIds.length === 0) {
+      return [];
+    }
 
-          // Get the thread from identity map
-          const thread = ga?.threads?.identityMap?.get?.(threadId);
-          if (!thread) {
-            return { error: "Thread not found", labels: [] };
-          }
+    // MS Graph messages have parentFolderId
+    const response = await fetch(
+      `https://graph.microsoft.com/v1.0/me/messages/${messageIds[0]}?$select=parentFolderId`,
+      {
+        headers: { Authorization: `Bearer ${token.accessToken}` },
+      }
+    );
 
-          const model = thread._threadModel;
-          if (!model) {
-            return { error: "Thread model not found", labels: [] };
-          }
+    if (!response.ok) {
+      return [];
+    }
 
-          const labelIds = model.labelIds || [];
+    const msg = await response.json() as { parentFolderId?: string };
+    const folderId = msg.parentFolderId;
+    const folder = labelMap.get(folderId);
 
-          // Check if this is a Microsoft account
-          const isMicrosoft = di.get?.('isMicrosoft');
+    return folder ? [folder] : [];
+  } else {
+    // Gmail: Get thread to get labelIds
+    const response = await fetch(
+      `https://www.googleapis.com/gmail/v1/users/me/threads/${threadId}?format=minimal`,
+      {
+        headers: { Authorization: `Bearer ${token.accessToken}` },
+      }
+    );
 
-          if (isMicrosoft) {
-            // For Microsoft, get folder info for each label ID
-            const msgraph = di.get?.('msgraph');
-            if (!msgraph) {
-              // Return just IDs if we can't get names
-              return {
-                labels: labelIds.map(id => ({ id, name: id, type: 'folder' }))
-              };
-            }
+    if (!response.ok) {
+      return [];
+    }
 
-            const folders = await msgraph.getAllFolders();
-            const folderMap = new Map((folders || []).map(f => [f.id, f]));
+    const thread = await response.json() as { messages?: Array<{ labelIds?: string[] }> };
+    const labelIds = thread.messages?.[0]?.labelIds || [];
 
-            return {
-              labels: labelIds.map(id => {
-                const folder = folderMap.get(id);
-                return {
-                  id,
-                  name: folder?.displayName || id,
-                  type: 'folder'
-                };
-              })
-            };
-          } else {
-            // Gmail: Get label info from labels service or gmail API
-            const labelsService = di.get?.('labels');
-            const gmail = di.get?.('gmail');
-
-            let allLabels = [];
-            if (gmail) {
-              allLabels = await gmail.getLabels() || [];
-            }
-
-            const labelMap = new Map(allLabels.map(l => [l.id, l]));
-
-            return {
-              labels: labelIds.map(id => {
-                const label = labelMap.get(id);
-                return {
-                  id,
-                  name: label?.name || id,
-                  type: label?.type
-                };
-              })
-            };
-          }
-        } catch (e) {
-          return { error: e.message || "Unknown error", labels: [] };
-        }
-      })()
-    `,
-    returnByValue: true,
-    awaitPromise: true,
-  });
-
-  const value = result.result.value as { labels: Label[]; error?: string } | null;
-  return value?.labels ?? [];
+    return labelIds.map((id: string) => labelMap.get(id) || { id, name: id });
+  }
 }
 
 /**
@@ -198,93 +127,25 @@ export async function addLabel(
   threadId: string,
   labelId: string
 ): Promise<LabelResult> {
-  const { Runtime } = conn;
+  try {
+    const token = await getCurrentToken(conn);
 
-  const result = await Runtime.evaluate({
-    expression: `
-      (async () => {
-        try {
-          const threadId = ${JSON.stringify(threadId)};
-          const labelId = ${JSON.stringify(labelId)};
-          const ga = window.GoogleAccount;
-          const di = ga?.di;
-
-          if (!di) {
-            return { success: false, error: "DI container not found" };
-          }
-
-          // Get the thread from identity map
-          const thread = ga?.threads?.identityMap?.get?.(threadId);
-          if (!thread) {
-            return { success: false, error: "Thread not found" };
-          }
-
-          const model = thread._threadModel;
-          if (!model) {
-            return { success: false, error: "Thread model not found" };
-          }
-
-          // Check if thread already has this label
-          if (model.labelIds && model.labelIds.includes(labelId)) {
-            return { success: true }; // Already has the label
-          }
-
-          // Check if this is a Microsoft account
-          const isMicrosoft = di.get?.('isMicrosoft');
-
-          if (isMicrosoft) {
-            // Microsoft account: Move messages to folder (labels are folders in Outlook)
-            const msgraph = di.get?.('msgraph');
-            if (!msgraph) {
-              return { success: false, error: "msgraph service not found" };
-            }
-
-            const messageIds = model.messageIds;
-            if (!messageIds || messageIds.length === 0) {
-              return { success: false, error: "No messages found in thread" };
-            }
-
-            // Move messages to the label/folder
-            const moveRequests = messageIds.map(messageId => ({
-              messageId,
-              destinationFolderId: labelId
-            }));
-
-            await msgraph.moveMessages(moveRequests);
-          } else {
-            // Gmail account: Add label via changeLabelsPerThread
-            const gmail = di.get?.('gmail');
-            if (!gmail) {
-              return { success: false, error: "gmail service not found" };
-            }
-
-            await gmail.changeLabelsPerThread(threadId, [labelId], []);
-          }
-
-          // Update local state
-          if (!model.labelIds) {
-            model.labelIds = [];
-          }
-          if (!model.labelIds.includes(labelId)) {
-            model.labelIds.push(labelId);
-          }
-
-          try {
-            thread.recalculateListIds?.();
-          } catch (e) {}
-
-          return { success: true };
-        } catch (e) {
-          return { success: false, error: e.message || "Unknown error" };
-        }
-      })()
-    `,
-    returnByValue: true,
-    awaitPromise: true,
-  });
-
-  const value = result.result.value as { success: boolean; error?: string } | null;
-  return { success: value?.success ?? false, error: value?.error };
+    if (token.isMicrosoft) {
+      // Microsoft: Move messages to the folder (label = folder in MS)
+      // This is complex because MS Graph doesn't have a direct "add label" concept
+      // For folders, adding a label means moving to that folder
+      return {
+        success: false,
+        error: "Adding labels to Microsoft accounts not yet supported via direct API. Use folders instead.",
+      };
+    } else {
+      // Gmail: Add label via threads.modify
+      const success = await modifyThreadLabels(token, threadId, [labelId], []);
+      return { success };
+    }
+  } catch (e: any) {
+    return { success: false, error: e.message || "Unknown error" };
+  }
 }
 
 /**
@@ -300,74 +161,22 @@ export async function removeLabel(
   threadId: string,
   labelId: string
 ): Promise<LabelResult> {
-  const { Runtime } = conn;
+  try {
+    const token = await getCurrentToken(conn);
 
-  const result = await Runtime.evaluate({
-    expression: `
-      (async () => {
-        try {
-          const threadId = ${JSON.stringify(threadId)};
-          const labelId = ${JSON.stringify(labelId)};
-          const ga = window.GoogleAccount;
-          const di = ga?.di;
-
-          if (!di) {
-            return { success: false, error: "DI container not found" };
-          }
-
-          // Get the thread from identity map
-          const thread = ga?.threads?.identityMap?.get?.(threadId);
-          if (!thread) {
-            return { success: false, error: "Thread not found" };
-          }
-
-          const model = thread._threadModel;
-          if (!model) {
-            return { success: false, error: "Thread model not found" };
-          }
-
-          // Check if thread has this label
-          if (!model.labelIds || !model.labelIds.includes(labelId)) {
-            return { success: true }; // Already doesn't have the label
-          }
-
-          // Check if this is a Microsoft account
-          const isMicrosoft = di.get?.('isMicrosoft');
-
-          if (isMicrosoft) {
-            // Microsoft: For labels that are categories, we need different handling
-            // For folders, removing is more complex - typically move back to inbox
-            // For now, return an error as folder-based label removal is complex
-            return { success: false, error: "Removing folder labels not yet supported for Microsoft accounts" };
-          } else {
-            // Gmail account: Remove label via changeLabelsPerThread
-            const gmail = di.get?.('gmail');
-            if (!gmail) {
-              return { success: false, error: "gmail service not found" };
-            }
-
-            await gmail.changeLabelsPerThread(threadId, [], [labelId]);
-          }
-
-          // Update local state
-          model.labelIds = model.labelIds.filter(l => l !== labelId);
-
-          try {
-            thread.recalculateListIds?.();
-          } catch (e) {}
-
-          return { success: true };
-        } catch (e) {
-          return { success: false, error: e.message || "Unknown error" };
-        }
-      })()
-    `,
-    returnByValue: true,
-    awaitPromise: true,
-  });
-
-  const value = result.result.value as { success: boolean; error?: string } | null;
-  return { success: value?.success ?? false, error: value?.error };
+    if (token.isMicrosoft) {
+      return {
+        success: false,
+        error: "Removing labels from Microsoft accounts not yet supported via direct API.",
+      };
+    } else {
+      // Gmail: Remove label via threads.modify
+      const success = await modifyThreadLabels(token, threadId, [], [labelId]);
+      return { success };
+    }
+  } catch (e: any) {
+    return { success: false, error: e.message || "Unknown error" };
+  }
 }
 
 /**
@@ -381,91 +190,33 @@ export async function starThread(
   conn: SuperhumanConnection,
   threadId: string
 ): Promise<LabelResult> {
-  const { Runtime } = conn;
+  try {
+    const token = await getCurrentToken(conn);
 
-  const result = await Runtime.evaluate({
-    expression: `
-      (async () => {
-        try {
-          const threadId = ${JSON.stringify(threadId)};
-          const ga = window.GoogleAccount;
-          const di = ga?.di;
+    if (token.isMicrosoft) {
+      // Microsoft: Flag all messages in the conversation
+      const messageIds = await getConversationMessageIds(token, threadId);
 
-          if (!di) {
-            return { success: false, error: "DI container not found" };
-          }
+      if (messageIds.length === 0) {
+        return { success: false, error: "No messages found in conversation" };
+      }
 
-          // Get the thread from identity map
-          const thread = ga?.threads?.identityMap?.get?.(threadId);
-          if (!thread) {
-            return { success: false, error: "Thread not found" };
-          }
+      // Flag each message
+      for (const msgId of messageIds) {
+        await updateMessage(token, msgId, {
+          flag: { flagStatus: "flagged" },
+        });
+      }
 
-          const model = thread._threadModel;
-          if (!model) {
-            return { success: false, error: "Thread model not found" };
-          }
-
-          // Check if thread already has STARRED label
-          if (model.labelIds && model.labelIds.includes("STARRED")) {
-            return { success: true }; // Already starred
-          }
-
-          // Check if this is a Microsoft account
-          const isMicrosoft = di.get?.('isMicrosoft');
-
-          if (isMicrosoft) {
-            // Microsoft account: Use flag property via msgraph
-            const msgraph = di.get?.('msgraph');
-            if (!msgraph) {
-              return { success: false, error: "msgraph service not found" };
-            }
-
-            const messageIds = model.messageIds;
-            if (!messageIds || messageIds.length === 0) {
-              return { success: false, error: "No messages found in thread" };
-            }
-
-            // Flag all messages in the thread
-            await msgraph.updateMessages(
-              messageIds,
-              { flag: { flagStatus: "flagged" } },
-              { action: "flag" }
-            );
-          } else {
-            // Gmail account: Add STARRED label via changeLabelsPerThread
-            const gmail = di.get?.('gmail');
-            if (!gmail) {
-              return { success: false, error: "gmail service not found" };
-            }
-
-            await gmail.changeLabelsPerThread(threadId, ["STARRED"], []);
-
-            // Update local state for Gmail
-            if (!model.labelIds) {
-              model.labelIds = [];
-            }
-            if (!model.labelIds.includes("STARRED")) {
-              model.labelIds.push("STARRED");
-            }
-
-            try {
-              thread.recalculateListIds?.();
-            } catch (e) {}
-          }
-
-          return { success: true };
-        } catch (e) {
-          return { success: false, error: e.message || "Unknown error" };
-        }
-      })()
-    `,
-    returnByValue: true,
-    awaitPromise: true,
-  });
-
-  const value = result.result.value as { success: boolean; error?: string } | null;
-  return { success: value?.success ?? false, error: value?.error };
+      return { success: true };
+    } else {
+      // Gmail: Add STARRED label
+      const success = await modifyThreadLabels(token, threadId, ["STARRED"], []);
+      return { success };
+    }
+  } catch (e: any) {
+    return { success: false, error: e.message || "Unknown error" };
+  }
 }
 
 /**
@@ -479,86 +230,33 @@ export async function unstarThread(
   conn: SuperhumanConnection,
   threadId: string
 ): Promise<LabelResult> {
-  const { Runtime } = conn;
+  try {
+    const token = await getCurrentToken(conn);
 
-  const result = await Runtime.evaluate({
-    expression: `
-      (async () => {
-        try {
-          const threadId = ${JSON.stringify(threadId)};
-          const ga = window.GoogleAccount;
-          const di = ga?.di;
+    if (token.isMicrosoft) {
+      // Microsoft: Unflag all messages in the conversation
+      const messageIds = await getConversationMessageIds(token, threadId);
 
-          if (!di) {
-            return { success: false, error: "DI container not found" };
-          }
+      if (messageIds.length === 0) {
+        return { success: false, error: "No messages found in conversation" };
+      }
 
-          // Get the thread from identity map
-          const thread = ga?.threads?.identityMap?.get?.(threadId);
-          if (!thread) {
-            return { success: false, error: "Thread not found" };
-          }
+      // Unflag each message
+      for (const msgId of messageIds) {
+        await updateMessage(token, msgId, {
+          flag: { flagStatus: "notFlagged" },
+        });
+      }
 
-          const model = thread._threadModel;
-          if (!model) {
-            return { success: false, error: "Thread model not found" };
-          }
-
-          // Check if this is a Microsoft account
-          const isMicrosoft = di.get?.('isMicrosoft');
-
-          if (isMicrosoft) {
-            // Microsoft account: Use flag property via msgraph
-            const msgraph = di.get?.('msgraph');
-            if (!msgraph) {
-              return { success: false, error: "msgraph service not found" };
-            }
-
-            const messageIds = model.messageIds;
-            if (!messageIds || messageIds.length === 0) {
-              return { success: false, error: "No messages found in thread" };
-            }
-
-            // Unflag all messages in the thread
-            await msgraph.updateMessages(
-              messageIds,
-              { flag: { flagStatus: "notFlagged" } },
-              { action: "unflag" }
-            );
-          } else {
-            // Gmail: Check if thread has STARRED label
-            if (!model.labelIds || !model.labelIds.includes("STARRED")) {
-              return { success: true }; // Already not starred
-            }
-
-            // Gmail account: Remove STARRED label via changeLabelsPerThread
-            const gmail = di.get?.('gmail');
-            if (!gmail) {
-              return { success: false, error: "gmail service not found" };
-            }
-
-            await gmail.changeLabelsPerThread(threadId, [], ["STARRED"]);
-
-            // Update local state
-            model.labelIds = model.labelIds.filter(l => l !== "STARRED");
-
-            try {
-              thread.recalculateListIds?.();
-            } catch (e) {}
-          }
-
-          return { success: true };
-        } catch (e) {
-          return { success: false, error: e.message || "Unknown error" };
-        }
-      })()
-    `,
-    returnByValue: true,
-    awaitPromise: true,
-  });
-
-  const value = result.result.value as { success: boolean; error?: string } | null;
-  return { success: value?.success ?? false, error: value?.error };
+      return { success: true };
+    } else {
+      // Gmail: Remove STARRED label
+      const success = await modifyThreadLabels(token, threadId, [], ["STARRED"]);
+      return { success };
+    }
+  } catch (e: any) {
+    return { success: false, error: e.message || "Unknown error" };
+  }
 }
 
 /**
@@ -572,83 +270,42 @@ export async function listStarred(
   conn: SuperhumanConnection,
   limit: number = 50
 ): Promise<Array<{ id: string }>> {
-  const { Runtime } = conn;
+  try {
+    const token = await getCurrentToken(conn);
 
-  const result = await Runtime.evaluate({
-    expression: `
-      (async () => {
-        try {
-          const ga = window.GoogleAccount;
-          const di = ga?.di;
-
-          if (!di) {
-            return { error: "DI container not found", threads: [] };
-          }
-
-          // Check if this is a Microsoft account
-          const isMicrosoft = di.get?.('isMicrosoft');
-
-          if (isMicrosoft) {
-            // Microsoft account: Query flagged messages via msgraph
-            const msgraph = di.get?.('msgraph');
-            if (!msgraph) {
-              return { error: "msgraph service not found", threads: [] };
-            }
-
-            try {
-              // Search for flagged messages using filter
-              const messages = await msgraph.searchMessages({
-                filter: "flag/flagStatus eq 'flagged'",
-                limit: ${limit}
-              });
-
-              if (!messages || messages.length === 0) {
-                return { threads: [] };
-              }
-
-              // Group by conversationId to get unique threads
-              const threadIds = new Set();
-              messages.forEach(m => {
-                if (m.conversationId) {
-                  threadIds.add(m.conversationId);
-                }
-              });
-
-              return {
-                threads: Array.from(threadIds).map(id => ({ id }))
-              };
-            } catch (e) {
-              // Fallback: return empty if search fails
-              return { error: e.message, threads: [] };
-            }
-          }
-
-          // Gmail: Use portal to list threads with STARRED label
-          const response = await ga.portal.invoke(
-            "threadInternal",
-            "listAsync",
-            ["STARRED", { limit: ${limit}, filters: [], query: "" }]
-          );
-
-          if (!response?.threads) {
-            return { threads: [] };
-          }
-
-          return {
-            threads: response.threads.map(t => {
-              const thread = t.json || t;
-              return { id: thread.id };
-            })
-          };
-        } catch (e) {
-          return { error: e.message || "Unknown error", threads: [] };
+    if (token.isMicrosoft) {
+      // MS Graph: Search for flagged messages
+      const response = await fetch(
+        `https://graph.microsoft.com/v1.0/me/messages?$filter=flag/flagStatus eq 'flagged'&$top=${limit}&$select=conversationId`,
+        {
+          headers: { Authorization: `Bearer ${token.accessToken}` },
         }
-      })()
-    `,
-    returnByValue: true,
-    awaitPromise: true,
-  });
+      );
 
-  const value = result.result.value as { threads: Array<{ id: string }>; error?: string } | null;
-  return value?.threads ?? [];
+      if (!response.ok) {
+        return [];
+      }
+
+      const result = await response.json() as { value?: Array<{ conversationId?: string }> };
+      if (!result.value) {
+        return [];
+      }
+
+      // Get unique conversation IDs
+      const conversationIds = new Set<string>();
+      for (const msg of result.value) {
+        if (msg.conversationId) {
+          conversationIds.add(msg.conversationId);
+        }
+      }
+
+      return Array.from(conversationIds).map((id) => ({ id }));
+    } else {
+      // Gmail: Search for starred messages
+      const threads = await searchGmailDirect(token, "is:starred", limit);
+      return threads.map((t) => ({ id: t.id }));
+    }
+  } catch (e) {
+    return [];
+  }
 }
