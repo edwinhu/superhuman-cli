@@ -36,6 +36,8 @@ import {
   type CreateEventInput,
   type UpdateEventInput,
 } from "../calendar";
+import { listSnippets, findSnippet, applyVars, parseVars } from "../snippets";
+import { getUserInfo, createDraftWithUserInfo, sendDraftSuperhuman } from "../draft-api";
 
 const CDP_PORT = 9333;
 
@@ -1552,6 +1554,135 @@ export async function calendarFreeBusyHandler(args: z.infer<typeof CalendarFreeB
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     return errorResult(`Failed to check free/busy: ${message}`);
+  } finally {
+    if (conn) await disconnect(conn);
+  }
+}
+
+// =============================================================================
+// Snippets Tools
+// =============================================================================
+
+export const SnippetsSchema = z.object({});
+
+export const UseSnippetSchema = z.object({
+  name: z.string().describe("Snippet name to search for (fuzzy match)"),
+  to: z.string().optional().describe("Recipient email address (overrides snippet default)"),
+  cc: z.string().optional().describe("CC recipient email (overrides snippet default)"),
+  bcc: z.string().optional().describe("BCC recipient email (overrides snippet default)"),
+  vars: z.string().optional().describe("Template variables as 'key1=val1,key2=val2'"),
+  send: z.boolean().optional().describe("Send immediately instead of creating draft (default: false)"),
+});
+
+/**
+ * Handler for superhuman_snippets tool - list all snippets
+ */
+export async function snippetsHandler(_args: z.infer<typeof SnippetsSchema>): Promise<ToolResult> {
+  let conn: SuperhumanConnection | null = null;
+
+  try {
+    conn = await connectToSuperhuman(CDP_PORT);
+    if (!conn) {
+      throw new Error("Could not connect to Superhuman. Make sure it's running with --remote-debugging-port=9333");
+    }
+
+    const userInfo = await getUserInfo(conn);
+    const snippets = await listSnippets(userInfo);
+
+    if (snippets.length === 0) {
+      return successResult("No snippets found");
+    }
+
+    const snippetsList = snippets
+      .map((s) => {
+        const lastUsed = s.lastSentAt ? new Date(s.lastSentAt).toLocaleDateString() : "never";
+        return `- ${s.name}\n  Sends: ${s.sends} | Last used: ${lastUsed}\n  Subject: ${s.subject || "(none)"}\n  Preview: ${s.snippet || "(empty)"}`;
+      })
+      .join("\n\n");
+
+    return successResult(`Snippets (${snippets.length}):\n\n${snippetsList}`);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return errorResult(`Failed to list snippets: ${message}`);
+  } finally {
+    if (conn) await disconnect(conn);
+  }
+}
+
+/**
+ * Handler for superhuman_snippet tool - use a snippet to compose/send
+ */
+export async function useSnippetHandler(args: z.infer<typeof UseSnippetSchema>): Promise<ToolResult> {
+  let conn: SuperhumanConnection | null = null;
+
+  try {
+    conn = await connectToSuperhuman(CDP_PORT);
+    if (!conn) {
+      throw new Error("Could not connect to Superhuman. Make sure it's running with --remote-debugging-port=9333");
+    }
+
+    const userInfo = await getUserInfo(conn);
+    const snippets = await listSnippets(userInfo);
+    const snippet = findSnippet(snippets, args.name);
+
+    if (!snippet) {
+      const available = snippets.map((s) => s.name).join(", ");
+      return errorResult(`No snippet matching "${args.name}". Available: ${available}`);
+    }
+
+    // Apply template variables
+    const vars = args.vars ? parseVars(args.vars) : {};
+    let body = snippet.body;
+    let subject = snippet.subject;
+    if (Object.keys(vars).length > 0) {
+      body = applyVars(body, vars);
+      subject = applyVars(subject, vars);
+    }
+
+    // Merge recipients
+    const to = args.to ? [args.to] : snippet.to;
+    const cc = args.cc ? [args.cc] : snippet.cc.length > 0 ? snippet.cc : undefined;
+    const bcc = args.bcc ? [args.bcc] : snippet.bcc.length > 0 ? snippet.bcc : undefined;
+
+    if (args.send) {
+      if (to.length === 0) {
+        return errorResult("At least one recipient is required (provide 'to' or snippet must have default recipients)");
+      }
+
+      const draftResult = await createDraftWithUserInfo(userInfo, { to, cc, bcc, subject, body });
+      if (!draftResult.success || !draftResult.draftId || !draftResult.threadId) {
+        return errorResult(`Failed to create draft: ${draftResult.error}`);
+      }
+
+      const sendResult = await sendDraftSuperhuman(userInfo, {
+        draftId: draftResult.draftId,
+        threadId: draftResult.threadId,
+        to: to.map((email) => ({ email })),
+        cc: cc?.map((email) => ({ email })),
+        bcc: bcc?.map((email) => ({ email })),
+        subject,
+        htmlBody: body,
+        delay: 0,
+      });
+
+      if (sendResult.success) {
+        return successResult(`Sent using snippet "${snippet.name}" to ${to.join(", ")}`);
+      } else {
+        return errorResult(`Failed to send: ${sendResult.error}`);
+      }
+    } else {
+      const result = await createDraftWithUserInfo(userInfo, { to, cc, bcc, subject, body });
+      if (result.success) {
+        return successResult(
+          `Draft created from snippet "${snippet.name}"\nDraft ID: ${result.draftId}\nTo: ${to.join(", ")}\nSubject: ${subject || "(none)"}`
+        );
+      } else {
+        return errorResult(`Failed to create draft: ${result.error}`);
+      }
+    }
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return errorResult(`Failed to use snippet: ${message}`);
   } finally {
     if (conn) await disconnect(conn);
   }

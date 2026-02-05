@@ -74,7 +74,7 @@ export function getUserInfoFromCache(
 /**
  * Extract user info and token needed for direct API calls (via CDP)
  */
-async function getUserInfo(conn: SuperhumanConnection): Promise<UserInfo> {
+export async function getUserInfo(conn: SuperhumanConnection): Promise<UserInfo> {
   const { Runtime } = conn;
 
   const result = await Runtime.evaluate({

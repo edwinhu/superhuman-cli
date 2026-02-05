@@ -22,7 +22,9 @@ import {
   starHandler, unstarHandler, starredHandler,
   snoozeHandler, unsnoozeHandler, snoozedHandler,
   attachmentsHandler, downloadAttachmentHandler, addAttachmentHandler,
-  calendarListHandler, calendarCreateHandler, calendarUpdateHandler, calendarDeleteHandler, calendarFreeBusyHandler
+  calendarListHandler, calendarCreateHandler, calendarUpdateHandler, calendarDeleteHandler, calendarFreeBusyHandler,
+  SnippetsSchema, UseSnippetSchema,
+  snippetsHandler, useSnippetHandler
 } from "./tools";
 
 function createMcpServer(): McpServer {
@@ -317,6 +319,24 @@ function createMcpServer(): McpServer {
       inputSchema: CalendarFreeBusySchema,
     },
     calendarFreeBusyHandler
+  );
+
+  server.registerTool(
+    "superhuman_snippets",
+    {
+      description: "List all snippets (reusable email templates) in Superhuman. Returns snippet names, usage stats, and previews.",
+      inputSchema: SnippetsSchema,
+    },
+    snippetsHandler
+  );
+
+  server.registerTool(
+    "superhuman_snippet",
+    {
+      description: "Use a snippet to compose or send an email. Fuzzy-matches snippet by name, applies template variables, and creates a draft or sends immediately.",
+      inputSchema: UseSnippetSchema,
+    },
+    useSnippetHandler
   );
 
   return server;

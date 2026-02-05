@@ -47,8 +47,9 @@ import {
   type UpdateEventInput,
 } from "./calendar";
 import { sendEmail, createDraft, updateDraft, sendDraftById, deleteDraft } from "./send-api";
-import { createDraftDirect, createDraftWithUserInfo, getUserInfoFromCache, sendDraftSuperhuman, type Recipient } from "./draft-api";
+import { createDraftDirect, createDraftWithUserInfo, getUserInfo, getUserInfoFromCache, sendDraftSuperhuman, type Recipient, type UserInfo } from "./draft-api";
 import { searchContacts, resolveRecipient, type Contact } from "./contacts";
+import { listSnippets, findSnippet, applyVars, parseVars } from "./snippets";
 import {
   getToken,
   saveTokensToDisk,
@@ -65,7 +66,7 @@ import {
   sendEmailDirect,
 } from "./token-api";
 
-const VERSION = "0.8.0";
+const VERSION = "0.9.0";
 const CDP_PORT = 9333;
 
 // ANSI colors
@@ -162,6 +163,8 @@ ${colors.bold}COMMANDS${colors.reset}
   ${colors.cyan}calendar-delete${colors.reset} Delete a calendar event
   ${colors.cyan}calendar-free${colors.reset} Check free/busy availability
   ${colors.cyan}contacts${colors.reset}   Search contacts by name
+  ${colors.cyan}snippets${colors.reset}   List all snippets (reusable email templates)
+  ${colors.cyan}snippet${colors.reset}    Use a snippet to compose or send an email
   ${colors.cyan}ai${colors.reset}         Ask AI about an email thread (summarize, action items, etc.)
   ${colors.cyan}compose${colors.reset}    Open compose window and fill in email (keeps window open)
   ${colors.cyan}draft${colors.reset}      Create or update a draft
@@ -181,6 +184,7 @@ ${colors.bold}OPTIONS${colors.reset}
   --html <text>      Email body as HTML
   --send             Send immediately instead of saving as draft (for reply/reply-all/forward)
   --update <id>      Draft ID to update (for draft command)
+  --vars <pairs>     Template variable substitution: "key1=val1,key2=val2" (for snippet)
   --provider <type>  Draft API: "superhuman" (default), "gmail", or "outlook"
   --draft <id>       Draft ID to send (for send command)
   --thread <id>      Thread ID for reply/forward drafts (for send-draft command)
@@ -306,6 +310,15 @@ ${colors.bold}EXAMPLES${colors.reset}
   superhuman contacts search "john"
   superhuman contacts search "john" --limit 5 --json
 
+  ${colors.dim}# List snippets${colors.reset}
+  superhuman snippets
+  superhuman snippets --json
+
+  ${colors.dim}# Use a snippet to compose${colors.reset}
+  superhuman snippet "zoom link" --to user@example.com
+  superhuman snippet "share recordings" --to user@example.com --vars "date=Feb 5,student_name=Jane"
+  superhuman snippet "share recordings" --to user@example.com --vars "date=Feb 5" --send
+
   ${colors.dim}# Ask AI about an email thread${colors.reset}
   superhuman ai <thread-id> "summarize this thread"
   superhuman ai <thread-id> "what are the action items?"
@@ -405,6 +418,9 @@ interface CliOptions {
   includeDone: boolean; // use direct Gmail API to search all emails including archived
   // ai options
   aiQuery: string; // question to ask the AI
+  // snippet options
+  snippetQuery: string; // snippet name for fuzzy matching
+  vars: string; // template variable substitution: "key1=val1,key2=val2"
   // draft provider option
   provider: "superhuman" | "gmail" | "outlook"; // which API to use for drafts (default: superhuman)
 }
@@ -451,6 +467,8 @@ function parseArgs(args: string[]): CliOptions {
     contactsQuery: "",
     includeDone: false,
     aiQuery: "",
+    snippetQuery: "",
+    vars: "",
     provider: "superhuman",
   };
 
@@ -600,6 +618,10 @@ function parseArgs(args: string[]): CliOptions {
           options.includeDone = true;
           i += 1;
           break;
+        case "vars":
+          options.vars = unescapeString(value);
+          i += inc;
+          break;
         case "provider":
           if (value === "superhuman" || value === "gmail" || value === "outlook") {
             options.provider = value;
@@ -695,6 +717,10 @@ function parseArgs(args: string[]): CliOptions {
       // Allow search query as positional argument for contacts search
       options.contactsQuery = unescapeString(arg);
       i += 1;
+    } else if (options.command === "snippet" && !options.snippetQuery) {
+      // Allow snippet name as positional argument
+      options.snippetQuery = unescapeString(arg);
+      i += 1;
     } else if (options.command === "send-draft" && !options.sendDraftDraftId) {
       // Allow draft ID as positional argument for send-draft
       options.sendDraftDraftId = unescapeString(arg);
@@ -767,6 +793,179 @@ async function cmdStatus(options: CliOptions) {
   }
 
   await disconnect(conn);
+}
+
+/**
+ * Resolve UserInfo for Superhuman backend API calls.
+ * Tries cached credentials first (by --account, then any cached account), falls back to CDP.
+ */
+async function resolveBackendUserInfo(
+  options: CliOptions
+): Promise<{ userInfo: UserInfo; email: string }> {
+  await loadTokensFromDisk();
+
+  if (options.account && (await hasCachedSuperhumanCredentials(options.account))) {
+    const token = await getCachedToken(options.account);
+    if (token?.idToken && token?.userId) {
+      return {
+        userInfo: getUserInfoFromCache(token.userId, token.email, token.idToken),
+        email: token.email,
+      };
+    }
+  }
+
+  const accounts = getCachedAccounts();
+  for (const email of accounts) {
+    if (await hasCachedSuperhumanCredentials(email)) {
+      const token = await getCachedToken(email);
+      if (token?.idToken && token?.userId) {
+        return {
+          userInfo: getUserInfoFromCache(token.userId, token.email, token.idToken),
+          email: token.email,
+        };
+      }
+    }
+  }
+
+  // Fall back to CDP
+  const conn = await checkConnection(options.port);
+  if (!conn) process.exit(1);
+  const userInfo = await getUserInfo(conn);
+  await disconnect(conn);
+  return { userInfo, email: userInfo.email };
+}
+
+async function cmdSnippets(options: CliOptions) {
+  const { userInfo } = await resolveBackendUserInfo(options);
+  const snippets = await listSnippets(userInfo);
+
+  if (options.json) {
+    console.log(JSON.stringify(snippets, null, 2));
+  } else {
+    if (snippets.length === 0) {
+      info("No snippets found");
+    } else {
+      console.log(
+        `${colors.dim}${"Name".padEnd(35)} ${"Sends".padEnd(7)} ${"Last Used".padEnd(12)}${colors.reset}`
+      );
+      console.log(colors.dim + "─".repeat(56) + colors.reset);
+
+      for (const s of snippets) {
+        const name = truncate(s.name, 34);
+        const sends = String(s.sends).padEnd(7);
+        const lastUsed = s.lastSentAt ? formatDate(s.lastSentAt) : "never";
+        console.log(`${name.padEnd(35)} ${sends} ${lastUsed}`);
+      }
+
+      log(`\n${colors.dim}${snippets.length} snippet(s)${colors.reset}`);
+    }
+  }
+}
+
+async function cmdSnippet(options: CliOptions) {
+  if (!options.snippetQuery) {
+    error("Snippet name is required");
+    console.log(`Usage: superhuman snippet <name> [--to <email>] [--vars "key=val,..."] [--send]`);
+    process.exit(1);
+  }
+
+  const { userInfo, email: accountEmail } = await resolveBackendUserInfo(options);
+
+  // Fetch snippets and fuzzy match
+  const snippets = await listSnippets(userInfo);
+  const snippet = findSnippet(snippets, options.snippetQuery);
+
+  if (!snippet) {
+    error(`No snippet matching "${options.snippetQuery}"`);
+    if (snippets.length > 0) {
+      log(`\n${colors.dim}Available snippets:${colors.reset}`);
+      for (const s of snippets) {
+        log(`  - ${s.name}`);
+      }
+    }
+    process.exit(1);
+  }
+
+  info(`Using snippet: ${snippet.name}`);
+
+  // Apply template variables
+  const vars = options.vars ? parseVars(options.vars) : {};
+  let body = snippet.body;
+  let subject = snippet.subject;
+  if (Object.keys(vars).length > 0) {
+    body = applyVars(body, vars);
+    subject = applyVars(subject, vars);
+    info(`Applied variables: ${Object.keys(vars).join(", ")}`);
+  }
+
+  // Merge recipients: CLI args override/extend snippet defaults
+  const to = options.to.length > 0 ? options.to : snippet.to;
+  const cc = options.cc.length > 0 ? options.cc : snippet.cc.length > 0 ? snippet.cc : undefined;
+  const bcc = options.bcc.length > 0 ? options.bcc : snippet.bcc.length > 0 ? snippet.bcc : undefined;
+
+  if (options.send) {
+    // Send immediately
+    if (to.length === 0) {
+      error("At least one recipient is required (--to or snippet default)");
+      process.exit(1);
+    }
+
+    const toRecipients = to.map((email: string) => ({ email }));
+    const ccRecipients = cc?.map((email: string) => ({ email }));
+    const bccRecipients = bcc?.map((email: string) => ({ email }));
+
+    // Create draft first, then send
+    const draftResult = await createDraftWithUserInfo(userInfo, {
+      to,
+      cc,
+      bcc,
+      subject,
+      body,
+    });
+
+    if (!draftResult.success || !draftResult.draftId || !draftResult.threadId) {
+      error(`Failed to create draft: ${draftResult.error}`);
+      process.exit(1);
+    }
+
+    const sendResult = await sendDraftSuperhuman(userInfo, {
+      draftId: draftResult.draftId,
+      threadId: draftResult.threadId,
+      to: toRecipients,
+      cc: ccRecipients,
+      bcc: bccRecipients,
+      subject,
+      htmlBody: body,
+      delay: 0,
+    });
+
+    if (sendResult.success) {
+      success(`Sent using snippet "${snippet.name}"`);
+      log(`  ${colors.dim}To: ${to.join(", ")}${colors.reset}`);
+      if (subject) log(`  ${colors.dim}Subject: ${subject}${colors.reset}`);
+    } else {
+      error(`Failed to send: ${sendResult.error}`);
+    }
+  } else {
+    // Create draft
+    const result = await createDraftWithUserInfo(userInfo, {
+      to,
+      cc,
+      bcc,
+      subject,
+      body,
+    });
+
+    if (result.success) {
+      success(`Draft created from snippet "${snippet.name}"`);
+      log(`  ${colors.dim}Draft ID: ${result.draftId}${colors.reset}`);
+      if (to.length > 0) log(`  ${colors.dim}To: ${to.join(", ")}${colors.reset}`);
+      if (subject) log(`  ${colors.dim}Subject: ${subject}${colors.reset}`);
+      if (accountEmail) log(`  ${colors.dim}Account: ${accountEmail}${colors.reset}`);
+    } else {
+      error(`Failed to create draft: ${result.error}`);
+    }
+  }
 }
 
 async function cmdCompose(options: CliOptions, keepOpen = true) {
@@ -3106,6 +3305,14 @@ async function main() {
 
     case "ai":
       await cmdAi(options);
+      break;
+
+    case "snippets":
+      await cmdSnippets(options);
+      break;
+
+    case "snippet":
+      await cmdSnippet(options);
       break;
 
     case "compose":

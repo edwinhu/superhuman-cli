@@ -178,6 +178,25 @@ bun src/cli.ts unsnooze <thread-id>
 bun src/cli.ts snoozed
 ```
 
+### Snippets
+
+Reusable email templates stored in Superhuman. Snippets support template variables like `{first_name}`.
+
+```bash
+# List all snippets
+bun src/cli.ts snippets
+bun src/cli.ts snippets --json
+
+# Use a snippet to create a draft (fuzzy name matching)
+bun src/cli.ts snippet "zoom link" --to user@example.com
+
+# Substitute template variables
+bun src/cli.ts snippet "share recordings" --to user@example.com --vars "date=Feb 5,student_name=Jane"
+
+# Send immediately using a snippet
+bun src/cli.ts snippet "share recordings" --to user@example.com --vars "date=Feb 5" --send
+```
+
 ### Labels
 
 ```bash
@@ -217,7 +236,8 @@ bun src/cli.ts download --attachment <attachment-id> --message <message-id> --ou
 | `--subject <text>` | Email subject |
 | `--body <text>` | Email body (plain text, converted to HTML) |
 | `--html <text>` | Email body as raw HTML |
-| `--send` | Send immediately instead of saving draft (for reply/reply-all/forward) |
+| `--send` | Send immediately instead of saving draft (for reply/reply-all/forward/snippet) |
+| `--vars <pairs>` | Template variable substitution: `"key1=val1,key2=val2"` (for snippet) |
 | `--update <id>` | Draft ID to update (for draft command) |
 | `--draft <id>` | Draft ID to send (for send command) |
 | `--label <id>` | Label ID (for add-label/remove-label) |
@@ -267,6 +287,8 @@ bun src/index.ts --mcp
 | `superhuman_attachments` | List attachments in a thread |
 | `superhuman_download_attachment` | Download an attachment |
 | `superhuman_add_attachment` | Add attachment to current draft |
+| `superhuman_snippets` | List all snippets |
+| `superhuman_snippet` | Use a snippet to compose or send |
 | `superhuman_accounts` | List linked accounts |
 | `superhuman_switch_account` | Switch to a different account |
 
@@ -305,6 +327,7 @@ Most operations use **direct Gmail API and Microsoft Graph API** calls:
 | Contacts | Google People API | MS Graph People API |
 | Calendar events | Google Calendar API | MS Graph Calendar API |
 | Free/busy | `POST /freeBusy` | `POST /me/calendar/getSchedule` |
+| Snippets | Superhuman backend API | Superhuman backend API |
 
 OAuth tokens (including refresh tokens) are extracted from Superhuman and cached to disk. When tokens expire, they are automatically refreshed via OAuth endpoints without requiring CDP connection.
 
