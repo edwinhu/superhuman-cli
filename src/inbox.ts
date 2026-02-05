@@ -5,6 +5,8 @@
  */
 
 import type { SuperhumanConnection } from "./superhuman-api";
+import { getToken, searchGmailDirect } from "./token-api";
+import { listAccounts } from "./accounts";
 
 export interface InboxThread {
   id: string;
@@ -26,6 +28,12 @@ export interface ListInboxOptions {
 export interface SearchOptions {
   query: string;
   limit?: number;
+  /**
+   * When true, use direct Gmail/MS Graph API for search.
+   * This searches ALL emails including archived/done items.
+   * Default (false) uses Superhuman's inbox-only search.
+   */
+  includeDone?: boolean;
 }
 
 /**
@@ -100,14 +108,38 @@ export async function listInbox(
 }
 
 /**
- * Search threads using Superhuman's internal search API
+ * Search threads using Superhuman's internal search API or direct Gmail/MS Graph API.
+ *
+ * By default, uses Superhuman's internal API which only searches inbox.
+ * When includeDone is true, uses direct Gmail/MS Graph API which searches
+ * ALL emails including archived/done items.
+ *
+ * Note: Superhuman's threadInternal.listAsync ignores the query parameter,
+ * so the default mode effectively returns top inbox threads regardless of query.
+ * Use includeDone=true for actual search functionality.
  */
 export async function searchInbox(
   conn: SuperhumanConnection,
   options: SearchOptions
 ): Promise<InboxThread[]> {
+  const { query, limit = 10, includeDone = false } = options;
+
+  // Use direct API when includeDone is requested
+  if (includeDone) {
+    // Get current account email to extract token
+    const accounts = await listAccounts(conn);
+    const currentAccount = accounts.find(a => a.isCurrent);
+
+    if (!currentAccount) {
+      throw new Error("No current account found");
+    }
+
+    const token = await getToken(conn, currentAccount.email);
+    return searchGmailDirect(token, query, limit);
+  }
+
+  // Default: use Superhuman's internal API (note: query is ignored by the API)
   const { Runtime } = conn;
-  const { query, limit = 10 } = options;
 
   const result = await Runtime.evaluate({
     expression: `

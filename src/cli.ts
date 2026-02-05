@@ -164,6 +164,7 @@ ${colors.bold}OPTIONS${colors.reset}
   --attachment <id>  Specific attachment ID (for download)
   --message <id>     Message ID (required with --attachment)
   --limit <number>   Number of results (default: 10, for inbox/search)
+  --include-done     Search all emails including archived/done (uses Gmail API directly)
   --json             Output as JSON (for inbox/search/read)
   --date <date>      Date for calendar (YYYY-MM-DD or "today", "tomorrow")
   --calendar <name>  Calendar name or ID (default: primary)
@@ -191,6 +192,7 @@ ${colors.bold}EXAMPLES${colors.reset}
   ${colors.dim}# Search emails${colors.reset}
   superhuman search "from:john subject:meeting"
   superhuman search "project update" --limit 20
+  superhuman search "from:anthropic" --include-done  # Search all emails including archived
 
   ${colors.dim}# Read an email thread${colors.reset}
   superhuman read <thread-id>
@@ -351,6 +353,8 @@ interface CliOptions {
   // contacts options
   contactsSubcommand: string; // subcommand for contacts (search)
   contactsQuery: string; // search query for contacts
+  // search options
+  includeDone: boolean; // use direct Gmail API to search all emails including archived
 }
 
 function parseArgs(args: string[]): CliOptions {
@@ -390,6 +394,7 @@ function parseArgs(args: string[]): CliOptions {
     eventId: "",
     contactsSubcommand: "",
     contactsQuery: "",
+    includeDone: false,
   };
 
   let i = 0;
@@ -520,6 +525,10 @@ function parseArgs(args: string[]): CliOptions {
         case "account":
           options.account = unescapeString(value);
           i += 2;
+          break;
+        case "include-done":
+          options.includeDone = true;
+          i += 1;
           break;
         default:
           error(`Unknown option: ${arg}`);
@@ -964,6 +973,7 @@ async function cmdSearch(options: CliOptions) {
   const threads = await searchInbox(conn, {
     query: options.query,
     limit: options.limit,
+    includeDone: options.includeDone,
   });
 
   if (options.json) {

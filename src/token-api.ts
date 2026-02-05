@@ -8,6 +8,7 @@
 import type { SuperhumanConnection } from "./superhuman-api";
 import { listAccounts, switchAccount } from "./accounts";
 import type { Contact } from "./contacts";
+import type { InboxThread } from "./inbox";
 
 export interface TokenInfo {
   accessToken: string;
@@ -272,4 +273,194 @@ export async function searchContactsDirect(
       name: r.person?.names?.[0]?.displayName || "",
     })).filter((c: Contact) => c.email);
   }
+}
+
+/**
+ * Gmail API response types for messages.list
+ */
+interface GmailMessagesListResponse {
+  messages?: Array<{
+    id: string;
+    threadId: string;
+  }>;
+  nextPageToken?: string;
+  resultSizeEstimate?: number;
+}
+
+/**
+ * Gmail API response types for threads.get
+ */
+interface GmailThreadResponse {
+  id: string;
+  historyId: string;
+  messages: Array<{
+    id: string;
+    threadId: string;
+    labelIds: string[];
+    snippet: string;
+    payload: {
+      headers: Array<{
+        name: string;
+        value: string;
+      }>;
+    };
+    internalDate: string;
+  }>;
+}
+
+/**
+ * Microsoft Graph API response types for messages search
+ */
+interface MSGraphMessagesResponse {
+  value: Array<{
+    id: string;
+    conversationId: string;
+    subject: string;
+    from: {
+      emailAddress: {
+        name: string;
+        address: string;
+      };
+    };
+    receivedDateTime: string;
+    bodyPreview: string;
+  }>;
+  "@odata.nextLink"?: string;
+}
+
+/**
+ * Search emails using direct Gmail/MS Graph API.
+ *
+ * This bypasses Superhuman's search which ignores the query parameter.
+ * Uses Gmail's messages.list with q parameter or MS Graph's search endpoint.
+ *
+ * @param token - Token info with accessToken and isMicrosoft flag
+ * @param query - Gmail search query (e.g., "from:anthropic", "subject:meeting")
+ * @param limit - Maximum results (default 10)
+ * @returns Array of InboxThread objects
+ */
+export async function searchGmailDirect(
+  token: TokenInfo,
+  query: string,
+  limit: number = 10
+): Promise<InboxThread[]> {
+  if (token.isMicrosoft) {
+    return searchMSGraphDirect(token, query, limit);
+  }
+
+  // Step 1: Search for messages matching the query
+  const searchPath = `/messages?q=${encodeURIComponent(query)}&maxResults=${limit}`;
+  const searchResult = await gmailFetch(token.accessToken, searchPath) as GmailMessagesListResponse | null;
+
+  if (!searchResult || !searchResult.messages || searchResult.messages.length === 0) {
+    return [];
+  }
+
+  // Step 2: Get unique thread IDs (multiple messages may belong to same thread)
+  const threadIds = [...new Set(searchResult.messages.map(m => m.threadId))];
+
+  // Step 3: Fetch thread details for each unique thread
+  const threads: InboxThread[] = [];
+
+  for (const threadId of threadIds.slice(0, limit)) {
+    const threadPath = `/threads/${threadId}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date`;
+    const threadResult = await gmailFetch(token.accessToken, threadPath) as GmailThreadResponse | null;
+
+    if (!threadResult || !threadResult.messages || threadResult.messages.length === 0) {
+      continue;
+    }
+
+    // Get the last message in the thread for display
+    const lastMessage = threadResult.messages[threadResult.messages.length - 1];
+    const headers = lastMessage.payload.headers;
+
+    // Extract headers
+    const subjectHeader = headers.find(h => h.name.toLowerCase() === "subject");
+    const fromHeader = headers.find(h => h.name.toLowerCase() === "from");
+    const dateHeader = headers.find(h => h.name.toLowerCase() === "date");
+
+    // Parse the From header (format: "Name <email>" or just "email")
+    const fromValue = fromHeader?.value || "";
+    const fromMatch = fromValue.match(/^(?:"?([^"<]*)"?\s*)?<?([^>]+)>?$/);
+    const fromName = fromMatch?.[1]?.trim() || "";
+    const fromEmail = fromMatch?.[2]?.trim() || fromValue;
+
+    threads.push({
+      id: threadResult.id,
+      subject: subjectHeader?.value || "(no subject)",
+      from: {
+        email: fromEmail,
+        name: fromName,
+      },
+      date: dateHeader?.value || new Date(parseInt(lastMessage.internalDate)).toISOString(),
+      snippet: lastMessage.snippet || "",
+      labelIds: lastMessage.labelIds || [],
+      messageCount: threadResult.messages.length,
+    });
+  }
+
+  return threads;
+}
+
+/**
+ * Search emails using MS Graph API (for Microsoft accounts).
+ *
+ * @param token - Token info with accessToken
+ * @param query - Search query
+ * @param limit - Maximum results
+ * @returns Array of InboxThread objects
+ */
+async function searchMSGraphDirect(
+  token: TokenInfo,
+  query: string,
+  limit: number
+): Promise<InboxThread[]> {
+  // MS Graph uses $search for full-text search
+  const searchPath = `/me/messages?$search="${encodeURIComponent(query)}"&$top=${limit}&$select=id,conversationId,subject,from,receivedDateTime,bodyPreview`;
+  const result = await msgraphFetch(token.accessToken, searchPath) as MSGraphMessagesResponse | null;
+
+  if (!result || !result.value || result.value.length === 0) {
+    return [];
+  }
+
+  // Group messages by conversationId (MS Graph's equivalent of threadId)
+  const conversationMap = new Map<string, typeof result.value>();
+
+  for (const message of result.value) {
+    const existing = conversationMap.get(message.conversationId);
+    if (!existing) {
+      conversationMap.set(message.conversationId, [message]);
+    } else {
+      existing.push(message);
+    }
+  }
+
+  const threads: InboxThread[] = [];
+
+  for (const [conversationId, messages] of conversationMap) {
+    // Sort by date descending and get the latest
+    messages.sort((a, b) =>
+      new Date(b.receivedDateTime).getTime() - new Date(a.receivedDateTime).getTime()
+    );
+    const latestMessage = messages[0];
+
+    threads.push({
+      id: conversationId,
+      subject: latestMessage.subject || "(no subject)",
+      from: {
+        email: latestMessage.from?.emailAddress?.address || "",
+        name: latestMessage.from?.emailAddress?.name || "",
+      },
+      date: latestMessage.receivedDateTime,
+      snippet: latestMessage.bodyPreview || "",
+      labelIds: [], // MS Graph doesn't have labelIds in the same way
+      messageCount: messages.length,
+    });
+
+    if (threads.length >= limit) {
+      break;
+    }
+  }
+
+  return threads;
 }
