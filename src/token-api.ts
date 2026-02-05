@@ -2996,17 +2996,34 @@ export async function getThreadMessagesForAI(
   threadId: string
 ): Promise<AIThreadMessage[]> {
   if (token.isMicrosoft) {
-    // MS Graph: Get messages in conversation
-    const path = `/me/messages?$filter=conversationId eq '${threadId}'&$select=id,subject,body,from,toRecipients,receivedDateTime&$orderby=receivedDateTime asc`;
-    const result = await msgraphFetch(token.accessToken, path);
+    // MS Graph: Get messages in conversation.
+    // The $filter on conversationId at /me/messages level returns "InefficientFilter",
+    // so we fetch recent messages and filter client-side by conversationId.
+    const recentPath = `/me/messages?$select=id,subject,body,conversationId,receivedDateTime&$top=50&$orderby=receivedDateTime desc`;
+    const recentResult = await msgraphFetch(token.accessToken, recentPath);
 
-    if (!result || !result.value) {
-      return [];
+    let messages: any[] = [];
+    if (recentResult?.value) {
+      messages = recentResult.value.filter((m: any) => m.conversationId === threadId);
+      // Sort oldest first for thread context
+      messages.sort((a: any, b: any) =>
+        new Date(a.receivedDateTime).getTime() - new Date(b.receivedDateTime).getTime()
+      );
     }
 
-    // Note: The AI API only accepts message_id, subject, and body fields
-    // Additional fields like from, to, date cause a 400 error
-    return result.value.map((msg: any) => ({
+    // Fallback: if threadId is actually a message ID, fetch it directly
+    if (messages.length === 0) {
+      try {
+        const msg = await msgraphFetch(token.accessToken, `/me/messages/${threadId}?$select=id,subject,body`);
+        if (msg) {
+          messages = [msg];
+        }
+      } catch {
+        // Not a message ID either
+      }
+    }
+
+    return messages.map((msg: any) => ({
       message_id: msg.id,
       subject: msg.subject || "",
       body: msg.body?.content || "",
@@ -3059,7 +3076,7 @@ export async function getThreadMessagesForAI(
 /**
  * Query Superhuman's AI assistant about an email thread.
  *
- * Uses the /v3/ai.askAIProxy endpoint to ask questions about emails.
+ * Uses the /v3/ai.compose endpoint (Superhuman's native AI compose API).
  * The AI can summarize threads, extract action items, draft replies, etc.
  *
  * @param superhumanToken - Superhuman backend token
@@ -3076,12 +3093,7 @@ export async function askAI(
   query: string,
   options?: AIQueryOptions
 ): Promise<AIQueryResult> {
-  // Generate or use existing session ID
   const sessionId = options?.sessionId || crypto.randomUUID();
-
-  // Generate event ID with user prefix if available
-  // The user prefix is required for valid event IDs in Superhuman's format
-  const questionEventId = generateEventId(options?.userPrefix);
 
   // Fetch thread messages for context
   const threadMessages = await getThreadMessagesForAI(oauthToken, threadId);
@@ -3090,26 +3102,29 @@ export async function askAI(
     throw new Error(`Thread not found or has no messages: ${threadId}`);
   }
 
-  // Build request payload
+  // Build thread_content string from messages (what Superhuman passes to its backend)
+  const threadContent = threadMessages.map(m =>
+    `Subject: ${m.subject}\n\n${m.body}`
+  ).join("\n\n---\n\n");
+
+  const lastMessage = threadMessages[threadMessages.length - 1];
+
+  // Build request payload for ai.compose
   const payload = {
-    session_id: sessionId,
-    question_event_id: questionEventId,
-    query,
-    chat_history: options?.chatHistory || [],
-    user: {
-      email: options?.userEmail || oauthToken.email,
-      name: options?.userName || "",
-      company: options?.userCompany || "",
-      position: options?.userPosition || "",
-    },
-    local_datetime: new Date().toISOString(),
-    current_thread_id: threadId,
-    current_thread_messages: threadMessages,
+    instructions: query,
+    draft_content: "",
+    draft_content_type: "text/html",
+    draft_action: "reply",
+    thread_content: threadContent,
+    subject: threadMessages[0]?.subject || "",
+    to: [],
+    cc: [],
+    bcc: [],
+    thread_id: threadId,
+    last_message_id: lastMessage.message_id,
   };
 
-  // The AI endpoint returns a streaming response (Server-Sent Events),
-  // so we use fetch directly instead of superhumanFetch which expects JSON
-  const url = `${SUPERHUMAN_BACKEND_BASE}/v3/ai.askAIProxy`;
+  const url = `${SUPERHUMAN_BACKEND_BASE}/v3/ai.compose`;
 
   const fetchResponse = await fetch(url, {
     method: "POST",
@@ -3130,25 +3145,24 @@ export async function askAI(
   }
 
   // Parse the streaming response (Server-Sent Events format)
+  // ai.compose returns chunks like: data: {"choices":[{"delta":{"content":"text"}}]}
   const responseText = await fetchResponse.text();
   let fullContent = "";
 
-  // Parse SSE data lines to extract the full response
-  const lines = responseText.split("\n");
-  for (const line of lines) {
+  for (const line of responseText.split("\n")) {
     if (line.startsWith("data: ")) {
-      const jsonStr = line.substring(6); // Remove "data: " prefix
-      if (jsonStr === "END") continue;
+      const jsonStr = line.substring(6).trim();
+      if (jsonStr === "[DONE]" || jsonStr === "END" || jsonStr === "") continue;
 
       try {
         const data = JSON.parse(jsonStr);
-        // Extract content from the chunk
-        // The final chunk has the complete content
-        if (data.content) {
-          fullContent = data.content;
+        // ai.compose format: choices[0].delta.content
+        const delta = data?.choices?.[0]?.delta?.content;
+        if (typeof delta === "string") {
+          fullContent += delta;
         }
-        // Also check for finished flag which indicates the response is complete
-        if (data.finished && data.content) {
+        // Also handle legacy askAIProxy format (content at top level)
+        if (data.content && !data.choices) {
           fullContent = data.content;
         }
       } catch {
