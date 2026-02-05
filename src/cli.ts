@@ -2569,6 +2569,12 @@ async function cmdCalendarFree(options: CliOptions) {
 async function main() {
   const args = process.argv.slice(2);
 
+  // Handle --version / -v early before parsing
+  if (args.includes("--version") || args.includes("-v")) {
+    console.log(`superhuman-cli ${VERSION}`);
+    process.exit(0);
+  }
+
   if (args.length === 0) {
     printHelp();
     process.exit(0);

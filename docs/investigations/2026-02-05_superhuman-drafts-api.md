@@ -299,5 +299,5 @@ main().catch(console.error);
 
 Remaining potential enhancements:
 1. Token refresh - automatically re-authenticate when idToken expires
-2. Reply/forward support - use `inReplyToThreadId` and `inReplyToRfc822Id` for threading
+2. Reply/forward via cached credentials - API supports `inReplyToThreadId`/`inReplyToRfc822Id`, but CLI's `reply.ts` still uses CDP. Wire up `--account` flag for replies.
 3. Attachment support - investigate attachment upload API
