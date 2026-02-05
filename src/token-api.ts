@@ -15,6 +15,10 @@ export interface TokenInfo {
   email: string;
   expires: number;
   isMicrosoft: boolean;
+  // Superhuman backend API fields
+  userId?: string;
+  idToken?: string;
+  idTokenExpires?: number;
 }
 
 /**
@@ -54,6 +58,7 @@ export async function extractToken(
         try {
           const ga = window.GoogleAccount;
           const authData = ga?.credential?._authData;
+          const user = ga?.credential?.user;
           const di = ga?.di;
 
           if (!authData?.accessToken) {
@@ -65,6 +70,10 @@ export async function extractToken(
             email: ga?.emailAddress || '',
             expires: authData.expires || (Date.now() + 3600000),
             isMicrosoft: !!di?.get?.('isMicrosoft'),
+            // Superhuman backend API fields
+            userId: user?._id,
+            idToken: authData.idToken,
+            idTokenExpires: authData.expires,
           };
         } catch (e) {
           return { error: e.message };
@@ -153,8 +162,9 @@ export interface PersistedTokens {
       type: "google" | "microsoft";
       accessToken: string;
       expires: number; // Unix timestamp
+      userId?: string; // Superhuman user ID for API paths
       superhumanToken?: {
-        token: string;
+        token: string; // idToken for Superhuman backend
         expires?: number;
       };
     };
@@ -199,6 +209,11 @@ export async function saveTokensToDisk(): Promise<void> {
       type: token.isMicrosoft ? "microsoft" : "google",
       accessToken: token.accessToken,
       expires: token.expires,
+      userId: token.userId,
+      superhumanToken: token.idToken ? {
+        token: token.idToken,
+        expires: token.idTokenExpires,
+      } : undefined,
     };
   }
 
@@ -235,6 +250,9 @@ export async function loadTokensFromDisk(): Promise<boolean> {
         email,
         expires: account.expires,
         isMicrosoft: account.type === "microsoft",
+        userId: account.userId,
+        idToken: account.superhumanToken?.token,
+        idTokenExpires: account.superhumanToken?.expires,
       });
     }
 
@@ -263,6 +281,38 @@ export function hasValidCachedTokens(): boolean {
   }
 
   return true;
+}
+
+/**
+ * Get cached token for a specific account.
+ * Returns undefined if not found or expired.
+ */
+export function getCachedToken(email: string): TokenInfo | undefined {
+  const token = tokenCache.get(email);
+  if (!token) return undefined;
+
+  const bufferMs = 5 * 60 * 1000; // 5 minutes
+  if (token.expires < Date.now() + bufferMs) {
+    return undefined; // Expired or expiring soon
+  }
+
+  return token;
+}
+
+/**
+ * Get list of cached account emails.
+ */
+export function getCachedAccounts(): string[] {
+  return Array.from(tokenCache.keys());
+}
+
+/**
+ * Check if we have valid cached credentials for Superhuman API.
+ * Requires both idToken and userId.
+ */
+export function hasCachedSuperhumanCredentials(email: string): boolean {
+  const token = getCachedToken(email);
+  return !!(token?.idToken && token?.userId);
 }
 
 /**

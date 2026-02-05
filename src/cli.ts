@@ -47,7 +47,7 @@ import {
   type UpdateEventInput,
 } from "./calendar";
 import { sendEmail, createDraft, updateDraft, sendDraftById, deleteDraft } from "./send-api";
-import { createDraftDirect } from "./draft-api";
+import { createDraftDirect, createDraftWithUserInfo, getUserInfoFromCache } from "./draft-api";
 import { searchContacts, resolveRecipient, type Contact } from "./contacts";
 import {
   getToken,
@@ -58,9 +58,12 @@ import {
   extractSuperhumanToken,
   extractUserPrefix,
   askAI,
+  getCachedToken,
+  getCachedAccounts,
+  hasCachedSuperhumanCredentials,
 } from "./token-api";
 
-const VERSION = "0.5.1";
+const VERSION = "0.7.0";
 const CDP_PORT = 9333;
 
 // ANSI colors
@@ -846,6 +849,45 @@ async function cmdDraft(options: CliOptions) {
   if (options.to.length === 0) {
     error("At least one recipient is required (--to)");
     process.exit(1);
+  }
+
+  // Fast path: use cached credentials if --account is specified with valid cache
+  // This avoids CDP connection entirely for Superhuman drafts
+  if (options.account && options.provider === "superhuman") {
+    await loadTokensFromDisk();
+    if (hasCachedSuperhumanCredentials(options.account)) {
+      const token = getCachedToken(options.account);
+      if (token?.idToken && token?.userId) {
+        info("Creating draft via cached credentials (no CDP)...");
+
+        const userInfo = getUserInfoFromCache(
+          token.userId,
+          token.email,
+          token.idToken
+        );
+
+        const bodyContent = options.html || textToHtml(options.body);
+        const result = await createDraftWithUserInfo(userInfo, {
+          to: options.to, // Use raw emails (no name resolution without CDP)
+          cc: options.cc.length > 0 ? options.cc : undefined,
+          bcc: options.bcc.length > 0 ? options.bcc : undefined,
+          subject: options.subject || "",
+          body: bodyContent,
+        });
+
+        if (result.success) {
+          success("Draft created in Superhuman!");
+          log(`  ${colors.dim}Draft ID: ${result.draftId}${colors.reset}`);
+          log(`  ${colors.dim}Account: ${options.account}${colors.reset}`);
+          log(`  ${colors.dim}Syncs to all devices automatically${colors.reset}`);
+        } else {
+          error(`Failed to create draft: ${result.error}`);
+        }
+        return;
+      }
+    } else {
+      warn(`No cached credentials for ${options.account}, falling back to CDP...`);
+    }
   }
 
   const conn = await checkConnection(options.port);

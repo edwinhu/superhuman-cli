@@ -50,10 +50,29 @@ interface UserInfo {
   email: string;
   token: string;
   timeZone: string;
+  displayName?: string;
 }
 
 /**
- * Extract user info and token needed for direct API calls
+ * Create UserInfo from cached credentials (no CDP needed)
+ */
+export function getUserInfoFromCache(
+  userId: string,
+  email: string,
+  idToken: string,
+  displayName?: string
+): UserInfo {
+  return {
+    userId,
+    email,
+    token: idToken,
+    timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+    displayName,
+  };
+}
+
+/**
+ * Extract user info and token needed for direct API calls (via CDP)
  */
 async function getUserInfo(conn: SuperhumanConnection): Promise<UserInfo> {
   const { Runtime } = conn;
@@ -95,15 +114,14 @@ async function getUserInfo(conn: SuperhumanConnection): Promise<UserInfo> {
 }
 
 /**
- * Create a draft directly via Superhuman API (no CDP UI manipulation)
+ * Core function to create a draft with pre-extracted user info.
+ * Can be used with cached credentials (no CDP needed).
  */
-export async function createDraftDirect(
-  conn: SuperhumanConnection,
+export async function createDraftWithUserInfo(
+  userInfo: UserInfo,
   options: DraftOptions
 ): Promise<DraftResult> {
   try {
-    const userInfo = await getUserInfo(conn);
-
     const draftId = generateDraftId();
     const threadId = options.inReplyToThreadId || generateDraftId();
     const now = new Date().toISOString();
@@ -185,6 +203,17 @@ export async function createDraftDirect(
       error: error instanceof Error ? error.message : String(error),
     };
   }
+}
+
+/**
+ * Create a draft directly via Superhuman API (extracts credentials via CDP)
+ */
+export async function createDraftDirect(
+  conn: SuperhumanConnection,
+  options: DraftOptions
+): Promise<DraftResult> {
+  const userInfo = await getUserInfo(conn);
+  return createDraftWithUserInfo(userInfo, options);
 }
 
 /**
