@@ -5,11 +5,61 @@
 
 ## Summary
 
-**Finding:** Superhuman DOES have a backend drafts API. The `/v3/userdata.sync` endpoint syncs drafts (and other user data) to Superhuman's backend. This enables cross-device sync including mobile.
+**Finding:** Superhuman DOES have a backend drafts API:
+- **`/v3/userdata.writeMessage`** - Creates/updates drafts directly
+- **`/v3/userdata.sync`** - Syncs drafts (and other user data) bidirectionally
 
-**Key Discovery:** The sync traffic happens through the **background page**, not the renderer page. Monitoring the wrong CDP target initially led to incorrect conclusions.
+**Key Discoveries:**
+1. Sync traffic goes through the **background page**, not the renderer
+2. Draft IDs use format: `draft00` + **14 hex chars** (not 16!)
+3. Auth via `idToken` from `credential._authData`
 
-## The Sync Endpoint
+## The Write Endpoint (CREATE/UPDATE)
+
+### `/v3/userdata.writeMessage`
+
+**URL:** `https://mail.superhuman.com/~backend/v3/userdata.writeMessage`
+**Method:** POST
+**Purpose:** Create or update drafts directly
+
+**Request:**
+```json
+{
+  "writes": [{
+    "path": "users/{userId}/threads/{threadId}/messages/{draftId}/draft",
+    "value": {
+      "id": "draft00xxxxxxxxxxxx",
+      "threadId": "draft00xxxxxxxxxxxx",
+      "action": "compose",
+      "from": "Name <email@example.com>",
+      "to": ["recipient@example.com"],
+      "cc": [],
+      "bcc": [],
+      "subject": "Subject",
+      "body": "<p>HTML body</p>",
+      "snippet": "Plain text preview",
+      "labelIds": ["DRAFT"],
+      "clientCreatedAt": "2026-02-05T06:16:03.923Z",
+      "date": "2026-02-05T06:16:03.923Z",
+      "schemaVersion": 3,
+      "timeZone": "America/New_York",
+      "rfc822Id": "<unique-id@we.are.superhuman.com>"
+    }
+  }]
+}
+```
+
+**Response (success):**
+```json
+{
+  "currentHistoryId": 94918,
+  "previousHistoryIds": {"thread": 0, "message": 0}
+}
+```
+
+**Critical:** Draft IDs must be exactly `draft00` + 14 hex chars. Using 16 chars returns 400 error.
+
+## The Sync Endpoint (READ)
 
 ### `/v3/userdata.sync`
 
