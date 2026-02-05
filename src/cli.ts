@@ -17,6 +17,7 @@ import {
   getDraftState,
   setSubject,
   addRecipient,
+  addCcRecipient,
   setBody,
   saveDraft,
   sendDraft,
@@ -84,6 +85,10 @@ function success(message: string) {
 
 function error(message: string) {
   console.error(`${colors.red}✗${colors.reset} ${message}`);
+}
+
+function warn(message: string) {
+  console.log(`${colors.yellow}⚠${colors.reset} ${message}`);
 }
 
 function info(message: string) {
@@ -169,6 +174,7 @@ ${colors.bold}OPTIONS${colors.reset}
   --html <text>      Email body as HTML
   --send             Send immediately instead of saving as draft (for reply/reply-all/forward)
   --update <id>      Draft ID to update (for draft command)
+  --provider <type>  Draft API: "superhuman" (native, default) or "gmail" (direct API)
   --draft <id>       Draft ID to send (for send command)
   --label <id>       Label ID to add or remove (for add-label/remove-label)
   --until <time>     Snooze until time: preset (tomorrow, next-week, weekend, evening) or ISO datetime
@@ -297,8 +303,11 @@ ${colors.bold}EXAMPLES${colors.reset}
   superhuman ai <thread-id> "draft a reply"
   superhuman ai <thread-id> "who sent the last message?"
 
-  ${colors.dim}# Create a draft${colors.reset}
+  ${colors.dim}# Create a draft (default: appears in Superhuman UI, syncs across devices)${colors.reset}
   superhuman draft --to user@example.com --subject "Hello" --body "Hi there!"
+
+  ${colors.dim}# Create draft via direct Gmail API (faster, but may not sync immediately)${colors.reset}
+  superhuman draft --provider=gmail --to user@example.com --subject "Hello" --body "Hi there!"
 
   ${colors.dim}# Update an existing draft${colors.reset}
   superhuman draft --update <draft-id> --body "Updated content"
@@ -378,6 +387,8 @@ interface CliOptions {
   includeDone: boolean; // use direct Gmail API to search all emails including archived
   // ai options
   aiQuery: string; // question to ask the AI
+  // draft provider option
+  provider: "superhuman" | "gmail"; // which API to use for drafts (default: superhuman)
 }
 
 function parseArgs(args: string[]): CliOptions {
@@ -419,6 +430,7 @@ function parseArgs(args: string[]): CliOptions {
     contactsQuery: "",
     includeDone: false,
     aiQuery: "",
+    provider: "superhuman",
   };
 
   let i = 0;
@@ -426,37 +438,50 @@ function parseArgs(args: string[]): CliOptions {
     const arg = args[i];
 
     if (arg.startsWith("--")) {
-      const key = arg.slice(2);
-      const value = args[i + 1];
+      // Support both --key value and --key=value formats
+      let key: string;
+      let value: string | undefined;
+      let usedEqualsFormat = false;
+      const equalIndex = arg.indexOf("=");
+      if (equalIndex !== -1) {
+        key = arg.slice(2, equalIndex);
+        value = arg.slice(equalIndex + 1);
+        usedEqualsFormat = true;
+      } else {
+        key = arg.slice(2);
+        value = args[i + 1];
+      }
+      // Helper to increment by correct amount based on format
+      const inc = usedEqualsFormat ? 1 : 2;
 
       switch (key) {
         case "to":
           options.to.push(unescapeString(value));
-          i += 2;
+          i += inc;
           break;
         case "cc":
           options.cc.push(unescapeString(value));
-          i += 2;
+          i += inc;
           break;
         case "bcc":
           options.bcc.push(unescapeString(value));
-          i += 2;
+          i += inc;
           break;
         case "subject":
           options.subject = unescapeString(value);
-          i += 2;
+          i += inc;
           break;
         case "body":
           options.body = unescapeString(value);
-          i += 2;
+          i += inc;
           break;
         case "html":
           options.html = unescapeString(value);
-          i += 2;
+          i += inc;
           break;
         case "port":
           options.port = parseInt(value, 10);
-          i += 2;
+          i += inc;
           break;
         case "help":
           options.command = "help";
@@ -464,15 +489,15 @@ function parseArgs(args: string[]): CliOptions {
           break;
         case "limit":
           options.limit = parseInt(value, 10);
-          i += 2;
+          i += inc;
           break;
         case "query":
           options.query = unescapeString(value);
-          i += 2;
+          i += inc;
           break;
         case "thread":
           options.threadId = unescapeString(value);
-          i += 2;
+          i += inc;
           break;
         case "json":
           options.json = true;
@@ -484,43 +509,43 @@ function parseArgs(args: string[]): CliOptions {
           break;
         case "update":
           options.updateDraftId = unescapeString(value);
-          i += 2;
+          i += inc;
           break;
         case "draft":
           options.sendDraftId = unescapeString(value);
-          i += 2;
+          i += inc;
           break;
         case "label":
           options.labelId = unescapeString(value);
-          i += 2;
+          i += inc;
           break;
         case "until":
           options.snoozeUntil = unescapeString(value);
-          i += 2;
+          i += inc;
           break;
         case "output":
           options.outputPath = unescapeString(value);
-          i += 2;
+          i += inc;
           break;
         case "attachment":
           options.attachmentId = unescapeString(value);
-          i += 2;
+          i += inc;
           break;
         case "message":
           options.messageId = unescapeString(value);
-          i += 2;
+          i += inc;
           break;
         case "calendar":
           options.calendarArg = unescapeString(value);
-          i += 2;
+          i += inc;
           break;
         case "date":
           options.calendarDate = unescapeString(value);
-          i += 2;
+          i += inc;
           break;
         case "range":
           options.calendarRange = parseInt(value, 10);
-          i += 2;
+          i += inc;
           break;
         case "all-accounts":
           options.allAccounts = true;
@@ -528,31 +553,40 @@ function parseArgs(args: string[]): CliOptions {
           break;
         case "start":
           options.eventStart = unescapeString(value);
-          i += 2;
+          i += inc;
           break;
         case "end":
           options.eventEnd = unescapeString(value);
-          i += 2;
+          i += inc;
           break;
         case "duration":
           options.eventDuration = parseInt(value, 10);
-          i += 2;
+          i += inc;
           break;
         case "title":
           options.eventTitle = unescapeString(value);
-          i += 2;
+          i += inc;
           break;
         case "event":
           options.eventId = unescapeString(value);
-          i += 2;
+          i += inc;
           break;
         case "account":
           options.account = unescapeString(value);
-          i += 2;
+          i += inc;
           break;
         case "include-done":
           options.includeDone = true;
           i += 1;
+          break;
+        case "provider":
+          if (value === "superhuman" || value === "gmail") {
+            options.provider = value;
+          } else {
+            error(`Invalid provider: ${value}. Use 'superhuman' or 'gmail'`);
+            process.exit(1);
+          }
+          i += inc;
           break;
         default:
           error(`Unknown option: ${arg}`);
@@ -826,23 +860,85 @@ async function cmdDraft(options: CliOptions) {
   // Use HTML body if provided, otherwise convert plain text to HTML
   const bodyContent = options.html || textToHtml(options.body);
 
-  info("Creating draft...");
-  const result = await createDraft(conn, {
-    to: resolvedTo,
-    cc: resolvedCc,
-    bcc: resolvedBcc,
-    subject: options.subject || "",
-    body: bodyContent,
-    isHtml: true,
-  });
+  if (options.provider === "superhuman") {
+    // CDP approach - creates draft through Superhuman's native UI
+    // This ensures draft appears in Superhuman UI and syncs across devices
+    info("Creating draft via Superhuman...");
 
-  if (result.success) {
-    success("Draft created!");
-    if (result.draftId) {
-      log(`  ${colors.dim}Draft ID: ${result.draftId}${colors.reset}`);
+    const draftKey = await openCompose(conn);
+    if (!draftKey) {
+      warn("Failed to open compose window, falling back to Gmail API...");
+      // Fallback to direct API
+      const result = await createDraft(conn, {
+        to: resolvedTo,
+        cc: resolvedCc,
+        bcc: resolvedBcc,
+        subject: options.subject || "",
+        body: bodyContent,
+        isHtml: true,
+      });
+      if (result.success) {
+        success("Draft created (via Gmail API)!");
+        if (result.draftId) {
+          log(`  ${colors.dim}Draft ID: ${result.draftId}${colors.reset}`);
+        }
+      } else {
+        error(`Failed to create draft: ${result.error}`);
+      }
+      await disconnect(conn);
+      return;
     }
+
+    // Add recipients
+    for (const email of resolvedTo) {
+      await addRecipient(conn, email, undefined, draftKey);
+    }
+    if (resolvedCc) {
+      for (const email of resolvedCc) {
+        await addCcRecipient(conn, email, undefined, draftKey);
+      }
+    }
+    // Note: BCC not supported via CDP (Superhuman doesn't expose this in compose)
+
+    // Set subject
+    if (options.subject) {
+      await setSubject(conn, options.subject, draftKey);
+    }
+
+    // Set body
+    await setBody(conn, bodyContent, draftKey);
+
+    // Save the draft
+    const saved = await saveDraft(conn, draftKey);
+    if (saved) {
+      success("Draft created in Superhuman!");
+      log(`  ${colors.dim}Draft will appear in Superhuman UI and sync to all devices${colors.reset}`);
+    } else {
+      error("Failed to save draft");
+    }
+
+    // Close compose window
+    await closeCompose(conn);
   } else {
-    error(`Failed to create draft: ${result.error}`);
+    // Direct API approach (Gmail/MS Graph)
+    info("Creating draft via Gmail/MS Graph API...");
+    const result = await createDraft(conn, {
+      to: resolvedTo,
+      cc: resolvedCc,
+      bcc: resolvedBcc,
+      subject: options.subject || "",
+      body: bodyContent,
+      isHtml: true,
+    });
+
+    if (result.success) {
+      success("Draft created!");
+      if (result.draftId) {
+        log(`  ${colors.dim}Draft ID: ${result.draftId}${colors.reset}`);
+      }
+    } else {
+      error(`Failed to create draft: ${result.error}`);
+    }
   }
 
   await disconnect(conn);
