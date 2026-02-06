@@ -3089,40 +3089,58 @@ export async function getThreadMessagesForAI(
 export async function askAI(
   superhumanToken: string,
   oauthToken: TokenInfo,
-  threadId: string,
+  threadId: string | undefined,
   query: string,
   options?: AIQueryOptions
 ): Promise<AIQueryResult> {
   const sessionId = options?.sessionId || crypto.randomUUID();
 
-  // Fetch thread messages for context
-  const threadMessages = await getThreadMessagesForAI(oauthToken, threadId);
+  let payload: Record<string, unknown>;
 
-  if (threadMessages.length === 0) {
-    throw new Error(`Thread not found or has no messages: ${threadId}`);
+  if (threadId) {
+    // Reply mode: fetch thread messages for context
+    const threadMessages = await getThreadMessagesForAI(oauthToken, threadId);
+
+    if (threadMessages.length === 0) {
+      throw new Error(`Thread not found or has no messages: ${threadId}`);
+    }
+
+    // Build thread_content string from messages (what Superhuman passes to its backend)
+    const threadContent = threadMessages.map(m =>
+      `Subject: ${m.subject}\n\n${m.body}`
+    ).join("\n\n---\n\n");
+
+    const lastMessage = threadMessages[threadMessages.length - 1];
+
+    payload = {
+      instructions: query,
+      draft_content: "",
+      draft_content_type: "text/html",
+      draft_action: "reply",
+      thread_content: threadContent,
+      subject: threadMessages[0]?.subject || "",
+      to: [],
+      cc: [],
+      bcc: [],
+      thread_id: threadId,
+      last_message_id: lastMessage.message_id,
+    };
+  } else {
+    // Compose mode: no thread context needed
+    payload = {
+      instructions: query,
+      draft_content: "",
+      draft_content_type: "text/html",
+      draft_action: "compose",
+      thread_content: "",
+      subject: "",
+      to: [],
+      cc: [],
+      bcc: [],
+      thread_id: "",
+      last_message_id: "",
+    };
   }
-
-  // Build thread_content string from messages (what Superhuman passes to its backend)
-  const threadContent = threadMessages.map(m =>
-    `Subject: ${m.subject}\n\n${m.body}`
-  ).join("\n\n---\n\n");
-
-  const lastMessage = threadMessages[threadMessages.length - 1];
-
-  // Build request payload for ai.compose
-  const payload = {
-    instructions: query,
-    draft_content: "",
-    draft_content_type: "text/html",
-    draft_action: "reply",
-    thread_content: threadContent,
-    subject: threadMessages[0]?.subject || "",
-    to: [],
-    cc: [],
-    bcc: [],
-    thread_id: threadId,
-    last_message_id: lastMessage.message_id,
-  };
 
   const url = `${SUPERHUMAN_BACKEND_BASE}/v3/ai.compose`;
 

@@ -613,11 +613,18 @@ function parseArgs(args: string[]): CliOptions {
     } else if (options.command === "forward" && !options.threadId) {
       options.threadId = unescapeString(arg);
       i += 1;
-    } else if (options.command === "ai" && !options.threadId) {
-      options.threadId = unescapeString(arg);
-      i += 1;
     } else if (options.command === "ai" && !options.aiQuery) {
-      options.aiQuery = unescapeString(arg);
+      // ai command: first positional arg could be a thread-id or the query.
+      // If we don't have a threadId yet, check if the arg looks like one:
+      //   - Gmail thread IDs are hex strings (e.g., 19c2fbf72ffde347)
+      //   - MS Graph conversationIds start with "AAQ"
+      // If it matches a thread-id pattern, store as threadId and expect query next.
+      // Otherwise, treat it as the query (compose mode, no thread context).
+      if (!options.threadId && (/^[0-9a-f]{10,}$/i.test(arg) || arg.startsWith("AAQ"))) {
+        options.threadId = unescapeString(arg);
+      } else {
+        options.aiQuery = unescapeString(arg);
+      }
       i += 1;
     } else if (options.command === "archive" || options.command === "delete") {
       // Collect multiple thread IDs for bulk top-level operations
@@ -2999,18 +3006,13 @@ async function cmdContacts(options: CliOptions) {
 }
 
 async function cmdAi(options: CliOptions) {
-  if (!options.threadId) {
-    error("Thread ID is required");
-    console.log(`Usage: superhuman ai <thread-id> "question"`);
-    process.exit(1);
-  }
-
   if (!options.aiQuery) {
-    error("Question is required");
-    console.log(`Usage: superhuman ai <thread-id> "question"`);
+    error("Prompt is required");
+    console.log(`Usage: superhuman ai "prompt"                    (compose from scratch)`);
+    console.log(`       superhuman ai <thread-id> "prompt"        (reply to a thread)`);
     console.log(`\nExamples:`);
+    console.log(`  superhuman ai "Write an email inviting the team to a planning meeting"`);
     console.log(`  superhuman ai <thread-id> "summarize this thread"`);
-    console.log(`  superhuman ai <thread-id> "what are the action items?"`);
     console.log(`  superhuman ai <thread-id> "draft a reply"`);
     process.exit(1);
   }
@@ -3030,7 +3032,9 @@ async function cmdAi(options: CliOptions) {
       process.exit(1);
     }
 
-    info(`Fetching thread context...`);
+    if (options.threadId) {
+      info(`Fetching thread context...`);
+    }
     const oauthToken = await getToken(conn, currentAccount.email);
 
     // Get Superhuman backend token for AI API
