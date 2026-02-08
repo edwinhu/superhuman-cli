@@ -47,6 +47,7 @@ import {
   getTokensFilePath,
   extractSuperhumanToken,
   askAI,
+  askAISearch,
   getCachedToken,
   getCachedAccounts,
   hasCachedSuperhumanCredentials,
@@ -58,7 +59,7 @@ import {
 import type { ConnectionProvider } from "./connection-provider";
 import { CachedTokenProvider, CDPConnectionProvider, resolveProvider } from "./connection-provider";
 
-const VERSION = "0.11.1";
+const VERSION = "0.12.0";
 const CDP_PORT = 9333;
 
 // ANSI colors
@@ -133,7 +134,8 @@ ${colors.bold}COMMANDS${colors.reset}
   ${colors.cyan}archive${colors.reset} <id>        Archive email thread(s)
   ${colors.cyan}delete${colors.reset} <id>         Delete (trash) email thread(s)
   ${colors.cyan}send${colors.reset}                Compose and send, or send an existing draft
-  ${colors.cyan}ai${colors.reset} <id> <query>     Ask AI about an email thread
+  ${colors.cyan}ai${colors.reset} <query>          Ask AI to search, compose, or answer questions
+  ${colors.cyan}ai${colors.reset} <id> <query>     Ask AI about a specific email thread
   ${colors.cyan}status${colors.reset}              Check Superhuman connection status
   ${colors.cyan}help${colors.reset}                Show this help message
 
@@ -269,7 +271,10 @@ ${colors.bold}EXAMPLES${colors.reset}
   superhuman snippet use "share recordings" --to user@example.com --vars "date=Feb 5,student_name=Jane"
   superhuman snippet use "share recordings" --to user@example.com --vars "date=Feb 5" --send
 
-  ${colors.dim}# Ask AI about an email thread${colors.reset}
+  ${colors.dim}# Ask AI (search, compose, or ask about a thread)${colors.reset}
+  superhuman ai "find emails about the Stanford cover letter"
+  superhuman ai "what did John say about the deadline?"
+  superhuman ai "Write an email inviting the team to a meeting"
   superhuman ai <thread-id> "summarize this thread"
   superhuman ai <thread-id> "what are the action items?"
 
@@ -2891,9 +2896,11 @@ async function cmdContacts(options: CliOptions) {
 async function cmdAi(options: CliOptions) {
   if (!options.aiQuery) {
     error("Prompt is required");
-    console.log(`Usage: superhuman ai "prompt"                    (compose from scratch)`);
-    console.log(`       superhuman ai <thread-id> "prompt"        (reply to a thread)`);
+    console.log(`Usage: superhuman ai "prompt"                    (ask AI / search emails)`);
+    console.log(`       superhuman ai <thread-id> "prompt"        (ask about a specific thread)`);
     console.log(`\nExamples:`);
+    console.log(`  superhuman ai "find emails about the Stanford cover letter"`);
+    console.log(`  superhuman ai "what did John say about the deadline?"`);
     console.log(`  superhuman ai "Write an email inviting the team to a planning meeting"`);
     console.log(`  superhuman ai <thread-id> "summarize this thread"`);
     console.log(`  superhuman ai <thread-id> "draft a reply"`);
@@ -2924,13 +2931,14 @@ async function cmdAi(options: CliOptions) {
       process.exit(1);
     }
 
-    // Query the AI
+    // Use askAISearch (askAIProxy) for all queries — it supports search, compose, and thread Q&A.
+    // With a thread ID, it provides thread context. Without, it can search or compose.
     info(`Asking AI: "${options.aiQuery}"`);
-    const result = await askAI(
+    const result = await askAISearch(
       superhumanToken,
       oauthToken,
-      options.threadId,
       options.aiQuery,
+      { threadId: options.threadId },
     );
 
     // Display the response

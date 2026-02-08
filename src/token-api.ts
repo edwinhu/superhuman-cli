@@ -21,6 +21,8 @@ export interface TokenInfo {
   userId?: string;
   idToken?: string;
   idTokenExpires?: number;
+  // 4-char user prefix for generating event IDs (e.g., "4sKP")
+  userPrefix?: string;
 }
 
 /**
@@ -67,6 +69,18 @@ export async function extractToken(
             return { error: "No access token found" };
           }
 
+          // Extract user prefix for event ID generation
+          let userPrefix = null;
+          try {
+            const shUserId = ga?.labels?._settings?._cache?.userId;
+            if (shUserId) {
+              const suffix = shUserId.replace('user_', '');
+              if (suffix.length >= 11) {
+                userPrefix = suffix.substring(7, 11);
+              }
+            }
+          } catch (_) {}
+
           return {
             accessToken: authData.accessToken,
             email: ga?.emailAddress || '',
@@ -78,6 +92,7 @@ export async function extractToken(
             userId: user?._id,
             idToken: authData.idToken,
             idTokenExpires: authData.expires,
+            userPrefix: userPrefix,
           };
         } catch (e) {
           return { error: e.message };
@@ -219,6 +234,7 @@ export interface PersistedTokens {
       expires: number; // Unix timestamp
       userId?: string; // Superhuman user ID for API paths
       refreshToken?: string; // OAuth refresh token for background refresh
+      userPrefix?: string; // 4-char user prefix for event ID generation
       superhumanToken?: {
         token: string; // idToken for Superhuman backend
         expires?: number;
@@ -267,6 +283,7 @@ export async function saveTokensToDisk(): Promise<void> {
       expires: token.expires,
       userId: token.userId,
       refreshToken: token.refreshToken,
+      userPrefix: token.userPrefix,
       superhumanToken: token.idToken ? {
         token: token.idToken,
         expires: token.idTokenExpires,
@@ -311,6 +328,7 @@ export async function loadTokensFromDisk(): Promise<boolean> {
         refreshToken: account.refreshToken,
         idToken: account.superhumanToken?.token,
         idTokenExpires: account.superhumanToken?.expires,
+        userPrefix: account.userPrefix,
       });
     }
 
@@ -3386,6 +3404,169 @@ export async function askAI(
       }
     }
   }
+
+  return {
+    response: fullContent || responseText,
+    sessionId,
+  };
+}
+
+/**
+ * Decode a JWT token payload without verification.
+ * Used to extract claims like `sub` (Google provider ID) from Superhuman's idToken.
+ */
+function decodeJwtPayload(jwt: string): Record<string, unknown> {
+  const parts = jwt.split(".");
+  if (parts.length !== 3) return {};
+  try {
+    const payload = Buffer.from(parts[1], "base64url").toString("utf-8");
+    return JSON.parse(payload);
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Format a FullThreadMessage for the askAIProxy API.
+ * The proxy expects string-formatted from/to/cc/bcc fields, not objects.
+ */
+function formatMessageForAIProxy(m: FullThreadMessage): Record<string, unknown> {
+  const formatContact = (c: { email: string; name: string }) =>
+    c.name ? `${c.name} <${c.email}>` : c.email;
+  const formatContacts = (contacts: Array<{ email: string; name: string }>) =>
+    contacts.map(formatContact).join(", ");
+
+  return {
+    message_id: m.message_id,
+    subject: m.subject,
+    body: m.body,
+    date: m.date,
+    from: formatContact(m.from),
+    to: formatContacts(m.to),
+    cc: formatContacts(m.cc),
+    bcc: "",
+    links: [],
+    attachment_names: [],
+  };
+}
+
+/**
+ * Query Superhuman's Ask AI search using the /v3/ai.askAIProxy endpoint.
+ *
+ * This is the full Ask AI feature — supports search, summarization, drafting, etc.
+ * The AI decides what to do based on the query and available skills.
+ *
+ * @param superhumanToken - Superhuman backend token (idToken JWT)
+ * @param oauthToken - OAuth token for the account
+ * @param query - Natural language query
+ * @param options - Additional options (threadId, session, user info)
+ * @returns AI response with session info
+ */
+export async function askAISearch(
+  superhumanToken: string,
+  oauthToken: TokenInfo,
+  query: string,
+  options?: AIQueryOptions & { threadId?: string }
+): Promise<AIQueryResult> {
+  const sessionId = options?.sessionId || crypto.randomUUID();
+
+  // Extract provider_id from the JWT idToken
+  const jwtPayload = decodeJwtPayload(superhumanToken);
+  const providerId = (jwtPayload.sub as string) || (jwtPayload.user_id as string) || "";
+
+  // Use stored user prefix for event ID generation
+  const userPrefix = options?.userPrefix || oauthToken.userPrefix || "";
+
+  // Generate question event ID
+  const questionEventId = generateEventId(userPrefix);
+
+  // Build current_thread_messages if a thread is specified
+  let currentThreadId = options?.threadId || "";
+  let currentThreadMessages: Record<string, unknown>[] = [];
+
+  if (currentThreadId) {
+    try {
+      const fullMessages = await getThreadMessages(oauthToken, currentThreadId);
+      currentThreadMessages = fullMessages.map(formatMessageForAIProxy);
+    } catch {
+      // Thread fetch failed — continue without thread context
+    }
+  }
+
+  // Get local datetime in ISO format with timezone offset
+  const now = new Date();
+  const tzOffset = -now.getTimezoneOffset();
+  const tzSign = tzOffset >= 0 ? "+" : "-";
+  const tzHours = String(Math.floor(Math.abs(tzOffset) / 60)).padStart(2, "0");
+  const tzMins = String(Math.abs(tzOffset) % 60).padStart(2, "0");
+  const localDatetime = now.toISOString().replace("Z", "").replace(/\.\d+$/, "") +
+    `${tzSign}${tzHours}:${tzMins}`;
+
+  const payload = {
+    session_id: sessionId,
+    question_event_id: questionEventId,
+    query,
+    chat_history: options?.chatHistory?.map((m) => ({
+      role: m.role,
+      content: m.content,
+    })) || [],
+    user: {
+      provider_id: providerId,
+      email: options?.userEmail || oauthToken.email,
+      name: options?.userName || "",
+      company: options?.userCompany || "",
+      position: options?.userPosition || "",
+    },
+    local_datetime: localDatetime,
+    current_thread_id: currentThreadId,
+    current_thread_messages: currentThreadMessages,
+    available_skills: ["filter", "schedule", "multiMessage", "draft", "displayThoughts"],
+  };
+
+  const url = `${SUPERHUMAN_BACKEND_BASE}/v3/ai.askAIProxy`;
+
+  const fetchResponse = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${superhumanToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (fetchResponse.status === 401 || fetchResponse.status === 403) {
+    throw new Error("AI query failed - authentication error");
+  }
+
+  if (!fetchResponse.ok) {
+    const errorText = await fetchResponse.text().catch(() => "Unknown error");
+    throw new Error(`AI query failed: ${fetchResponse.status} ${fetchResponse.statusText} - ${errorText}`);
+  }
+
+  // Parse the SSE streaming response
+  // askAIProxy returns cumulative content: each event has the full text up to that point
+  const responseText = await fetchResponse.text();
+  let fullContent = "";
+
+  for (const line of responseText.split("\n")) {
+    if (line.startsWith("data: ")) {
+      const jsonStr = line.substring(6).trim();
+      if (jsonStr === "[DONE]" || jsonStr === "END" || jsonStr === "") continue;
+
+      try {
+        const data = JSON.parse(jsonStr);
+        // askAIProxy format: content at top level (cumulative)
+        if (typeof data.content === "string") {
+          fullContent = data.content;
+        }
+      } catch {
+        // Ignore non-JSON lines
+      }
+    }
+  }
+
+  // Strip <thinking>...</thinking> tags from the response
+  fullContent = fullContent.replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, "").trim();
 
   return {
     response: fullContent || responseText,

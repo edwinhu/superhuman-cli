@@ -38,6 +38,7 @@ import {
   getCachedToken,
   getCachedAccounts,
   hasCachedSuperhumanCredentials,
+  askAISearch,
   type TokenInfo,
 } from "../token-api";
 
@@ -1544,5 +1545,33 @@ export async function useSnippetHandler(args: z.infer<typeof UseSnippetSchema>):
     return errorResult(`Failed to use snippet: ${message}`);
   } finally {
     if (provider) await provider.disconnect();
+  }
+}
+
+// ========== AI Search ==========
+
+export const AskAISchema = {
+  query: z.string().describe("Natural language query — search emails, ask questions, compose drafts, etc."),
+  thread_id: z.string().optional().describe("Optional thread ID to ask about a specific email thread"),
+};
+
+export async function askAIHandler(args: z.infer<z.ZodObject<typeof AskAISchema>>): Promise<ToolResult> {
+  try {
+    const token = await resolveSuperhumanToken();
+    if (!token || !token.idToken) {
+      return errorResult("No Superhuman credentials found. Run 'superhuman account auth' first.");
+    }
+
+    const result = await askAISearch(
+      token.idToken,
+      token,
+      args.query,
+      { threadId: args.thread_id },
+    );
+
+    return successResult(result.response);
+  } catch (error) {
+    const message = error instanceof Error ? error.message : "Unknown error";
+    return errorResult(`AI query failed: ${message}`);
   }
 }

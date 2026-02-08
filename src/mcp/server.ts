@@ -24,7 +24,8 @@ import {
   attachmentsHandler, downloadAttachmentHandler,
   calendarListHandler, calendarCreateHandler, calendarUpdateHandler, calendarDeleteHandler, calendarFreeBusyHandler,
   SnippetsSchema, UseSnippetSchema,
-  snippetsHandler, useSnippetHandler
+  snippetsHandler, useSnippetHandler,
+  AskAISchema, askAIHandler,
 } from "./tools";
 
 function createMcpServer(): McpServer {
@@ -328,6 +329,15 @@ function createMcpServer(): McpServer {
       inputSchema: UseSnippetSchema,
     },
     useSnippetHandler
+  );
+
+  server.registerTool(
+    "superhuman_ask_ai",
+    {
+      description: "Ask Superhuman AI to search emails, answer questions, or compose drafts. Supports natural language queries like 'find emails about the project deadline' or 'what did John say about the budget?'. Optionally provide a thread ID to ask about a specific email thread.",
+      inputSchema: AskAISchema,
+    },
+    askAIHandler
   );
 
   return server;
