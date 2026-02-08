@@ -53,6 +53,7 @@ import {
   getThreadInfoDirect,
   sendEmailDirect,
   getThreadMessages,
+  type TokenInfo,
 } from "./token-api";
 import type { ConnectionProvider } from "./connection-provider";
 import { CachedTokenProvider, CDPConnectionProvider, resolveProvider } from "./connection-provider";
@@ -802,6 +803,30 @@ async function resolveBackendUserInfo(
   return { userInfo, email: userInfo.email };
 }
 
+/**
+ * Resolve a cached Superhuman token with idToken + userId.
+ * Tries --account first, then any cached account with Superhuman credentials.
+ * Returns null if no valid cached credentials found.
+ */
+async function resolveSuperhumanToken(account?: string): Promise<TokenInfo | null> {
+  await loadTokensFromDisk();
+
+  if (account && await hasCachedSuperhumanCredentials(account)) {
+    const token = await getCachedToken(account);
+    if (token?.idToken && token?.userId) return token;
+  }
+
+  const accounts = getCachedAccounts();
+  for (const email of accounts) {
+    if (await hasCachedSuperhumanCredentials(email)) {
+      const token = await getCachedToken(email);
+      if (token?.idToken && token?.userId) return token;
+    }
+  }
+
+  return null;
+}
+
 async function cmdSnippets(options: CliOptions) {
   const { userInfo } = await resolveBackendUserInfo(options);
   const snippets = await listSnippets(userInfo);
@@ -979,42 +1004,36 @@ async function cmdDraft(options: CliOptions) {
     process.exit(1);
   }
 
-  // Fast path: use cached credentials if --account is specified with valid cache
-  // This avoids CDP connection entirely for Superhuman drafts
-  if (options.account && options.provider === "superhuman") {
-    await loadTokensFromDisk();
-    if (await hasCachedSuperhumanCredentials(options.account)) {
-      const token = await getCachedToken(options.account);
-      if (token?.idToken && token?.userId) {
-        info("Creating draft via cached credentials (no CDP)...");
+  // Fast path: use cached Superhuman credentials (no CDP needed)
+  if (options.provider === "superhuman") {
+    const token = await resolveSuperhumanToken(options.account);
+    if (token) {
+      info("Creating draft via Superhuman API...");
 
-        const userInfo = getUserInfoFromCache(
-          token.userId,
-          token.email,
-          token.idToken
-        );
+      const userInfo = getUserInfoFromCache(
+        token.userId,
+        token.email,
+        token.idToken
+      );
 
-        const bodyContent = options.html || textToHtml(options.body);
-        const result = await createDraftWithUserInfo(userInfo, {
-          to: options.to, // Use raw emails (no name resolution without CDP)
-          cc: options.cc.length > 0 ? options.cc : undefined,
-          bcc: options.bcc.length > 0 ? options.bcc : undefined,
-          subject: options.subject || "",
-          body: bodyContent,
-        });
+      const bodyContent = options.html || textToHtml(options.body);
+      const result = await createDraftWithUserInfo(userInfo, {
+        to: options.to,
+        cc: options.cc.length > 0 ? options.cc : undefined,
+        bcc: options.bcc.length > 0 ? options.bcc : undefined,
+        subject: options.subject || "",
+        body: bodyContent,
+      });
 
-        if (result.success) {
-          success("Draft created in Superhuman!");
-          log(`  ${colors.dim}Draft ID: ${result.draftId}${colors.reset}`);
-          log(`  ${colors.dim}Account: ${options.account}${colors.reset}`);
-          log(`  ${colors.dim}Syncs to all devices automatically${colors.reset}`);
-        } else {
-          error(`Failed to create draft: ${result.error}`);
-        }
-        return;
+      if (result.success) {
+        success("Draft created in Superhuman!");
+        log(`  ${colors.dim}Draft ID: ${result.draftId}${colors.reset}`);
+        log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
+        log(`  ${colors.dim}Syncs to all devices automatically${colors.reset}`);
+      } else {
+        error(`Failed to create draft: ${result.error}`);
       }
-    } else {
-      warn(`No cached credentials for ${options.account}, falling back to CDP...`);
+      return;
     }
   }
 
@@ -1029,8 +1048,8 @@ async function cmdDraft(options: CliOptions) {
   const bodyContent = options.html || textToHtml(options.body);
 
   if (options.provider === "superhuman") {
-    // Direct API approach - fast, no UI needed, supports BCC
-    info("Creating draft via Superhuman API...");
+    // Fallback: Superhuman via CDP provider
+    info("Creating draft via Superhuman API (CDP)...");
 
     const result = await createDraftViaProvider(provider, {
       to: resolvedTo,
@@ -1395,91 +1414,85 @@ async function cmdReply(options: CliOptions) {
     process.exit(1);
   }
 
-  // Fast path: use cached credentials if --account is specified
-  if (options.account) {
-    await loadTokensFromDisk();
-    if (await hasCachedSuperhumanCredentials(options.account)) {
-      const token = await getCachedToken(options.account);
-      if (token?.idToken && token?.userId) {
-        const body = options.body || "";
+  // Fast path: use cached Superhuman credentials (no CDP needed)
+  {
+    const token = await resolveSuperhumanToken(options.account);
+    if (token) {
+      const body = options.body || "";
 
-        if (options.send) {
-          // Immediate send via Gmail/MS Graph
-          info(`Sending reply to thread ${options.threadId} via direct API...`);
+      if (options.send) {
+        info(`Sending reply to thread ${options.threadId} via direct API...`);
 
-          const threadInfo = await getThreadInfoDirect(token, options.threadId);
-          if (!threadInfo) {
-            error("Could not get thread information");
-            process.exit(1);
-          }
-
-          const subject = threadInfo.subject.startsWith("Re:")
-            ? threadInfo.subject
-            : `Re: ${threadInfo.subject}`;
-
-          const result = await sendEmailDirect(token, {
-            to: [threadInfo.from],
-            subject,
-            body: textToHtml(body),
-            isHtml: true,
-            threadId: options.threadId,
-            inReplyTo: threadInfo.messageId || undefined,
-            references: threadInfo.references,
-          });
-
-          if (result) {
-            success("Reply sent!");
-            log(`  ${colors.dim}Account: ${options.account}${colors.reset}`);
-          } else {
-            error("Failed to send reply");
-          }
-          return;
-        } else {
-          // Create Superhuman draft
-          info(`Creating reply draft via cached credentials (no CDP)...`);
-
-          const threadInfo = await getThreadInfoDirect(token, options.threadId);
-          if (!threadInfo) {
-            error("Could not get thread information");
-            process.exit(1);
-          }
-
-          const userInfo = getUserInfoFromCache(
-            token.userId,
-            token.email,
-            token.idToken
-          );
-
-          const subject = threadInfo.subject.startsWith("Re:")
-            ? threadInfo.subject
-            : `Re: ${threadInfo.subject}`;
-
-          const result = await createDraftWithUserInfo(userInfo, {
-            to: [threadInfo.from],
-            subject,
-            body: textToHtml(body),
-            action: "reply",
-            inReplyToThreadId: options.threadId,
-            inReplyToRfc822Id: threadInfo.messageId || undefined,
-          });
-
-          if (result.success) {
-            success("Reply draft created in Superhuman!");
-            log(`  ${colors.dim}Draft ID: ${result.draftId}${colors.reset}`);
-            log(`  ${colors.dim}Account: ${options.account}${colors.reset}`);
-            log(`  ${colors.dim}Syncs to all devices automatically${colors.reset}`);
-          } else {
-            error(`Failed to create reply draft: ${result.error}`);
-          }
-          return;
+        const threadInfo = await getThreadInfoDirect(token, options.threadId);
+        if (!threadInfo) {
+          error("Could not get thread information");
+          process.exit(1);
         }
+
+        const subject = threadInfo.subject.startsWith("Re:")
+          ? threadInfo.subject
+          : `Re: ${threadInfo.subject}`;
+
+        const result = await sendEmailDirect(token, {
+          to: [threadInfo.from],
+          subject,
+          body: textToHtml(body),
+          isHtml: true,
+          threadId: options.threadId,
+          inReplyTo: threadInfo.messageId || undefined,
+          references: threadInfo.references,
+        });
+
+        if (result) {
+          success("Reply sent!");
+          log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
+        } else {
+          error("Failed to send reply");
+        }
+        return;
+      } else {
+        // Create Superhuman draft
+        info(`Creating reply draft via Superhuman API...`);
+
+        const threadInfo = await getThreadInfoDirect(token, options.threadId);
+        if (!threadInfo) {
+          error("Could not get thread information");
+          process.exit(1);
+        }
+
+        const userInfo = getUserInfoFromCache(
+          token.userId,
+          token.email,
+          token.idToken
+        );
+
+        const subject = threadInfo.subject.startsWith("Re:")
+          ? threadInfo.subject
+          : `Re: ${threadInfo.subject}`;
+
+        const result = await createDraftWithUserInfo(userInfo, {
+          to: [threadInfo.from],
+          subject,
+          body: textToHtml(body),
+          action: "reply",
+          inReplyToThreadId: options.threadId,
+          inReplyToRfc822Id: threadInfo.messageId || undefined,
+        });
+
+        if (result.success) {
+          success("Reply draft created in Superhuman!");
+          log(`  ${colors.dim}Draft ID: ${result.draftId}${colors.reset}`);
+          log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
+          log(`  ${colors.dim}Syncs to all devices automatically${colors.reset}`);
+        } else {
+          error(`Failed to create reply draft: ${result.error}`);
+        }
+        return;
       }
     }
-    // No valid cached credentials - warn and fall through to CDP path
-    warn(`No cached credentials for ${options.account}, falling back to CDP...`);
   }
 
-  // CDP path (original behavior)
+  // CDP path (fallback)
   const provider = await getProvider(options);
 
   const body = options.body || "";
@@ -1508,111 +1521,105 @@ async function cmdReplyAll(options: CliOptions) {
     process.exit(1);
   }
 
-  // Fast path: use cached credentials if --account is specified
-  if (options.account) {
-    await loadTokensFromDisk();
-    if (await hasCachedSuperhumanCredentials(options.account)) {
-      const token = await getCachedToken(options.account);
-      if (token?.idToken && token?.userId) {
-        const body = options.body || "";
+  // Fast path: use cached Superhuman credentials (no CDP needed)
+  {
+    const token = await resolveSuperhumanToken(options.account);
+    if (token) {
+      const body = options.body || "";
 
-        if (options.send) {
-          // Immediate send via Gmail/MS Graph
-          info(`Sending reply-all to thread ${options.threadId} via direct API...`);
+      if (options.send) {
+        info(`Sending reply-all to thread ${options.threadId} via direct API...`);
 
-          const threadInfo = await getThreadInfoDirect(token, options.threadId);
-          if (!threadInfo) {
-            error("Could not get thread information");
-            process.exit(1);
-          }
-
-          const subject = threadInfo.subject.startsWith("Re:")
-            ? threadInfo.subject
-            : `Re: ${threadInfo.subject}`;
-
-          // Build reply-all recipients (all participants except self)
-          const allRecipients = [
-            threadInfo.from,
-            ...threadInfo.to,
-            ...threadInfo.cc,
-          ].filter(email => email && email.toLowerCase() !== token.email.toLowerCase());
-
-          // Deduplicate recipients
-          const uniqueRecipients = [...new Set(allRecipients.map(e => e.toLowerCase()))];
-
-          const result = await sendEmailDirect(token, {
-            to: uniqueRecipients,
-            subject,
-            body: textToHtml(body),
-            isHtml: true,
-            threadId: options.threadId,
-            inReplyTo: threadInfo.messageId || undefined,
-            references: threadInfo.references,
-          });
-
-          if (result) {
-            success("Reply-all sent!");
-            log(`  ${colors.dim}Account: ${options.account}${colors.reset}`);
-          } else {
-            error("Failed to send reply-all");
-          }
-          return;
-        } else {
-          // Create Superhuman draft
-          info(`Creating reply-all draft via cached credentials (no CDP)...`);
-
-          const threadInfo = await getThreadInfoDirect(token, options.threadId);
-          if (!threadInfo) {
-            error("Could not get thread information");
-            process.exit(1);
-          }
-
-          const userInfo = getUserInfoFromCache(
-            token.userId,
-            token.email,
-            token.idToken
-          );
-
-          const subject = threadInfo.subject.startsWith("Re:")
-            ? threadInfo.subject
-            : `Re: ${threadInfo.subject}`;
-
-          // Build reply-all recipients (all participants except self)
-          const allRecipients = [
-            threadInfo.from,
-            ...threadInfo.to,
-            ...threadInfo.cc,
-          ].filter(email => email && email.toLowerCase() !== token.email.toLowerCase());
-
-          // Deduplicate recipients
-          const uniqueRecipients = [...new Set(allRecipients.map(e => e.toLowerCase()))];
-
-          const result = await createDraftWithUserInfo(userInfo, {
-            to: uniqueRecipients,
-            subject,
-            body: textToHtml(body),
-            action: "reply" as const,  // reply-all uses reply action
-            inReplyToThreadId: options.threadId,
-            inReplyToRfc822Id: threadInfo.messageId || undefined,
-          });
-
-          if (result.success) {
-            success("Reply-all draft created in Superhuman!");
-            log(`  ${colors.dim}Draft ID: ${result.draftId}${colors.reset}`);
-            log(`  ${colors.dim}Account: ${options.account}${colors.reset}`);
-            log(`  ${colors.dim}Syncs to all devices automatically${colors.reset}`);
-          } else {
-            error(`Failed to create reply-all draft: ${result.error}`);
-          }
-          return;
+        const threadInfo = await getThreadInfoDirect(token, options.threadId);
+        if (!threadInfo) {
+          error("Could not get thread information");
+          process.exit(1);
         }
+
+        const subject = threadInfo.subject.startsWith("Re:")
+          ? threadInfo.subject
+          : `Re: ${threadInfo.subject}`;
+
+        // Build reply-all recipients (all participants except self)
+        const allRecipients = [
+          threadInfo.from,
+          ...threadInfo.to,
+          ...threadInfo.cc,
+        ].filter(email => email && email.toLowerCase() !== token.email.toLowerCase());
+
+        // Deduplicate recipients
+        const uniqueRecipients = [...new Set(allRecipients.map(e => e.toLowerCase()))];
+
+        const result = await sendEmailDirect(token, {
+          to: uniqueRecipients,
+          subject,
+          body: textToHtml(body),
+          isHtml: true,
+          threadId: options.threadId,
+          inReplyTo: threadInfo.messageId || undefined,
+          references: threadInfo.references,
+        });
+
+        if (result) {
+          success("Reply-all sent!");
+          log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
+        } else {
+          error("Failed to send reply-all");
+        }
+        return;
+      } else {
+        // Create Superhuman draft
+        info(`Creating reply-all draft via Superhuman API...`);
+
+        const threadInfo = await getThreadInfoDirect(token, options.threadId);
+        if (!threadInfo) {
+          error("Could not get thread information");
+          process.exit(1);
+        }
+
+        const userInfo = getUserInfoFromCache(
+          token.userId,
+          token.email,
+          token.idToken
+        );
+
+        const subject = threadInfo.subject.startsWith("Re:")
+          ? threadInfo.subject
+          : `Re: ${threadInfo.subject}`;
+
+        // Build reply-all recipients (all participants except self)
+        const allRecipients = [
+          threadInfo.from,
+          ...threadInfo.to,
+          ...threadInfo.cc,
+        ].filter(email => email && email.toLowerCase() !== token.email.toLowerCase());
+
+        // Deduplicate recipients
+        const uniqueRecipients = [...new Set(allRecipients.map(e => e.toLowerCase()))];
+
+        const result = await createDraftWithUserInfo(userInfo, {
+          to: uniqueRecipients,
+          subject,
+          body: textToHtml(body),
+          action: "reply" as const,  // reply-all uses reply action
+          inReplyToThreadId: options.threadId,
+          inReplyToRfc822Id: threadInfo.messageId || undefined,
+        });
+
+        if (result.success) {
+          success("Reply-all draft created in Superhuman!");
+          log(`  ${colors.dim}Draft ID: ${result.draftId}${colors.reset}`);
+          log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
+          log(`  ${colors.dim}Syncs to all devices automatically${colors.reset}`);
+        } else {
+          error(`Failed to create reply-all draft: ${result.error}`);
+        }
+        return;
       }
     }
-    // No valid cached credentials - warn and fall through to CDP path
-    warn(`No cached credentials for ${options.account}, falling back to CDP...`);
   }
 
-  // CDP path (original behavior)
+  // CDP path (fallback)
   const provider = await getProvider(options);
 
   const body = options.body || "";
@@ -1647,88 +1654,82 @@ async function cmdForward(options: CliOptions) {
     process.exit(1);
   }
 
-  // Fast path: use cached credentials if --account is specified
-  if (options.account) {
-    await loadTokensFromDisk();
-    if (await hasCachedSuperhumanCredentials(options.account)) {
-      const token = await getCachedToken(options.account);
-      if (token?.idToken && token?.userId) {
-        const body = options.body || "";
+  // Fast path: use cached Superhuman credentials (no CDP needed)
+  {
+    const token = await resolveSuperhumanToken(options.account);
+    if (token) {
+      const body = options.body || "";
 
-        if (options.send) {
-          // Immediate send via Gmail/MS Graph
-          info(`Forwarding thread ${options.threadId} via direct API...`);
+      if (options.send) {
+        info(`Forwarding thread ${options.threadId} via direct API...`);
 
-          const threadInfo = await getThreadInfoDirect(token, options.threadId);
-          if (!threadInfo) {
-            error("Could not get thread information");
-            process.exit(1);
-          }
-
-          const subject = threadInfo.subject.startsWith("Fwd:")
-            ? threadInfo.subject
-            : `Fwd: ${threadInfo.subject}`;
-
-          const result = await sendEmailDirect(token, {
-            to: options.to,
-            subject,
-            body: textToHtml(body),
-            isHtml: true,
-            // Note: forwards don't need inReplyTo/references - they're new threads
-          });
-
-          if (result) {
-            success("Forward sent!");
-            log(`  ${colors.dim}Account: ${options.account}${colors.reset}`);
-          } else {
-            error("Failed to send forward");
-          }
-          return;
-        } else {
-          // Create Superhuman forward draft
-          info(`Creating forward draft via cached credentials (no CDP)...`);
-
-          const threadInfo = await getThreadInfoDirect(token, options.threadId);
-          if (!threadInfo) {
-            error("Could not get thread information");
-            process.exit(1);
-          }
-
-          const userInfo = getUserInfoFromCache(
-            token.userId,
-            token.email,
-            token.idToken
-          );
-
-          const subject = threadInfo.subject.startsWith("Fwd:")
-            ? threadInfo.subject
-            : `Fwd: ${threadInfo.subject}`;
-
-          const result = await createDraftWithUserInfo(userInfo, {
-            to: options.to,
-            subject,
-            body: textToHtml(body),
-            action: "forward",
-            inReplyToThreadId: options.threadId,
-          });
-
-          if (result.success) {
-            success("Forward draft created in Superhuman!");
-            log(`  ${colors.dim}Draft ID: ${result.draftId}${colors.reset}`);
-            log(`  ${colors.dim}Account: ${options.account}${colors.reset}`);
-            log(`  ${colors.dim}Syncs to all devices automatically${colors.reset}`);
-          } else {
-            error(`Failed to create forward draft: ${result.error}`);
-          }
-          return;
+        const threadInfo = await getThreadInfoDirect(token, options.threadId);
+        if (!threadInfo) {
+          error("Could not get thread information");
+          process.exit(1);
         }
+
+        const subject = threadInfo.subject.startsWith("Fwd:")
+          ? threadInfo.subject
+          : `Fwd: ${threadInfo.subject}`;
+
+        const result = await sendEmailDirect(token, {
+          to: options.to,
+          subject,
+          body: textToHtml(body),
+          isHtml: true,
+          // Note: forwards don't need inReplyTo/references - they're new threads
+        });
+
+        if (result) {
+          success("Forward sent!");
+          log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
+        } else {
+          error("Failed to send forward");
+        }
+        return;
+      } else {
+        // Create Superhuman forward draft
+        info(`Creating forward draft via Superhuman API...`);
+
+        const threadInfo = await getThreadInfoDirect(token, options.threadId);
+        if (!threadInfo) {
+          error("Could not get thread information");
+          process.exit(1);
+        }
+
+        const userInfo = getUserInfoFromCache(
+          token.userId,
+          token.email,
+          token.idToken
+        );
+
+        const subject = threadInfo.subject.startsWith("Fwd:")
+          ? threadInfo.subject
+          : `Fwd: ${threadInfo.subject}`;
+
+        const result = await createDraftWithUserInfo(userInfo, {
+          to: options.to,
+          subject,
+          body: textToHtml(body),
+          action: "forward",
+          inReplyToThreadId: options.threadId,
+        });
+
+        if (result.success) {
+          success("Forward draft created in Superhuman!");
+          log(`  ${colors.dim}Draft ID: ${result.draftId}${colors.reset}`);
+          log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
+          log(`  ${colors.dim}Syncs to all devices automatically${colors.reset}`);
+        } else {
+          error(`Failed to create forward draft: ${result.error}`);
+        }
+        return;
       }
     }
-    // No valid cached credentials - warn and fall through to CDP path
-    warn(`No cached credentials for ${options.account}, falling back to CDP...`);
   }
 
-  // CDP path (original behavior)
+  // CDP path (fallback)
   const provider = await getProvider(options);
 
   // Resolve name to email

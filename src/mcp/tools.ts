@@ -33,8 +33,31 @@ import { listSnippets, findSnippet, applyVars, parseVars } from "../snippets";
 import { getUserInfo, getUserInfoFromCache, createDraftWithUserInfo, sendDraftSuperhuman } from "../draft-api";
 import { sendEmailViaProvider, createDraftViaProvider } from "../send-api";
 import { CDPConnectionProvider, resolveProvider, type ConnectionProvider } from "../connection-provider";
+import {
+  loadTokensFromDisk,
+  getCachedToken,
+  getCachedAccounts,
+  hasCachedSuperhumanCredentials,
+  type TokenInfo,
+} from "../token-api";
 
 const CDP_PORT = 9333;
+
+/**
+ * Resolve a cached Superhuman token with idToken + userId.
+ * Tries any cached account with Superhuman credentials.
+ */
+async function resolveSuperhumanToken(): Promise<TokenInfo | null> {
+  await loadTokensFromDisk();
+  const accounts = getCachedAccounts();
+  for (const email of accounts) {
+    if (await hasCachedSuperhumanCredentials(email)) {
+      const token = await getCachedToken(email);
+      if (token?.idToken && token?.userId) return token;
+    }
+  }
+  return null;
+}
 
 /**
  * Shared schema for email composition (draft and send use the same fields)
@@ -305,32 +328,54 @@ async function getMcpProvider(): Promise<ConnectionProvider> {
  * Handler for superhuman_draft tool
  */
 export async function draftHandler(args: z.infer<typeof DraftSchema>): Promise<ToolResult> {
-  let provider: ConnectionProvider | null = null;
-
   try {
-    provider = await getMcpProvider();
+    // Try Superhuman native API first (no CDP needed)
+    const token = await resolveSuperhumanToken();
+    if (token) {
+      const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
+      const bodyHtml = textToHtml(args.body);
+      const result = await createDraftWithUserInfo(userInfo, {
+        to: [args.to],
+        cc: args.cc ? [args.cc] : undefined,
+        bcc: args.bcc ? [args.bcc] : undefined,
+        subject: args.subject,
+        body: bodyHtml,
+      });
 
-    const bodyHtml = textToHtml(args.body);
-    const result = await createDraftViaProvider(provider, {
-      to: [args.to],
-      cc: args.cc ? [args.cc] : undefined,
-      bcc: args.bcc ? [args.bcc] : undefined,
-      subject: args.subject,
-      body: bodyHtml,
-    });
+      if (result.success) {
+        return successResult(
+          `Draft created successfully.\nTo: ${args.to}\nSubject: ${args.subject}\nDraft ID: ${result.draftId || "(unknown)"}\nAccount: ${token.email}`
+        );
+      } else {
+        return errorResult(`Failed to create draft: ${result.error}`);
+      }
+    }
 
-    if (result.success) {
-      return successResult(
-        `Draft created successfully.\nTo: ${args.to}\nSubject: ${args.subject}\nDraft ID: ${result.draftId || "(unknown)"}`
-      );
-    } else {
-      return errorResult(`Failed to create draft: ${result.error}`);
+    // Fallback to provider-based approach (CDP)
+    const provider = await getMcpProvider();
+    try {
+      const bodyHtml = textToHtml(args.body);
+      const result = await createDraftViaProvider(provider, {
+        to: [args.to],
+        cc: args.cc ? [args.cc] : undefined,
+        bcc: args.bcc ? [args.bcc] : undefined,
+        subject: args.subject,
+        body: bodyHtml,
+      });
+
+      if (result.success) {
+        return successResult(
+          `Draft created successfully.\nTo: ${args.to}\nSubject: ${args.subject}\nDraft ID: ${result.draftId || "(unknown)"}`
+        );
+      } else {
+        return errorResult(`Failed to create draft: ${result.error}`);
+      }
+    } finally {
+      await provider.disconnect();
     }
   } catch (error) {
     const message = error instanceof Error ? error.message : "Unknown error";
     return errorResult(`Failed to create draft: ${message}`);
-  } finally {
-    if (provider) await provider.disconnect();
   }
 }
 
