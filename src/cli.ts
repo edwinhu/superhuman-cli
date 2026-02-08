@@ -59,7 +59,7 @@ import {
 import type { ConnectionProvider } from "./connection-provider";
 import { CachedTokenProvider, CDPConnectionProvider, resolveProvider } from "./connection-provider";
 
-const VERSION = "0.12.0";
+const VERSION = "0.12.1";
 const CDP_PORT = 9333;
 
 // ANSI colors
@@ -1361,8 +1361,12 @@ async function cmdRead(options: CliOptions) {
     process.exit(1);
   }
 
-  const provider = await getProvider(options);
-  const token = await provider.getToken();
+  // Fast path: use cached credentials (no CDP needed) - same pattern as cmdReply
+  const token = await resolveSuperhumanToken(options.account);
+  if (!token) {
+    error("No cached credentials found. Run 'superhuman account auth' first.");
+    process.exit(1);
+  }
 
   let messages;
   try {
@@ -1408,8 +1412,6 @@ async function cmdRead(options: CliOptions) {
       console.log(msg.snippet);
     }
   }
-
-  await provider.disconnect();
 }
 
 async function cmdReply(options: CliOptions) {
