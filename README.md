@@ -114,6 +114,10 @@ Recipients can be specified as email addresses or contact names. Names are autom
 superhuman draft create --to user@example.com --subject "Hello" --body "Hi there!"
 superhuman draft create --to "john" --subject "Hello" --body "Hi there!"
 
+# List drafts (shows both provider and native Superhuman drafts)
+superhuman draft list
+superhuman draft list --account user@example.com
+
 # Open compose window (keeps it open for editing)
 superhuman compose --to user@example.com --subject "Meeting"
 superhuman compose --to "john" --cc "jane" --subject "Meeting"
@@ -145,9 +149,21 @@ superhuman send --draft <draft-id>
 superhuman draft send <draft-id> --account=user@example.com --to=recipient@example.com --subject="Subject" --body="Body"
 ```
 
+#### Draft Sources
+
+The `draft list` command shows drafts from multiple sources with a "Source" column:
+
+| Source | Description | Example ID |
+|--------|-------------|------------|
+| `native` | Superhuman-only drafts | `draft00ce4679cc58a64c` |
+| `gmail` | Synced to Gmail | Gmail message ID |
+| `outlook` | Synced to Outlook | Outlook message ID |
+
+Native Superhuman drafts (IDs starting with `draft00...`) are fetched from Superhuman's backend API and only exist in Superhuman. Provider-synced drafts are fetched from Gmail/Outlook APIs and are visible in native email clients.
+
 #### Drafts Limitation
 
-Drafts are created via **native Gmail/Outlook APIs**, not Superhuman's proprietary draft system. This means:
+Drafts created via `draft create` use **native Gmail/Outlook APIs**, not Superhuman's proprietary draft system. This means:
 
 | Where | Visible? |
 |-------|----------|
