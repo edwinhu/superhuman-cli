@@ -1,6 +1,6 @@
 ---
 name: superhuman
-description: This skill should be used when the user asks to "check email", "read inbox", "send email", "reply to email", "search emails", "archive email", "snooze email", "star email", "add label", "forward email", "download attachment", "switch email account", "check calendar", "list events", "create event", "schedule meeting", "check availability", "free busy", "use snippet", "search contacts", "ask ai about email", "find email about", "what did someone say about", or needs to interact with Superhuman email client or calendar.
+description: This skill should be used when the user asks to "check email", "read inbox", "send email", "reply to email", "search emails", "archive email", "snooze email", "star email", "add label", "forward email", "download attachment", "switch email account", "use snippet", "search contacts", "ask ai about email", "find email about", "what did someone say about", or needs to interact with Superhuman email client. For calendar, events, and scheduling use the morgen skill instead.
 allowed-tools: Bash(superhuman:*)
 ---
 
@@ -22,6 +22,17 @@ bun install
 # Start Superhuman with CDP enabled
 /Applications/Superhuman.app/Contents/MacOS/Superhuman --remote-debugging-port=9333
 ```
+
+### Container / Remote CDP
+
+When running inside a Docker container or connecting to a remote host, set `CDP_HOST`:
+
+```bash
+export CDP_HOST=host.docker.internal   # Docker container → host
+superhuman account auth                # Extract tokens via remote CDP
+```
+
+After initial `account auth`, most operations use cached tokens and don't need CDP. Tokens are stored at `~/.config/superhuman-cli/tokens.json` and auto-refresh via OAuth.
 
 ## CLI Usage
 
@@ -255,23 +266,7 @@ superhuman attachment download --attachment <attachment-id> --message <message-i
 
 ### Calendar
 
-```bash
-# List events
-superhuman calendar list
-superhuman calendar list --date tomorrow --range 7 --json
-
-# Create event
-superhuman calendar create --title "Meeting" --start "2pm" --duration 30
-superhuman calendar create --title "All Day" --date 2026-02-05
-
-# Update/delete event
-superhuman calendar update --event <event-id> --title "New Title"
-superhuman calendar delete --event <event-id>
-
-# Check availability
-superhuman calendar free
-superhuman calendar free --date tomorrow --range 7
-```
+**DO NOT use `superhuman calendar`. Use the `morgen` CLI for all calendar operations** — it supports proper calendar filtering. See the `/morgen` skill.
 
 ### Options
 
@@ -295,14 +290,6 @@ superhuman calendar free --date tomorrow --range 7
 | `--limit <number>` | Number of results (default: 10) |
 | `--include-done` | Search all emails including archived (for search) |
 | `--context <number>` | Number of messages to show full body (default: all, for read) |
-| `--date <date>` | Date for calendar (YYYY-MM-DD or "today", "tomorrow") |
-| `--range <days>` | Days to show for calendar (default: 1) |
-| `--start <time>` | Event start time (ISO datetime or natural: "2pm", "tomorrow 3pm") |
-| `--end <time>` | Event end time (ISO datetime) |
-| `--duration <mins>` | Event duration in minutes (default: 30) |
-| `--title <text>` | Event title (for calendar create/update) |
-| `--event <id>` | Event ID (for calendar update/delete) |
-| `--calendar <name>` | Calendar name or ID (default: primary) |
 | `--json` | Output as JSON |
 | `--port <number>` | CDP port (default: 9333) |
 
@@ -320,9 +307,20 @@ superhuman star add <thread-id>
 
 ### Reply to Email
 
+For **drafting** replies (recommended — lets the user review before sending):
 ```bash
 superhuman read <thread-id> --account user@gmail.com
+superhuman reply <thread-id> --body "Thanks for the update."
+```
+
+For **sending** replies immediately:
+```bash
 superhuman reply <thread-id> --body "Thanks for the update." --send
+```
+
+If `superhuman reply` fails (e.g. MS Graph 400 error on Outlook accounts), use the AI approach:
+```bash
+superhuman ai <thread-id> "draft a professional reply saying thanks for the update"
 ```
 
 ### Search and Process
@@ -339,17 +337,6 @@ superhuman search "from:anthropic" --include-done    # Include archived
 superhuman account list
 superhuman account switch work@company.com
 superhuman contact search "john" --account personal@gmail.com
-```
-
-### Calendar Management
-
-```bash
-superhuman calendar list
-superhuman calendar list --range 7
-superhuman calendar free --date tomorrow
-superhuman calendar create --title "Team Sync" --start "2pm" --duration 60
-superhuman calendar update --event <event-id> --start "3pm"
-superhuman calendar delete --event <event-id>
 ```
 
 ### Snippets
@@ -393,6 +380,8 @@ Tokens auto-refresh. If refresh fails: `Token for user@email.com expired. Run 's
 2. Launch with debugging: `/Applications/Superhuman.app/Contents/MacOS/Superhuman --remote-debugging-port=9333`
 3. Verify: `superhuman status`
 
+**From a container**: Ensure `CDP_HOST=host.docker.internal` is set and the container was started with `--add-host=host.docker.internal:host-gateway`. The CLI skips local app launch when `CDP_HOST` is non-localhost.
+
 ### Thread Not Found
 
 Thread IDs come from inbox/search. Use `--json` to get exact IDs:
@@ -417,8 +406,6 @@ Most operations use **direct Gmail API and Microsoft Graph API** calls with cach
 | Star | Add STARRED label | `PATCH /messages/{id}` with `flag` |
 | Attachments | `GET /messages/{id}/attachments/{id}` | `GET /messages/{id}/attachments/{id}` |
 | Contacts | Google People API | MS Graph People API |
-| Calendar events | Google Calendar API | MS Graph Calendar API |
-| Free/busy | `POST /freeBusy` | `POST /me/calendar/getSchedule` |
 | Snippets | Superhuman backend API | Superhuman backend API |
 
 OAuth tokens (including refresh tokens) are extracted from Superhuman and cached to disk. When tokens expire, they are automatically refreshed via OAuth endpoints without requiring CDP connection.
@@ -432,7 +419,7 @@ Chrome DevTools Protocol is only needed for:
 - `compose` — Open Superhuman's compose UI
 - `search` / `inbox` (when no cached tokens) — Fallback via Superhuman's portal API
 
-All other operations (read, reply, forward, draft, archive, delete, labels, star, snooze, attachments, calendar, contacts, snippets) use direct API with cached tokens.
+All other operations (read, reply, forward, draft, archive, delete, labels, star, snooze, attachments, contacts, snippets) use direct API with cached tokens.
 
 ### Benefits
 

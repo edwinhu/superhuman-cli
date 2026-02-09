@@ -36,7 +36,7 @@ import {
   type UpdateEventInput,
 } from "./calendar";
 import { sendEmailViaProvider, createDraftViaProvider, updateDraftViaProvider, sendDraftByIdViaProvider, deleteDraftViaProvider } from "./send-api";
-import { createDraftWithUserInfo, getUserInfo, getUserInfoFromCache, sendDraftSuperhuman, type Recipient, type UserInfo } from "./draft-api";
+import { createDraftWithUserInfo, getUserInfo, getUserInfoFromCache, sendDraftSuperhuman, updateDraftWithUserInfo, deleteDraftWithUserInfo, type Recipient, type UserInfo } from "./draft-api";
 import { searchContacts, resolveRecipient, type Contact } from "./contacts";
 import { listSnippets, findSnippet, applyVars, parseVars } from "./snippets";
 import {
@@ -167,6 +167,7 @@ ${colors.bold}OPTIONS${colors.reset}
   --send             Send immediately instead of saving as draft (for reply/reply-all/forward)
   --vars <pairs>     Template variable substitution: "key1=val1,key2=val2" (for snippet use)
   --provider <type>  Draft API: "superhuman" (default), "gmail", or "outlook"
+  --native           Use native Superhuman API for draft update (auto-detected for draft00... IDs)
   --draft <id>       Draft ID to send (for send command)
   --thread <id>      Thread ID for reply/forward drafts (for draft send)
   --delay <seconds>  Delay before sending in seconds (for draft send, default: 20)
@@ -289,8 +290,9 @@ ${colors.bold}EXAMPLES${colors.reset}
   superhuman draft create --provider=gmail --to user@example.com --subject "Hello" --body "Hi there!"
   superhuman draft update <draft-id> --body "Updated content"
   superhuman draft update <draft-id> --subject "New Subject" --to new@example.com
+  superhuman draft update draft00abc --native --subject "New" ${colors.dim}# Native Superhuman draft${colors.reset}
   superhuman draft delete <draft-id>
-  superhuman draft delete <draft-id1> <draft-id2>
+  superhuman draft delete <draft-id1> <draft-id2> ${colors.dim}# Auto-detects native vs provider drafts${colors.reset}
   superhuman draft send <draft-id> --account=user@example.com --to=recipient@example.com --subject="Subject" --body="Body"
   superhuman draft send <draft-id> --thread=<thread-id> --account=... ${colors.dim}# For reply/forward drafts${colors.reset}
 
@@ -376,6 +378,8 @@ interface CliOptions {
   context: number; // number of messages to show full body for (0 = all)
   // draft provider option
   provider: "superhuman" | "gmail" | "outlook"; // which API to use for drafts (default: superhuman)
+  // native draft flag
+  native: boolean; // use native Superhuman draft operations (for update/delete)
 }
 
 function parseArgs(args: string[]): CliOptions {
@@ -425,6 +429,7 @@ function parseArgs(args: string[]): CliOptions {
     vars: "",
     context: 0,
     provider: "superhuman",
+    native: false,
   };
 
   let i = 0;
@@ -601,6 +606,10 @@ function parseArgs(args: string[]): CliOptions {
         case "thread":
           options.sendDraftThreadId = unescapeString(value);
           i += inc;
+          break;
+        case "native":
+          options.native = true;
+          i += 1;
           break;
         default:
           error(`Unknown option: ${arg}`);
@@ -982,6 +991,58 @@ async function cmdSnippet(options: CliOptions) {
 async function cmdDraft(options: CliOptions) {
   // If updating an existing draft
   if (options.updateDraftId) {
+    const draftId = options.updateDraftId;
+    const isNativeDraft = draftId.startsWith("draft00");
+
+    // Check for flag mismatch
+    if (options.native && !isNativeDraft) {
+      error("--native flag is only valid for native Superhuman draft IDs (starting with draft00)");
+      error(`Draft ID ${draftId} appears to be a provider draft ID`);
+      process.exit(1);
+    }
+
+    // Native draft update path
+    if (options.native || isNativeDraft) {
+      const token = await resolveSuperhumanToken(options.account);
+      if (!token) {
+        error("No cached Superhuman credentials found");
+        error("Run 'superhuman account auth' first");
+        process.exit(1);
+      }
+
+      const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
+
+      // Use DraftService to get draft details for threadId
+      const draftService = new DraftService(userInfo);
+      const drafts = await draftService.listDrafts();
+      const draft = drafts.find(d => d.id === draftId);
+
+      if (!draft) {
+        error(`Draft ${draftId} not found`);
+        process.exit(1);
+      }
+
+      // Use HTML body if provided, otherwise convert plain text to HTML (if body provided)
+      const bodyContent = options.html || (options.body ? textToHtml(options.body) : undefined);
+
+      info(`Updating native draft ${draftId}...`);
+      const success = await updateDraftWithUserInfo(userInfo, draft.threadId, draftId, {
+        to: options.to.length > 0 ? options.to : undefined,
+        cc: options.cc.length > 0 ? options.cc : undefined,
+        bcc: options.bcc.length > 0 ? options.bcc : undefined,
+        subject: options.subject || undefined,
+        body: bodyContent,
+      });
+
+      if (success) {
+        log(`${colors.green}✓${colors.reset} Draft updated!`);
+        log(`  ${colors.dim}Draft ID: ${draftId}${colors.reset}`);
+        log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
+      }
+      return;
+    }
+
+    // Provider draft update path
     const provider = await getProvider(options);
 
     // Resolve names to emails
@@ -1117,20 +1178,60 @@ async function cmdDeleteDraft(options: CliOptions) {
     process.exit(1);
   }
 
-  const provider = await getProvider(options);
+  // Separate native drafts from provider drafts
+  const nativeDraftIds = draftIds.filter(id => id.startsWith("draft00"));
+  const providerDraftIds = draftIds.filter(id => !id.startsWith("draft00"));
 
-  for (const draftId of draftIds) {
-    info(`Deleting draft ${draftId.slice(-15)}...`);
-    const result = await deleteDraftViaProvider(provider, draftId);
+  // Handle native drafts
+  if (nativeDraftIds.length > 0) {
+    const token = await resolveSuperhumanToken(options.account);
+    if (!token) {
+      error("No cached Superhuman credentials found for native draft deletion");
+      error("Run 'superhuman account auth' first");
+      process.exit(1);
+    }
 
-    if (result.success) {
-      success(`Deleted draft ${draftId.slice(-15)}`);
-    } else {
-      error(`Failed to delete draft: ${result.error}`);
+    const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
+
+    // Use DraftService to get draft details for threadId
+    const draftService = new DraftService(userInfo);
+    const drafts = await draftService.listDrafts();
+
+    for (const draftId of nativeDraftIds) {
+      const draft = drafts.find(d => d.id === draftId);
+
+      if (!draft) {
+        error(`Native draft ${draftId} not found`);
+        continue;
+      }
+
+      info(`Deleting native draft ${draftId.slice(-15)}...`);
+      try {
+        await deleteDraftWithUserInfo(userInfo, draft.threadId, draftId);
+        success(`Deleted native draft ${draftId.slice(-15)}`);
+      } catch (err) {
+        error(`Failed to delete native draft: ${err instanceof Error ? err.message : String(err)}`);
+      }
     }
   }
 
-  await provider.disconnect();
+  // Handle provider drafts
+  if (providerDraftIds.length > 0) {
+    const provider = await getProvider(options);
+
+    for (const draftId of providerDraftIds) {
+      info(`Deleting draft ${draftId.slice(-15)}...`);
+      const result = await deleteDraftViaProvider(provider, draftId);
+
+      if (result.success) {
+        success(`Deleted draft ${draftId.slice(-15)}`);
+      } else {
+        error(`Failed to delete draft: ${result.error}`);
+      }
+    }
+
+    await provider.disconnect();
+  }
 }
 
 async function cmdSendDraft(options: CliOptions) {
@@ -1568,6 +1669,7 @@ async function cmdReply(options: CliOptions) {
           action: "reply",
           inReplyToThreadId: options.threadId,
           inReplyToRfc822Id: threadInfo.messageId || undefined,
+          references: threadInfo.references,
         });
 
         if (result.success) {
@@ -1695,6 +1797,7 @@ async function cmdReplyAll(options: CliOptions) {
           action: "reply" as const,  // reply-all uses reply action
           inReplyToThreadId: options.threadId,
           inReplyToRfc822Id: threadInfo.messageId || undefined,
+          references: threadInfo.references,
         });
 
         if (result.success) {

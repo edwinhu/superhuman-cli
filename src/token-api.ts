@@ -2129,15 +2129,27 @@ export async function getThreadInfoDirect(
   threadId: string
 ): Promise<ThreadInfoDirect | null> {
   if (token.isMicrosoft) {
-    // MS Graph: Get messages in conversation
-    const path = `/me/messages?$filter=conversationId eq '${threadId}'&$select=id,subject,from,toRecipients,ccRecipients,internetMessageHeaders,receivedDateTime&$orderby=receivedDateTime desc&$top=1`;
-    const result = await msgraphFetch(token.accessToken, path);
+    // MS Graph: $filter on conversationId returns "InefficientFilter" / 400,
+    // so fetch recent messages and filter client-side (same as getThreadMessages).
+    const selectFields = "id,subject,from,toRecipients,ccRecipients,internetMessageHeaders,receivedDateTime,conversationId";
+    const recentPath = `/me/messages?$select=${selectFields}&$top=50&$orderby=receivedDateTime desc`;
+    const result = await msgraphFetch(token.accessToken, recentPath);
 
-    if (!result || !result.value || result.value.length === 0) {
+    if (!result || !result.value) {
       return null;
     }
 
-    const lastMessage = result.value[0];
+    // Filter by conversationId client-side and get the latest message
+    const matches = result.value.filter((m: any) => m.conversationId === threadId);
+    if (matches.length === 0) {
+      return null;
+    }
+
+    // Sort descending by date and take the latest
+    matches.sort((a: any, b: any) =>
+      new Date(b.receivedDateTime).getTime() - new Date(a.receivedDateTime).getTime()
+    );
+    const lastMessage = matches[0];
 
     // Extract Message-ID from internet message headers
     let messageId: string | null = null;

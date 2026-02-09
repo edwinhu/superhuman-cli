@@ -36,6 +36,7 @@ export interface DraftOptions {
   action?: "compose" | "reply" | "forward";
   inReplyToThreadId?: string;
   inReplyToRfc822Id?: string;
+  references?: string[];
 }
 
 export interface DraftResult {
@@ -156,7 +157,7 @@ export async function createDraftWithUserInfo(
       lastSessionId: crypto.randomUUID(),
       quotedContent: "",
       quotedContentInlined: false,
-      references: [],
+      references: options.references || [],
       reminder: null,
       rfc822Id: generateRfc822Id(),
       scheduledFor: null,
@@ -344,6 +345,135 @@ export interface SendDraftResult {
   /** Unix timestamp (ms) when email will be sent */
   sendAt?: number;
   error?: string;
+}
+
+/**
+ * Update an existing draft by writing to its draft path with existing IDs.
+ * Core function to update a draft with pre-extracted user info.
+ * Can be used with cached credentials (no CDP needed).
+ */
+export async function updateDraftWithUserInfo(
+  userInfo: UserInfo,
+  threadId: string,
+  draftId: string,
+  options: DraftOptions
+): Promise<boolean> {
+  try {
+    const now = new Date().toISOString();
+
+    // Format recipients
+    const formatRecipients = (emails?: string[]): string[] => {
+      if (!emails || emails.length === 0) return [];
+      return emails;
+    };
+
+    const draftValue = {
+      id: draftId,
+      threadId: threadId,
+      action: options.action || "compose",
+      name: null,
+      from: `${userInfo.email.split("@")[0]} <${userInfo.email}>`,
+      to: formatRecipients(options.to),
+      cc: formatRecipients(options.cc),
+      bcc: formatRecipients(options.bcc),
+      subject: options.subject || "",
+      body: options.body || "",
+      snippet: (options.body || "").replace(/<[^>]*>/g, "").substring(0, 100),
+      inReplyToRfc822Id: options.inReplyToRfc822Id || null,
+      labelIds: ["DRAFT"],
+      clientCreatedAt: now,
+      date: now,
+      fingerprint: {
+        to: (options.to || []).join(","),
+        cc: (options.cc || []).join(","),
+        attachments: "",
+      },
+      lastSessionId: crypto.randomUUID(),
+      quotedContent: "",
+      quotedContentInlined: false,
+      references: [],
+      reminder: null,
+      rfc822Id: generateRfc822Id(),
+      scheduledFor: null,
+      scheduledReplyInterruptedAt: null,
+      schemaVersion: 3,
+      totalComposeSeconds: 0,
+      timeZone: userInfo.timeZone,
+    };
+
+    const requestBody = {
+      writes: [
+        {
+          path: `users/${userInfo.userId}/threads/${threadId}/messages/${draftId}/draft`,
+          value: draftValue,
+        },
+      ],
+    };
+
+    const response = await fetch(`${SUPERHUMAN_BACKEND}/v3/userdata.writeMessage`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "text/plain;charset=UTF-8",
+        Authorization: `Bearer ${userInfo.token}`,
+      },
+      body: JSON.stringify(requestBody),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`API error ${response.status}: ${text}`);
+    }
+
+    return true;
+  } catch (error) {
+    throw new Error(
+      `Failed to update draft: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+}
+
+/**
+ * Delete a draft by writing to its discardedAt path.
+ * Core function to delete a draft with pre-extracted user info.
+ * Can be used with cached credentials (no CDP needed).
+ */
+export async function deleteDraftWithUserInfo(
+  userInfo: UserInfo,
+  threadId: string,
+  draftId: string
+): Promise<boolean> {
+  try {
+    const now = new Date().toISOString();
+
+    const requestBody = {
+      writes: [
+        {
+          path: `users/${userInfo.userId}/threads/${threadId}/messages/${draftId}/discardedAt`,
+          value: now,
+        },
+      ],
+    };
+
+    const response = await fetch(`${SUPERHUMAN_BACKEND}/v3/userdata.writeMessage`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "text/plain;charset=UTF-8",
+        Authorization: `Bearer ${userInfo.token}`,
+      },
+      body: JSON.stringify(requestBody),
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`API error ${response.status}: ${text}`);
+    }
+
+    return true;
+  } catch (error) {
+    throw new Error(
+      `Failed to delete draft: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
 }
 
 /**

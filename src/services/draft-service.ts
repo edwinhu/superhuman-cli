@@ -15,6 +15,7 @@ export interface Draft {
   preview: string;
   timestamp: string;
   source: "gmail" | "outlook" | "native";
+  threadId?: string; // Optional: used by native Superhuman drafts for update/delete
 }
 
 /**
@@ -23,6 +24,8 @@ export interface Draft {
 export interface IDraftProvider {
   readonly source: Draft["source"];
   listDrafts(limit?: number, offset?: number): Promise<Draft[]>;
+  updateDraft?(draftId: string, updates: Partial<Draft>): Promise<boolean>;
+  deleteDraft?(draftId: string): Promise<boolean>;
 }
 
 /**

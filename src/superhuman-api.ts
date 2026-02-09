@@ -16,11 +16,19 @@ export interface SuperhumanConnection {
 }
 
 /**
+ * Get CDP host from environment or default to localhost
+ */
+function getCDPHost(): string {
+  return process.env.CDP_HOST || process.env.HOST_IP || "localhost";
+}
+
+/**
  * Check if Superhuman is running with CDP enabled
  */
 export async function isSuperhmanRunning(port = 9333): Promise<boolean> {
   try {
-    const targets = await CDP.List({ port });
+    const host = getCDPHost();
+    const targets = await CDP.List({ host, port });
     return targets.some(t => t.url.includes("mail.superhuman.com"));
   } catch {
     return false;
@@ -28,15 +36,23 @@ export async function isSuperhmanRunning(port = 9333): Promise<boolean> {
 }
 
 /**
- * Launch Superhuman with remote debugging enabled
+ * Launch Superhuman with remote debugging enabled.
+ * Skips launch when CDP_HOST is set (remote/container environment).
  */
 export async function launchSuperhuman(port = 9333): Promise<boolean> {
-  const appPath = "/Applications/Superhuman.app/Contents/MacOS/Superhuman";
-
-  // Check if already running
+  // Check if already running (works for both local and remote)
   if (await isSuperhmanRunning(port)) {
     return true;
   }
+
+  // If CDP_HOST is set, we're connecting to a remote instance — don't try to launch locally
+  const host = getCDPHost();
+  if (host !== "localhost") {
+    console.error(`Superhuman not reachable at ${host}:${port}. Ensure it is running on the host with --remote-debugging-port=${port}`);
+    return false;
+  }
+
+  const appPath = "/Applications/Superhuman.app/Contents/MacOS/Superhuman";
 
   // Launch in background with CDP enabled
   console.log("Launching Superhuman with remote debugging...");
@@ -82,6 +98,8 @@ export async function connectToSuperhuman(
   port = 9333,
   autoLaunch = true
 ): Promise<SuperhumanConnection | null> {
+  const host = getCDPHost();
+
   // Auto-launch if not running
   if (autoLaunch && !(await isSuperhmanRunning(port))) {
     const launched = await launchSuperhuman(port);
@@ -90,7 +108,7 @@ export async function connectToSuperhuman(
     }
   }
 
-  const targets = await CDP.List({ port });
+  const targets = await CDP.List({ host, port });
 
   const mainPage = targets.find(
     (t) =>
@@ -105,7 +123,7 @@ export async function connectToSuperhuman(
     return null;
   }
 
-  const client = await CDP({ target: mainPage.id, port });
+  const client = await CDP({ target: mainPage.id, host, port });
 
   // Enable Page domain for navigation events
   await client.Page.enable();
