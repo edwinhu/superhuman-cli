@@ -65,7 +65,7 @@ import { OutlookDraftProvider } from "./providers/outlook-draft-provider";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
 const VERSION = "0.12.4";
-const CDP_PORT = 9333;
+const CDP_PORT = parseInt(process.env.CDP_PORT || "9400", 10);
 
 // ANSI colors
 const colors = {
