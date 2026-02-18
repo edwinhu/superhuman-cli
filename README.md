@@ -117,6 +117,9 @@ superhuman draft create --to "john" --subject "Hello" --body "Hi there!"
 # List drafts (shows both provider and native Superhuman drafts)
 superhuman draft list
 superhuman draft list --account user@example.com
+superhuman draft list --to jon@example.com        # Filter by recipient
+superhuman draft list --subject "Meeting notes"   # Filter by subject
+superhuman draft list --json                      # JSON output for scripting
 
 # Open compose window (keeps it open for editing)
 superhuman compose --to user@example.com --subject "Meeting"

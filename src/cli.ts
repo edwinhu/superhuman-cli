@@ -1338,6 +1338,8 @@ async function cmdListDrafts(options: CliOptions) {
   const account = options.account;
   const limit = options.limit || 50;
   const offset = options.offset || 0;
+  const filterTo = options.to.length > 0 ? options.to[0].toLowerCase() : "";
+  const filterSubject = options.subject ? options.subject.toLowerCase() : "";
 
   // Load cached tokens from disk
   await loadTokensFromDisk();
@@ -1374,7 +1376,26 @@ async function cmdListDrafts(options: CliOptions) {
 
     // Use DraftService to fetch drafts from all providers
     const service = new DraftService([emailProvider, nativeProvider]);
-    const drafts = await service.listDrafts(limit, offset);
+    let drafts = await service.listDrafts(limit, offset);
+
+    // Apply --to filter
+    if (filterTo) {
+      drafts = drafts.filter((d) =>
+        d.to.some((recipient) => recipient.toLowerCase().includes(filterTo))
+      );
+    }
+
+    // Apply --subject filter
+    if (filterSubject) {
+      drafts = drafts.filter((d) =>
+        (d.subject || "").toLowerCase().includes(filterSubject)
+      );
+    }
+
+    if (options.json) {
+      log(JSON.stringify(drafts, null, 2));
+      return;
+    }
 
     if (drafts.length === 0) {
       log(`${colors.dim}No drafts found in ${email}.${colors.reset}`);
