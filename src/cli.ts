@@ -1016,7 +1016,8 @@ async function cmdDraft(options: CliOptions) {
       const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
 
       // Use DraftService to get draft details for threadId
-      const draftService = new DraftService(userInfo);
+      const nativeProvider = new SuperhumanDraftProvider(token);
+      const draftService = new DraftService([nativeProvider]);
       const drafts = await draftService.listDrafts();
       const draft = drafts.find(d => d.id === draftId);
 
@@ -1197,7 +1198,8 @@ async function cmdDeleteDraft(options: CliOptions) {
     const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
 
     // Use DraftService to get draft details for threadId
-    const draftService = new DraftService(userInfo);
+    const nativeProvider = new SuperhumanDraftProvider(token);
+    const draftService = new DraftService([nativeProvider]);
     const drafts = await draftService.listDrafts();
 
     for (const draftId of nativeDraftIds) {

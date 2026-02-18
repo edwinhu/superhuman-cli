@@ -111,4 +111,10 @@ describe("DraftService", () => {
       expect(drafts[0].source).toBe("outlook");
     });
   });
+
+  it("should throw a clear error when constructed with non-array argument", () => {
+    // Regression test: draft delete/update previously passed UserInfo instead of IDraftProvider[]
+    const notAnArray = { userId: "123", email: "test@example.com" } as any;
+    expect(() => new DraftService(notAnArray)).toThrow(TypeError);
+  });
 });

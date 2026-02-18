@@ -35,6 +35,12 @@ export class DraftService {
   private providers: IDraftProvider[];
 
   constructor(providers: IDraftProvider[]) {
+    if (!Array.isArray(providers)) {
+      throw new TypeError(
+        "DraftService requires an array of providers. " +
+        "Received: " + typeof providers
+      );
+    }
     this.providers = providers;
   }
 

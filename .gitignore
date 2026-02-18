@@ -37,3 +37,8 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 !.claude/.claude-plugin/
 !.claude/skills/
 .worktrees/
+
+# build artifacts
+*.bun-build
+/superhuman
+/superhuman-linux

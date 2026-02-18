@@ -222,7 +222,7 @@ export async function extractTokenChrome(
         email: request.headers["x-superhuman-user-email"] || "",
       });
     }
-    await Fetch.continueRequest({ requestId });
+    try { await Fetch.continueRequest({ requestId }); } catch {}
   };
   Fetch.requestPaused(handler);
 
@@ -267,7 +267,7 @@ export async function extractTokenChrome(
         email: "",
       });
     }
-    await Fetch.continueRequest({ requestId });
+    try { await Fetch.continueRequest({ requestId }); } catch {}
   };
   Fetch.requestPaused(providerHandler);
 
