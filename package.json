@@ -1,6 +1,6 @@
 {
   "name": "superhuman-cli",
-  "version": "0.13.0",
+  "version": "0.13.1",
   "module": "src/index.ts",
   "type": "module",
   "private": true,
@@ -10,6 +10,7 @@
   "scripts": {
     "start": "bun run src/index.ts",
     "test": "bun test",
+    "build": "bun build --compile src/cli.ts --outfile superhuman",
     "mcp": "bun run src/index.ts --mcp"
   },
   "devDependencies": {
