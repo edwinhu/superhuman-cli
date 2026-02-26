@@ -6,6 +6,7 @@
 
 import { describe, it, expect } from "bun:test";
 import { DraftService, type IDraftProvider, type Draft } from "../services/draft-service";
+import { SuperhumanDraftProvider } from "../providers/superhuman-draft-provider";
 
 // Mock provider for testing
 class MockProvider implements IDraftProvider {
@@ -116,5 +117,80 @@ describe("DraftService", () => {
     // Regression test: draft delete/update previously passed UserInfo instead of IDraftProvider[]
     const notAnArray = { userId: "123", email: "test@example.com" } as any;
     expect(() => new DraftService(notAnArray)).toThrow(TypeError);
+  });
+});
+
+describe("SuperhumanDraftProvider", () => {
+  it("should correctly extract threadId from getThreads response", () => {
+    // Regression test: threadId lives at threadItem.id (top level), NOT threadItem.thread.id
+    // The userdata.getThreads API returns: { id: "draft00...", thread: { historyId: ..., messages: {...} } }
+    const mockThreadList = [
+      {
+        id: "draft00bc30654cd5d898",
+        thread: {
+          historyId: 49480,
+          messages: {
+            "draft00bc30654cd5d898": {
+              draft: {
+                id: "draft00bc30654cd5d898",
+                subject: "Test Draft",
+                to: ["recipient@example.com"],
+                from: "sender@example.com",
+                snippet: "Draft body preview",
+                date: "2026-02-26T10:00:00Z",
+              },
+            },
+          },
+        },
+      },
+    ];
+
+    // Access the private parseThreadList method via prototype
+    const provider = new SuperhumanDraftProvider({
+      superhumanToken: { token: "fake" },
+    } as any);
+
+    // Call parseThreadList using bracket notation to access private method
+    const drafts = (provider as any).parseThreadList(mockThreadList);
+
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0].threadId).toBe("draft00bc30654cd5d898");
+    expect(drafts[0].threadId).not.toBeUndefined();
+    expect(drafts[0].id).toBe("draft00bc30654cd5d898");
+    expect(drafts[0].subject).toBe("Test Draft");
+    expect(drafts[0].source).toBe("native");
+  });
+
+  it("should handle thread items with no id gracefully", () => {
+    // Ensure undefined threadId is captured (rather than crashing)
+    const mockThreadList = [
+      {
+        // id is missing at top level
+        thread: {
+          historyId: 12345,
+          messages: {
+            "draft001": {
+              draft: {
+                id: "draft001",
+                subject: "No Thread ID",
+                to: [],
+                from: "test@example.com",
+                snippet: "",
+                date: "2026-02-26T10:00:00Z",
+              },
+            },
+          },
+        },
+      },
+    ];
+
+    const provider = new SuperhumanDraftProvider({
+      superhumanToken: { token: "fake" },
+    } as any);
+
+    const drafts = (provider as any).parseThreadList(mockThreadList);
+
+    expect(drafts).toHaveLength(1);
+    expect(drafts[0].threadId).toBeUndefined();
   });
 });

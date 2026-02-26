@@ -32,8 +32,9 @@ interface SuperhumanMessage {
 }
 
 interface SuperhumanThread {
+  id: string; // threadId is at the top level, NOT inside thread
   thread: {
-    id: string;
+    historyId?: number;
     messages: Record<string, SuperhumanMessage>;
   };
 }
@@ -188,7 +189,7 @@ export class SuperhumanDraftProvider implements IDraftProvider {
     const drafts: Draft[] = [];
 
     for (const threadItem of threadList) {
-      const threadId = threadItem.thread?.id;
+      const threadId = threadItem.id;
       const messages = threadItem.thread?.messages || {};
 
       for (const [messageId, message] of Object.entries(messages)) {
