@@ -2338,16 +2338,33 @@ export async function getThreadInfoDirect(
     }
 
     // Filter by conversationId client-side and get the latest message
-    const matches = result.value.filter((m: any) => m.conversationId === threadId);
-    if (matches.length === 0) {
+    let messages = result.value.filter((m: any) => m.conversationId === threadId);
+
+    // Fallback: threadId might be a message ID, not a conversationId
+    // (matches pattern in getThreadMessagesMsGraph and readThreadMSGraph)
+    if (messages.length === 0) {
+      try {
+        const msg = await msgraphFetch(
+          token.accessToken,
+          `/me/messages/${threadId}?$select=${selectFields}`
+        );
+        if (msg) {
+          messages = [msg];
+        }
+      } catch {
+        // Not a valid message ID either — fall through to return null
+      }
+    }
+
+    if (messages.length === 0) {
       return null;
     }
 
     // Sort descending by date and take the latest
-    matches.sort((a: any, b: any) =>
+    messages.sort((a: any, b: any) =>
       new Date(b.receivedDateTime).getTime() - new Date(a.receivedDateTime).getTime()
     );
-    const lastMessage = matches[0];
+    const lastMessage = messages[0];
 
     // Extract Message-ID from internet message headers
     let messageId: string | null = null;
