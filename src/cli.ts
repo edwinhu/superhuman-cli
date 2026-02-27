@@ -67,7 +67,7 @@ import { GmailDraftProvider } from "./providers/gmail-draft-provider";
 import { OutlookDraftProvider } from "./providers/outlook-draft-provider";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.13.0";
+const VERSION = "0.13.3";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9400", 10);
 
 // ANSI colors
