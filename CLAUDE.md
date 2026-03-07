@@ -17,7 +17,7 @@ When connecting to Superhuman via CDP, **always monitor BOTH the background page
 import CDP from "chrome-remote-interface";
 
 // 1. List all available pages
-const targets = await CDP.List({ port: 9333 });
+const targets = await CDP.List({ port: 9400 });
 
 // 2. Find the background page (where API calls happen)
 const backgroundPage = targets.find(t => 
@@ -30,7 +30,7 @@ const mainPage = targets.find(t =>
 );
 
 // 4. Connect to background page for network monitoring
-const bgClient = await CDP({ port: 9333, target: backgroundPage.id });
+const bgClient = await CDP({ port: 9400, target: backgroundPage.id });
 const { Network } = bgClient;
 await Network.enable();
 

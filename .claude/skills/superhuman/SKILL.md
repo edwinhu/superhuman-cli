@@ -20,7 +20,7 @@ CLI and MCP server to control [Superhuman](https://superhuman.com) email client 
 bun install
 
 # Start Superhuman with CDP enabled
-/Applications/Superhuman.app/Contents/MacOS/Superhuman --remote-debugging-port=9333
+/Applications/Superhuman.app/Contents/MacOS/Superhuman --remote-debugging-port=9400
 ```
 
 ### Container / Remote CDP
@@ -134,10 +134,6 @@ superhuman draft create --to "john" --subject "Hello" --body "Hi there!"
 # List drafts (shows both provider and native Superhuman drafts)
 superhuman draft list
 superhuman draft list --account user@example.com
-
-# Open compose window (keeps it open for editing)
-superhuman compose --to user@example.com --subject "Meeting"
-superhuman compose --to "john" --cc "jane" --subject "Meeting"
 
 # Send an email
 superhuman send --to user@example.com --subject "Quick note" --body "FYI"
@@ -266,7 +262,7 @@ superhuman attachment download --attachment <attachment-id> --message <message-i
 
 ### Calendar
 
-**DO NOT use `superhuman calendar`. Use the `morgen` CLI for all calendar operations** — it supports proper calendar filtering. See the `/morgen` skill.
+Superhuman has built-in calendar support, but prefer `morgen` CLI for calendar operations — it supports proper calendar filtering. See the `morgen` skill.
 
 ### Options
 
@@ -291,7 +287,7 @@ superhuman attachment download --attachment <attachment-id> --message <message-i
 | `--include-done` | Search all emails including archived (for search) |
 | `--context <number>` | Number of messages to show full body (default: all, for read) |
 | `--json` | Output as JSON |
-| `--port <number>` | CDP port (default: 9333) |
+| `--port <number>` | CDP port (default: 9400) |
 
 ## Common Workflows
 
@@ -377,7 +373,7 @@ Tokens auto-refresh. If refresh fails: `Token for user@email.com expired. Run 's
 ### Connection Failed
 
 1. Check if Superhuman is installed at `/Applications/Superhuman.app`
-2. Launch with debugging: `/Applications/Superhuman.app/Contents/MacOS/Superhuman --remote-debugging-port=9333`
+2. Launch with debugging: `/Applications/Superhuman.app/Contents/MacOS/Superhuman --remote-debugging-port=9400`
 3. Verify: `superhuman status`
 
 **From a container**: Ensure `CDP_HOST=host.docker.internal` is set and the container was started with `--add-host=host.docker.internal:host-gateway`. The CLI skips local app launch when `CDP_HOST` is non-localhost.
@@ -416,7 +412,6 @@ Chrome DevTools Protocol is only needed for:
 
 - `account auth` — One-time token extraction from `window.GoogleAccount` (also stores AI user prefix)
 - `status` — Check Superhuman connection
-- `compose` — Open Superhuman's compose UI
 - `search` / `inbox` (when no cached tokens) — Fallback via Superhuman's portal API
 
 All other operations (read, reply, forward, draft, archive, delete, labels, star, snooze, attachments, contacts, snippets) use direct API with cached tokens.

@@ -14,7 +14,7 @@ CLI and MCP server to control [Superhuman](https://superhuman.com) email client 
 bun install
 
 # Start Superhuman with CDP enabled
-/Applications/Superhuman.app/Contents/MacOS/Superhuman --remote-debugging-port=9333
+/Applications/Superhuman.app/Contents/MacOS/Superhuman --remote-debugging-port=9400
 ```
 
 ## CLI Usage
@@ -120,10 +120,6 @@ superhuman draft list --account user@example.com
 superhuman draft list --to jon@example.com        # Filter by recipient
 superhuman draft list --subject "Meeting notes"   # Filter by subject
 superhuman draft list --json                      # JSON output for scripting
-
-# Open compose window (keeps it open for editing)
-superhuman compose --to user@example.com --subject "Meeting"
-superhuman compose --to "john" --cc "jane" --subject "Meeting"
 
 # Send an email
 superhuman send --to user@example.com --subject "Quick note" --body "FYI"
@@ -252,6 +248,8 @@ superhuman attachment download --attachment <attachment-id> --message <message-i
 
 ### Calendar
 
+Superhuman has built-in calendar support, but prefer `morgen` CLI for calendar operations — it supports proper calendar filtering. See the `morgen` skill.
+
 ```bash
 # List events
 superhuman calendar list
@@ -301,7 +299,7 @@ superhuman calendar free --date tomorrow --range 7
 | `--event <id>` | Event ID (for calendar update/delete) |
 | `--calendar <name>` | Calendar name or ID (default: primary) |
 | `--json` | Output as JSON |
-| `--port <number>` | CDP port (default: 9333) |
+| `--port <number>` | CDP port (default: 9400) |
 
 ## MCP Server
 
@@ -393,7 +391,6 @@ Chrome DevTools Protocol is only needed for:
 
 - `account auth` — One-time token extraction from `window.GoogleAccount` (also stores AI user prefix)
 - `status` — Check Superhuman connection
-- `compose` — Open Superhuman's compose UI
 - `search` / `inbox` (when no cached tokens) — Fallback via Superhuman's portal API
 
 All other operations (read, reply, forward, draft, archive, delete, labels, star, snooze, attachments, calendar, contacts, snippets) use direct API with cached tokens.
