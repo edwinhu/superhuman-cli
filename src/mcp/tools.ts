@@ -19,7 +19,7 @@ import { archiveThread, deleteThread } from "../archive";
 import { markAsRead, markAsUnread } from "../read-status";
 import { listLabels, getThreadLabels, addLabel, removeLabel, starThread, unstarThread, listStarred } from "../labels";
 import { parseSnoozeTime, snoozeThreadViaProvider, unsnoozeThreadViaProvider, listSnoozedViaProvider } from "../snooze";
-import { listAttachments, downloadAttachment } from "../attachments";
+import { listAttachments, downloadAttachment, readFileAsBase64 } from "../attachments";
 import {
   listEvents,
   createEvent,
@@ -39,6 +39,9 @@ import {
   getCachedAccounts,
   hasCachedSuperhumanCredentials,
   askAISearch,
+  createReplyDraftDirect,
+  addAttachmentToDraft,
+  sendDraftDirect,
   type TokenInfo,
 } from "../token-api";
 
@@ -115,6 +118,7 @@ export const ReplySchema = z.object({
   threadId: z.string().describe("Thread ID to reply to"),
   body: z.string().describe("Reply message body"),
   send: z.boolean().optional().describe("Send immediately instead of creating draft (default: false)"),
+  attachments: z.array(z.string()).optional().describe("File paths to attach"),
 });
 
 /**
@@ -124,6 +128,7 @@ export const ReplyAllSchema = z.object({
   threadId: z.string().describe("Thread ID to reply-all to"),
   body: z.string().describe("Reply message body"),
   send: z.boolean().optional().describe("Send immediately instead of creating draft (default: false)"),
+  attachments: z.array(z.string()).optional().describe("File paths to attach"),
 });
 
 /**
@@ -134,6 +139,7 @@ export const ForwardSchema = z.object({
   toEmail: z.string().describe("Email address to forward to"),
   body: z.string().describe("Message body to include before the forwarded content"),
   send: z.boolean().optional().describe("Send immediately instead of creating draft (default: false)"),
+  attachments: z.array(z.string()).optional().describe("File paths to attach"),
 });
 
 /**
@@ -607,6 +613,33 @@ export async function replyHandler(args: z.infer<typeof ReplySchema>): Promise<T
   try {
     provider = await getMcpProvider();
     const send = args.send ?? false;
+    const hasAttachments = args.attachments && args.attachments.length > 0;
+
+    if (hasAttachments) {
+      // When attachments are present, use direct API to create draft, attach, then optionally send
+      const token = await provider.getToken();
+      const htmlBody = textToHtml(args.body);
+      const draft = await createReplyDraftDirect(token, args.threadId, htmlBody, { replyAll: false, isHtml: true });
+      if (!draft) {
+        throw new Error("Failed to create reply draft");
+      }
+
+      for (const filePath of args.attachments!) {
+        const fileData = await readFileAsBase64(filePath);
+        await addAttachmentToDraft(token, draft.draftId, fileData.filename, fileData.mimeType, fileData.base64Data);
+      }
+
+      if (send) {
+        const sendResult = await sendDraftDirect(token, draft.draftId);
+        if (!sendResult) {
+          throw new Error("Failed to send reply with attachments");
+        }
+        return successResult(`Reply with ${args.attachments!.length} attachment(s) sent successfully to thread ${args.threadId}`);
+      }
+      return successResult(`Reply draft with ${args.attachments!.length} attachment(s) created for thread ${args.threadId}\nDraft ID: ${draft.draftId}`);
+    }
+
+    // No attachments: use existing logic
     const result = await replyToThread(provider, args.threadId, args.body, send);
 
     if (!result.success) {
@@ -635,6 +668,33 @@ export async function replyAllHandler(args: z.infer<typeof ReplyAllSchema>): Pro
   try {
     provider = await getMcpProvider();
     const send = args.send ?? false;
+    const hasAttachments = args.attachments && args.attachments.length > 0;
+
+    if (hasAttachments) {
+      // When attachments are present, use direct API to create draft, attach, then optionally send
+      const token = await provider.getToken();
+      const htmlBody = textToHtml(args.body);
+      const draft = await createReplyDraftDirect(token, args.threadId, htmlBody, { replyAll: true, isHtml: true });
+      if (!draft) {
+        throw new Error("Failed to create reply-all draft");
+      }
+
+      for (const filePath of args.attachments!) {
+        const fileData = await readFileAsBase64(filePath);
+        await addAttachmentToDraft(token, draft.draftId, fileData.filename, fileData.mimeType, fileData.base64Data);
+      }
+
+      if (send) {
+        const sendResult = await sendDraftDirect(token, draft.draftId);
+        if (!sendResult) {
+          throw new Error("Failed to send reply-all with attachments");
+        }
+        return successResult(`Reply-all with ${args.attachments!.length} attachment(s) sent successfully to thread ${args.threadId}`);
+      }
+      return successResult(`Reply-all draft with ${args.attachments!.length} attachment(s) created for thread ${args.threadId}\nDraft ID: ${draft.draftId}`);
+    }
+
+    // No attachments: use existing logic
     const result = await replyAllToThread(provider, args.threadId, args.body, send);
 
     if (!result.success) {
@@ -663,6 +723,32 @@ export async function forwardHandler(args: z.infer<typeof ForwardSchema>): Promi
   try {
     provider = await getMcpProvider();
     const send = args.send ?? false;
+    const hasAttachments = args.attachments && args.attachments.length > 0;
+
+    if (hasAttachments) {
+      // When attachments are present, create draft first, attach files, then optionally send
+      const result = await forwardThread(provider, args.threadId, args.toEmail, args.body, false);
+      if (!result.success || !result.draftId) {
+        throw new Error(result.error || "Failed to create forward draft");
+      }
+
+      const token = await provider.getToken();
+      for (const filePath of args.attachments!) {
+        const fileData = await readFileAsBase64(filePath);
+        await addAttachmentToDraft(token, result.draftId, fileData.filename, fileData.mimeType, fileData.base64Data);
+      }
+
+      if (send) {
+        const sendResult = await sendDraftDirect(token, result.draftId);
+        if (!sendResult) {
+          throw new Error("Failed to send forward with attachments");
+        }
+        return successResult(`Email with ${args.attachments!.length} attachment(s) forwarded successfully to ${args.toEmail}`);
+      }
+      return successResult(`Forward draft with ${args.attachments!.length} attachment(s) created for ${args.toEmail}\nDraft ID: ${result.draftId}`);
+    }
+
+    // No attachments: use existing logic
     const result = await forwardThread(provider, args.threadId, args.toEmail, args.body, send);
 
     if (!result.success) {

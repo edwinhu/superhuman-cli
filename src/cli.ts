@@ -26,7 +26,7 @@ import { archiveThread, deleteThread } from "./archive";
 import { markAsRead, markAsUnread } from "./read-status";
 import { listLabels, getThreadLabels, addLabel, removeLabel, starThread, unstarThread, listStarred } from "./labels";
 import { parseSnoozeTime, snoozeThreadViaProvider, unsnoozeThreadViaProvider, listSnoozedViaProvider } from "./snooze";
-import { listAttachments, downloadAttachment } from "./attachments";
+import { listAttachments, downloadAttachment, readFileAsBase64 } from "./attachments";
 import {
   listEvents,
   createEvent,
@@ -58,6 +58,10 @@ import {
   getThreadMessages,
   listDraftsDirect,
   extractTokenChrome,
+  createReplyDraftDirect,
+  createDraftDirect,
+  addAttachmentToDraft,
+  sendDraftDirect,
   type TokenInfo,
 } from "./token-api";
 import type { ConnectionProvider } from "./connection-provider";
@@ -67,7 +71,7 @@ import { GmailDraftProvider } from "./providers/gmail-draft-provider";
 import { OutlookDraftProvider } from "./providers/outlook-draft-provider";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.13.3";
+const VERSION = "0.14.0";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9400", 10);
 
 // ANSI colors
@@ -167,6 +171,7 @@ ${colors.bold}OPTIONS${colors.reset}
   --subject <text>   Email subject
   --body <text>      Email body (plain text, converted to HTML)
   --html <text>      Email body as HTML
+  --attach <path>    Attach a file (can be used multiple times, for reply/reply-all/forward)
   --send             Send immediately instead of saving as draft (for reply/reply-all/forward)
   --vars <pairs>     Template variable substitution: "key1=val1,key2=val2" (for snippet use)
   --provider <type>  Draft API: "superhuman" (default), "gmail", or "outlook"
@@ -383,6 +388,8 @@ interface CliOptions {
   provider: "superhuman" | "gmail" | "outlook"; // which API to use for drafts (default: superhuman)
   // native draft flag
   native: boolean; // use native Superhuman draft operations (for update/delete)
+  // file attachment options
+  attachFiles: string[]; // file paths to attach (for reply/reply-all/forward)
 }
 
 function parseArgs(args: string[]): CliOptions {
@@ -433,6 +440,7 @@ function parseArgs(args: string[]): CliOptions {
     context: 0,
     provider: "superhuman",
     native: false,
+    attachFiles: [],
   };
 
   let i = 0;
@@ -535,6 +543,10 @@ function parseArgs(args: string[]): CliOptions {
           break;
         case "attachment":
           options.attachmentId = unescapeString(value);
+          i += inc;
+          break;
+        case "attach":
+          options.attachFiles.push(unescapeString(value));
           i += inc;
           break;
         case "message":
@@ -1646,6 +1658,57 @@ async function cmdReply(options: CliOptions) {
     if (token) {
       const body = options.body || "";
 
+      const hasAttachments = options.attachFiles && options.attachFiles.length > 0;
+
+      if (hasAttachments) {
+        // Attachment path: use provider API (Gmail/MS Graph) instead of Superhuman native
+        const action = options.send ? "Sending" : "Creating draft for";
+        info(`${action} reply with ${options.attachFiles.length} attachment(s) via provider API...`);
+
+        const htmlBody = textToHtml(body);
+        const draft = await createReplyDraftDirect(token, options.threadId, htmlBody, {
+          replyAll: false,
+          isHtml: true,
+        });
+
+        if (!draft) {
+          error("Failed to create reply draft via provider API");
+          process.exit(1);
+        }
+
+        // Add each attachment
+        for (const filePath of options.attachFiles) {
+          const fileData = await readFileAsBase64(filePath);
+          info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
+          const attached = await addAttachmentToDraft(
+            token,
+            draft.draftId,
+            fileData.filename,
+            fileData.mimeType,
+            fileData.base64Data
+          );
+          if (!attached) {
+            error(`Failed to attach ${fileData.filename}`);
+            process.exit(1);
+          }
+        }
+
+        if (options.send) {
+          const sent = await sendDraftDirect(token, draft.draftId);
+          if (sent) {
+            success("Reply with attachment(s) sent!");
+            log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
+          } else {
+            error("Failed to send reply draft");
+          }
+        } else {
+          success("Reply draft with attachment(s) created!");
+          log(`  ${colors.dim}Draft ID: ${draft.draftId}${colors.reset}`);
+          log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
+        }
+        return;
+      }
+
       if (options.send) {
         info(`Sending reply to thread ${options.threadId} via direct API...`);
 
@@ -1753,6 +1816,57 @@ async function cmdReplyAll(options: CliOptions) {
     const token = await resolveSuperhumanToken(options.account);
     if (token) {
       const body = options.body || "";
+
+      const hasAttachments = options.attachFiles && options.attachFiles.length > 0;
+
+      if (hasAttachments) {
+        // Attachment path: use provider API (Gmail/MS Graph) instead of Superhuman native
+        const action = options.send ? "Sending" : "Creating draft for";
+        info(`${action} reply-all with ${options.attachFiles.length} attachment(s) via provider API...`);
+
+        const htmlBody = textToHtml(body);
+        const draft = await createReplyDraftDirect(token, options.threadId, htmlBody, {
+          replyAll: true,
+          isHtml: true,
+        });
+
+        if (!draft) {
+          error("Failed to create reply-all draft via provider API");
+          process.exit(1);
+        }
+
+        // Add each attachment
+        for (const filePath of options.attachFiles) {
+          const fileData = await readFileAsBase64(filePath);
+          info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
+          const attached = await addAttachmentToDraft(
+            token,
+            draft.draftId,
+            fileData.filename,
+            fileData.mimeType,
+            fileData.base64Data
+          );
+          if (!attached) {
+            error(`Failed to attach ${fileData.filename}`);
+            process.exit(1);
+          }
+        }
+
+        if (options.send) {
+          const sent = await sendDraftDirect(token, draft.draftId);
+          if (sent) {
+            success("Reply-all with attachment(s) sent!");
+            log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
+          } else {
+            error("Failed to send reply-all draft");
+          }
+        } else {
+          success("Reply-all draft with attachment(s) created!");
+          log(`  ${colors.dim}Draft ID: ${draft.draftId}${colors.reset}`);
+          log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
+        }
+        return;
+      }
 
       if (options.send) {
         info(`Sending reply-all to thread ${options.threadId} via direct API...`);
@@ -1887,6 +2001,69 @@ async function cmdForward(options: CliOptions) {
     const token = await resolveSuperhumanToken(options.account);
     if (token) {
       const body = options.body || "";
+
+      const hasAttachments = options.attachFiles && options.attachFiles.length > 0;
+
+      if (hasAttachments) {
+        // Attachment path: use provider API (Gmail/MS Graph) instead of Superhuman native
+        const action = options.send ? "Sending" : "Creating draft for";
+        info(`${action} forward with ${options.attachFiles.length} attachment(s) via provider API...`);
+
+        const threadInfo = await getThreadInfoDirect(token, options.threadId);
+        if (!threadInfo) {
+          error("Could not get thread information");
+          process.exit(1);
+        }
+
+        const subject = threadInfo.subject.startsWith("Fwd:")
+          ? threadInfo.subject
+          : `Fwd: ${threadInfo.subject}`;
+
+        // Forwards are new threads, so use createDraftDirect (not createReplyDraftDirect)
+        const draft = await createDraftDirect(token, {
+          to: options.to,
+          subject,
+          body: textToHtml(body),
+          isHtml: true,
+        });
+
+        if (!draft) {
+          error("Failed to create forward draft via provider API");
+          process.exit(1);
+        }
+
+        // Add each attachment
+        for (const filePath of options.attachFiles) {
+          const fileData = await readFileAsBase64(filePath);
+          info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
+          const attached = await addAttachmentToDraft(
+            token,
+            draft.draftId,
+            fileData.filename,
+            fileData.mimeType,
+            fileData.base64Data
+          );
+          if (!attached) {
+            error(`Failed to attach ${fileData.filename}`);
+            process.exit(1);
+          }
+        }
+
+        if (options.send) {
+          const sent = await sendDraftDirect(token, draft.draftId);
+          if (sent) {
+            success("Forward with attachment(s) sent!");
+            log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
+          } else {
+            error("Failed to send forward draft");
+          }
+        } else {
+          success("Forward draft with attachment(s) created!");
+          log(`  ${colors.dim}Draft ID: ${draft.draftId}${colors.reset}`);
+          log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
+        }
+        return;
+      }
 
       if (options.send) {
         info(`Forwarding thread ${options.threadId} via direct API...`);
