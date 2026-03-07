@@ -33,6 +33,63 @@ export interface AddAttachmentResult {
   error?: string;
 }
 
+export interface FileAttachmentData {
+  filename: string;
+  base64Data: string;
+  mimeType: string;
+}
+
+const MIME_TYPES: Record<string, string> = {
+  csv: "text/csv",
+  txt: "text/plain",
+  html: "text/html",
+  pdf: "application/pdf",
+  json: "application/json",
+  xml: "application/xml",
+  zip: "application/zip",
+  gz: "application/gzip",
+  doc: "application/msword",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xls: "application/vnd.ms-excel",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  ppt: "application/vnd.ms-powerpoint",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  svg: "image/svg+xml",
+  mp3: "audio/mpeg",
+  mp4: "video/mp4",
+};
+
+/**
+ * Read a file from disk and return its content as base64 with metadata.
+ */
+export async function readFileAsBase64(filePath: string): Promise<FileAttachmentData> {
+  let resolved = filePath;
+  if (resolved.startsWith("~/")) {
+    resolved = resolved.replace("~", process.env.HOME || "");
+  }
+
+  const { resolve, basename } = await import("path");
+  resolved = resolve(resolved);
+
+  const file = Bun.file(resolved);
+  if (!(await file.exists())) {
+    throw new Error(`File not found: ${filePath}`);
+  }
+
+  const bytes = await file.bytes();
+  const base64Data = Buffer.from(bytes).toString("base64");
+
+  const filename = basename(resolved);
+  const ext = getExtension(filename);
+  const mimeType = MIME_TYPES[ext] || "application/octet-stream";
+
+  return { filename, base64Data, mimeType };
+}
+
 /**
  * Extract file extension from filename.
  */
