@@ -2782,14 +2782,43 @@ export async function createReplyDraftDirect(
   if (token.isMicrosoft) {
     // MS Graph: Use createReply/createReplyAll endpoint
     // First, get the last message ID in the conversation
-    const messagesPath = `/me/messages?$filter=conversationId eq '${threadId}'&$select=id&$orderby=receivedDateTime desc&$top=1`;
-    const messagesResult = await msgraphFetch(token.accessToken, messagesPath);
+    // NOTE: $filter=conversationId at /me/messages returns InefficientFilter / 400,
+    // so fetch recent messages and filter client-side (same as getThreadInfoDirect).
+    const recentPath = `/me/messages?$select=id,conversationId,receivedDateTime&$top=50&$orderby=receivedDateTime desc`;
+    const recentResult = await msgraphFetch(token.accessToken, recentPath);
 
-    if (!messagesResult || !messagesResult.value || messagesResult.value.length === 0) {
-      return null;
+    let lastMessageId: string | null = null;
+
+    if (recentResult?.value) {
+      // Filter by conversationId client-side
+      const matched = recentResult.value
+        .filter((m: any) => m.conversationId === threadId)
+        .sort((a: any, b: any) =>
+          new Date(b.receivedDateTime).getTime() - new Date(a.receivedDateTime).getTime()
+        );
+      if (matched.length > 0) {
+        lastMessageId = matched[0].id;
+      }
     }
 
-    const lastMessageId = messagesResult.value[0].id;
+    // Fallback: threadId might be a message ID, not a conversationId
+    if (!lastMessageId) {
+      try {
+        const msg = await msgraphFetch(
+          token.accessToken,
+          `/me/messages/${threadId}?$select=id`
+        );
+        if (msg?.id) {
+          lastMessageId = msg.id;
+        }
+      } catch {
+        // Not a valid message ID either
+      }
+    }
+
+    if (!lastMessageId) {
+      return null;
+    }
     const endpoint = options?.replyAll ? "createReplyAll" : "createReply";
 
     // Create reply draft
