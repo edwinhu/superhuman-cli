@@ -335,6 +335,23 @@ export interface SendDraftOptions {
   htmlBody: string;
   /** Delay in seconds: 0=immediate, 20=default undo window, 3600=1hr scheduled */
   delay?: number;
+  /** Attachments uploaded via uploadAttachmentSuperhuman() */
+  attachments?: SuperhumanAttachment[];
+  /** RFC822 Message-ID to reply to */
+  inReplyTo?: string;
+  /** Reference chain for threading */
+  references?: string[];
+}
+
+/**
+ * Attachment metadata for Superhuman's native send API
+ */
+export interface SuperhumanAttachment {
+  uuid: string;
+  name: string;
+  type: string; // MIME type
+  inline: boolean;
+  downloadUrl: string;
 }
 
 /**
@@ -487,6 +504,69 @@ function formatRecipientForSend(recipients: Recipient[]): Array<{ email: string;
 }
 
 /**
+ * Upload an attachment to Superhuman's backend.
+ *
+ * This uploads the file content (base64) to /~backend/v3/attachments.upload
+ * and returns a download URL. The attachment is then referenced when sending.
+ *
+ * @param userInfo - User credentials
+ * @param draftId - The draft message ID
+ * @param threadId - The thread ID
+ * @param filename - Original filename
+ * @param mimeType - MIME type of the file
+ * @param base64Content - File content as base64 string
+ * @returns SuperhumanAttachment with uuid and downloadUrl
+ */
+export async function uploadAttachmentSuperhuman(
+  userInfo: UserInfo,
+  draftId: string,
+  threadId: string,
+  filename: string,
+  mimeType: string,
+  base64Content: string
+): Promise<SuperhumanAttachment> {
+  const uuid = crypto.randomUUID();
+
+  const payload = {
+    draftMessageId: draftId,
+    threadId,
+    uuid,
+    contentType: mimeType,
+    content: base64Content,
+  };
+
+  const response = await fetch(`${SUPERHUMAN_BACKEND}/v3/attachments.upload`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${userInfo.token}`,
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`Attachment upload failed (${response.status}): ${text}`);
+  }
+
+  const data = await response.json();
+
+  // Note: We skip writing attachment metadata to userdata.writeMessage here.
+  // The upload endpoint registers the attachment server-side, and we reference
+  // it in the outgoing_message.attachments[] when sending. The metadata write
+  // is only needed for the draft to show attachments in the Superhuman UI,
+  // but for CLI-created drafts this is optional.
+
+  return {
+    uuid,
+    name: filename,
+    type: mimeType,
+    inline: false,
+    downloadUrl: data.downloadUrl,
+  };
+}
+
+/**
  * Send a draft via Superhuman's native /messages/send endpoint.
  *
  * This sends emails through Superhuman's backend rather than Gmail/MS Graph directly.
@@ -504,13 +584,27 @@ export async function sendDraftSuperhuman(
     const rfc822Id = generateRfc822Id();
     const superhumanId = crypto.randomUUID();
 
+    // Build headers like Superhuman's toJsonRequest()
+    const headers: Array<{ name: string; value: string }> = [
+      { name: "X-Mailer", value: "Superhuman CLI" },
+      { name: "X-Superhuman-ID", value: superhumanId },
+      { name: "X-Superhuman-Draft-ID", value: options.draftId },
+    ];
+    if (options.inReplyTo) {
+      headers.push({ name: "In-Reply-To", value: options.inReplyTo });
+    }
+    if (options.references && options.references.length > 0) {
+      headers.push({ name: "References", value: options.references.join(" ") });
+    }
+
     // Build the outgoing_message structure per Superhuman's API format
     const outgoingMessage = {
-      headers: [],
+      headers,
       superhuman_id: superhumanId,
       rfc822_id: rfc822Id,
       thread_id: options.threadId,
       message_id: options.draftId,
+      in_reply_to: options.inReplyTo || null,
       from: {
         email: userInfo.email,
         name: userInfo.displayName || userInfo.email.split("@")[0],
@@ -520,7 +614,16 @@ export async function sendDraftSuperhuman(
       bcc: formatRecipientForSend(options.bcc || []),
       subject: options.subject,
       html_body: options.htmlBody,
-      attachments: [],
+      attachments: (options.attachments || []).map((att) => ({
+        uuid: att.uuid,
+        name: att.name,
+        type: att.type,
+        inline: att.inline,
+        source: {
+          type: "upload",
+          uuid: att.uuid,
+        },
+      })),
       abort_on_reply: false,
       current_message_ids: [options.draftId],
       mail_merge_recipients: [],

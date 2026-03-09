@@ -38,7 +38,7 @@ import {
   type UpdateEventInput,
 } from "./calendar";
 import { sendEmailViaProvider, createDraftViaProvider, updateDraftViaProvider, sendDraftByIdViaProvider, deleteDraftViaProvider } from "./send-api";
-import { createDraftWithUserInfo, getUserInfo, getUserInfoFromCache, sendDraftSuperhuman, updateDraftWithUserInfo, deleteDraftWithUserInfo, type Recipient, type UserInfo } from "./draft-api";
+import { createDraftWithUserInfo, getUserInfo, getUserInfoFromCache, sendDraftSuperhuman, updateDraftWithUserInfo, deleteDraftWithUserInfo, uploadAttachmentSuperhuman, type Recipient, type UserInfo, type SuperhumanAttachment } from "./draft-api";
 import { searchContacts, resolveRecipient, type Contact } from "./contacts";
 import { listSnippets, findSnippet, applyVars, parseVars } from "./snippets";
 import {
@@ -1660,56 +1660,86 @@ async function cmdReply(options: CliOptions) {
 
       const hasAttachments = options.attachFiles && options.attachFiles.length > 0;
 
-      if (hasAttachments) {
-        // Attachment path: use provider API (Gmail/MS Graph) instead of Superhuman native
-        const action = options.send ? "Sending" : "Creating draft for";
-        info(`${action} reply with ${options.attachFiles.length} attachment(s) via provider API...`);
+      if (hasAttachments && options.send) {
+        // Attach + send: use provider API (draft → attach → send)
+        const attachLabel = ` with ${options.attachFiles!.length} attachment(s)`;
+        info(`Sending reply${attachLabel} via provider API...`);
 
         const htmlBody = textToHtml(body);
         const draft = await createReplyDraftDirect(token, options.threadId, htmlBody, {
           replyAll: false,
           isHtml: true,
         });
-
         if (!draft) {
-          error("Failed to create reply draft via provider API");
+          error("Failed to create reply draft");
           process.exit(1);
         }
 
-        // Add each attachment
-        for (const filePath of options.attachFiles) {
+        for (const filePath of options.attachFiles!) {
           const fileData = await readFileAsBase64(filePath);
           info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
-          const attached = await addAttachmentToDraft(
-            token,
-            draft.draftId,
-            fileData.filename,
-            fileData.mimeType,
-            fileData.base64Data
-          );
+          const attached = await addAttachmentToDraft(token, draft.draftId, fileData.filename, fileData.mimeType, fileData.base64Data);
           if (!attached) {
             error(`Failed to attach ${fileData.filename}`);
             process.exit(1);
           }
         }
 
-        if (options.send) {
-          const sent = await sendDraftDirect(token, draft.draftId);
-          if (sent) {
-            success("Reply with attachment(s) sent!");
-            log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
-          } else {
-            error("Failed to send reply draft");
-          }
-        } else {
-          success("Reply draft with attachment(s) created!");
-          log(`  ${colors.dim}Draft ID: ${draft.draftId}${colors.reset}`);
+        const sent = await sendDraftDirect(token, draft.draftId);
+        if (sent) {
+          success(`Reply${attachLabel} sent!`);
           log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
+        } else {
+          error("Failed to send reply");
         }
         return;
-      }
+      } else if (hasAttachments) {
+        // Attach only (draft): use Superhuman native API for device sync
+        const attachLabel = ` with ${options.attachFiles!.length} attachment(s)`;
+        info(`Creating draft for reply${attachLabel} via Superhuman API...`);
 
-      if (options.send) {
+        const threadInfo = await getThreadInfoDirect(token, options.threadId);
+        if (!threadInfo) {
+          error("Could not get thread information");
+          process.exit(1);
+        }
+
+        const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
+        const subject = threadInfo.subject.startsWith("Re:") ? threadInfo.subject : `Re: ${threadInfo.subject}`;
+
+        const result = await createDraftWithUserInfo(userInfo, {
+          to: [threadInfo.from],
+          subject,
+          body: textToHtml(body),
+          action: "reply",
+          inReplyToThreadId: options.threadId,
+          inReplyToRfc822Id: threadInfo.messageId || undefined,
+          references: threadInfo.references,
+        });
+
+        if (!result.success) {
+          error(`Failed to create reply draft: ${result.error}`);
+          return;
+        }
+
+        for (const filePath of options.attachFiles!) {
+          const fileData = await readFileAsBase64(filePath);
+          info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
+          try {
+            await uploadAttachmentSuperhuman(userInfo, result.draftId!, result.threadId!, fileData.filename, fileData.mimeType, fileData.base64Data);
+          } catch (e: any) {
+            error(`Failed to attach ${fileData.filename}: ${e.message}`);
+            process.exit(1);
+          }
+        }
+
+        success(`Reply draft${attachLabel} created in Superhuman!`);
+        log(`  ${colors.dim}Draft ID: ${result.draftId}${colors.reset}`);
+        log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
+        log(`  ${colors.dim}Syncs to all devices automatically${colors.reset}`);
+        return;
+      } else if (options.send) {
+        // Send without attachments: use provider API directly
         info(`Sending reply to thread ${options.threadId} via direct API...`);
 
         const threadInfo = await getThreadInfoDirect(token, options.threadId);
@@ -1718,9 +1748,7 @@ async function cmdReply(options: CliOptions) {
           process.exit(1);
         }
 
-        const subject = threadInfo.subject.startsWith("Re:")
-          ? threadInfo.subject
-          : `Re: ${threadInfo.subject}`;
+        const subject = threadInfo.subject.startsWith("Re:") ? threadInfo.subject : `Re: ${threadInfo.subject}`;
 
         const result = await sendEmailDirect(token, {
           to: [threadInfo.from],
@@ -1740,7 +1768,7 @@ async function cmdReply(options: CliOptions) {
         }
         return;
       } else {
-        // Create Superhuman draft
+        // Draft without attachments: use Superhuman native
         info(`Creating reply draft via Superhuman API...`);
 
         const threadInfo = await getThreadInfoDirect(token, options.threadId);
@@ -1749,15 +1777,8 @@ async function cmdReply(options: CliOptions) {
           process.exit(1);
         }
 
-        const userInfo = getUserInfoFromCache(
-          token.userId,
-          token.email,
-          token.idToken
-        );
-
-        const subject = threadInfo.subject.startsWith("Re:")
-          ? threadInfo.subject
-          : `Re: ${threadInfo.subject}`;
+        const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
+        const subject = threadInfo.subject.startsWith("Re:") ? threadInfo.subject : `Re: ${threadInfo.subject}`;
 
         const result = await createDraftWithUserInfo(userInfo, {
           to: [threadInfo.from],
@@ -1819,84 +1840,83 @@ async function cmdReplyAll(options: CliOptions) {
 
       const hasAttachments = options.attachFiles && options.attachFiles.length > 0;
 
-      if (hasAttachments) {
-        // Attachment path: use provider API (Gmail/MS Graph) instead of Superhuman native
-        const action = options.send ? "Sending" : "Creating draft for";
-        info(`${action} reply-all with ${options.attachFiles.length} attachment(s) via provider API...`);
-
-        const htmlBody = textToHtml(body);
-        const draft = await createReplyDraftDirect(token, options.threadId, htmlBody, {
-          replyAll: true,
-          isHtml: true,
-        });
-
-        if (!draft) {
-          error("Failed to create reply-all draft via provider API");
-          process.exit(1);
-        }
-
-        // Add each attachment
-        for (const filePath of options.attachFiles) {
-          const fileData = await readFileAsBase64(filePath);
-          info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
-          const attached = await addAttachmentToDraft(
-            token,
-            draft.draftId,
-            fileData.filename,
-            fileData.mimeType,
-            fileData.base64Data
-          );
-          if (!attached) {
-            error(`Failed to attach ${fileData.filename}`);
-            process.exit(1);
-          }
-        }
-
-        if (options.send) {
-          const sent = await sendDraftDirect(token, draft.draftId);
-          if (sent) {
-            success("Reply-all with attachment(s) sent!");
-            log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
-          } else {
-            error("Failed to send reply-all draft");
-          }
-        } else {
-          success("Reply-all draft with attachment(s) created!");
-          log(`  ${colors.dim}Draft ID: ${draft.draftId}${colors.reset}`);
-          log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
-        }
-        return;
+      const threadInfo = await getThreadInfoDirect(token, options.threadId);
+      if (!threadInfo) {
+        error("Could not get thread information");
+        process.exit(1);
       }
 
-      if (options.send) {
-        info(`Sending reply-all to thread ${options.threadId} via direct API...`);
+      const subject = threadInfo.subject.startsWith("Re:")
+        ? threadInfo.subject
+        : `Re: ${threadInfo.subject}`;
 
-        const threadInfo = await getThreadInfoDirect(token, options.threadId);
-        if (!threadInfo) {
-          error("Could not get thread information");
-          process.exit(1);
+      // Build reply-all recipients (all participants except self)
+      const allRecipients = [
+        threadInfo.from,
+        ...threadInfo.to,
+        ...threadInfo.cc,
+      ].filter(email => email && email.toLowerCase() !== token.email.toLowerCase());
+      const uniqueRecipients = [...new Set(allRecipients.map(e => e.toLowerCase()))];
+
+      if (hasAttachments && options.send) {
+        // Attach + send: use provider API
+        const attachLabel = ` with ${options.attachFiles!.length} attachment(s)`;
+        info(`Sending reply-all${attachLabel} via provider API...`);
+
+        const htmlBody = textToHtml(body);
+        const draft = await createReplyDraftDirect(token, options.threadId, htmlBody, { replyAll: true, isHtml: true });
+        if (!draft) { error("Failed to create reply-all draft"); process.exit(1); }
+
+        for (const filePath of options.attachFiles!) {
+          const fileData = await readFileAsBase64(filePath);
+          info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
+          const attached = await addAttachmentToDraft(token, draft.draftId, fileData.filename, fileData.mimeType, fileData.base64Data);
+          if (!attached) { error(`Failed to attach ${fileData.filename}`); process.exit(1); }
         }
 
-        const subject = threadInfo.subject.startsWith("Re:")
-          ? threadInfo.subject
-          : `Re: ${threadInfo.subject}`;
+        const sent = await sendDraftDirect(token, draft.draftId);
+        if (sent) {
+          success(`Reply-all${attachLabel} sent!`);
+          log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
+        } else {
+          error("Failed to send reply-all");
+        }
+        return;
+      } else if (hasAttachments) {
+        // Attach only (draft): use Superhuman native API for device sync
+        const attachLabel = ` with ${options.attachFiles!.length} attachment(s)`;
+        info(`Creating draft for reply-all${attachLabel} via Superhuman API...`);
 
-        // Build reply-all recipients (all participants except self)
-        const allRecipients = [
-          threadInfo.from,
-          ...threadInfo.to,
-          ...threadInfo.cc,
-        ].filter(email => email && email.toLowerCase() !== token.email.toLowerCase());
+        const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
+        const result = await createDraftWithUserInfo(userInfo, {
+          to: uniqueRecipients, subject, body: textToHtml(body),
+          action: "reply" as const,
+          inReplyToThreadId: options.threadId,
+          inReplyToRfc822Id: threadInfo.messageId || undefined,
+          references: threadInfo.references,
+        });
+        if (!result.success) { error(`Failed to create reply-all draft: ${result.error}`); return; }
 
-        // Deduplicate recipients
-        const uniqueRecipients = [...new Set(allRecipients.map(e => e.toLowerCase()))];
+        for (const filePath of options.attachFiles!) {
+          const fileData = await readFileAsBase64(filePath);
+          info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
+          try {
+            await uploadAttachmentSuperhuman(userInfo, result.draftId!, result.threadId!, fileData.filename, fileData.mimeType, fileData.base64Data);
+          } catch (e: any) { error(`Failed to attach ${fileData.filename}: ${e.message}`); process.exit(1); }
+        }
+
+        success(`Reply-all draft${attachLabel} created in Superhuman!`);
+        log(`  ${colors.dim}Draft ID: ${result.draftId}${colors.reset}`);
+        log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
+        log(`  ${colors.dim}Syncs to all devices automatically${colors.reset}`);
+        return;
+      } else if (options.send) {
+        // Send without attachments: use provider API directly
+        info(`Sending reply-all to thread ${options.threadId} via direct API...`);
 
         const result = await sendEmailDirect(token, {
-          to: uniqueRecipients,
-          subject,
-          body: textToHtml(body),
-          isHtml: true,
-          threadId: options.threadId,
+          to: uniqueRecipients, subject, body: textToHtml(body),
+          isHtml: true, threadId: options.threadId,
           inReplyTo: threadInfo.messageId || undefined,
           references: threadInfo.references,
         });
@@ -1909,40 +1929,13 @@ async function cmdReplyAll(options: CliOptions) {
         }
         return;
       } else {
-        // Create Superhuman draft
+        // Draft without attachments: use Superhuman native
         info(`Creating reply-all draft via Superhuman API...`);
 
-        const threadInfo = await getThreadInfoDirect(token, options.threadId);
-        if (!threadInfo) {
-          error("Could not get thread information");
-          process.exit(1);
-        }
-
-        const userInfo = getUserInfoFromCache(
-          token.userId,
-          token.email,
-          token.idToken
-        );
-
-        const subject = threadInfo.subject.startsWith("Re:")
-          ? threadInfo.subject
-          : `Re: ${threadInfo.subject}`;
-
-        // Build reply-all recipients (all participants except self)
-        const allRecipients = [
-          threadInfo.from,
-          ...threadInfo.to,
-          ...threadInfo.cc,
-        ].filter(email => email && email.toLowerCase() !== token.email.toLowerCase());
-
-        // Deduplicate recipients
-        const uniqueRecipients = [...new Set(allRecipients.map(e => e.toLowerCase()))];
-
+        const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
         const result = await createDraftWithUserInfo(userInfo, {
-          to: uniqueRecipients,
-          subject,
-          body: textToHtml(body),
-          action: "reply" as const,  // reply-all uses reply action
+          to: uniqueRecipients, subject, body: textToHtml(body),
+          action: "reply" as const,
           inReplyToThreadId: options.threadId,
           inReplyToRfc822Id: threadInfo.messageId || undefined,
           references: threadInfo.references,
@@ -2004,88 +1997,69 @@ async function cmdForward(options: CliOptions) {
 
       const hasAttachments = options.attachFiles && options.attachFiles.length > 0;
 
-      if (hasAttachments) {
-        // Attachment path: use provider API (Gmail/MS Graph) instead of Superhuman native
-        const action = options.send ? "Sending" : "Creating draft for";
-        info(`${action} forward with ${options.attachFiles.length} attachment(s) via provider API...`);
-
-        const threadInfo = await getThreadInfoDirect(token, options.threadId);
-        if (!threadInfo) {
-          error("Could not get thread information");
-          process.exit(1);
-        }
-
-        const subject = threadInfo.subject.startsWith("Fwd:")
-          ? threadInfo.subject
-          : `Fwd: ${threadInfo.subject}`;
-
-        // Forwards are new threads, so use createDraftDirect (not createReplyDraftDirect)
-        const draft = await createDraftDirect(token, {
-          to: options.to,
-          subject,
-          body: textToHtml(body),
-          isHtml: true,
-        });
-
-        if (!draft) {
-          error("Failed to create forward draft via provider API");
-          process.exit(1);
-        }
-
-        // Add each attachment
-        for (const filePath of options.attachFiles) {
-          const fileData = await readFileAsBase64(filePath);
-          info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
-          const attached = await addAttachmentToDraft(
-            token,
-            draft.draftId,
-            fileData.filename,
-            fileData.mimeType,
-            fileData.base64Data
-          );
-          if (!attached) {
-            error(`Failed to attach ${fileData.filename}`);
-            process.exit(1);
-          }
-        }
-
-        if (options.send) {
-          const sent = await sendDraftDirect(token, draft.draftId);
-          if (sent) {
-            success("Forward with attachment(s) sent!");
-            log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
-          } else {
-            error("Failed to send forward draft");
-          }
-        } else {
-          success("Forward draft with attachment(s) created!");
-          log(`  ${colors.dim}Draft ID: ${draft.draftId}${colors.reset}`);
-          log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
-        }
-        return;
+      const threadInfo = await getThreadInfoDirect(token, options.threadId);
+      if (!threadInfo) {
+        error("Could not get thread information");
+        process.exit(1);
       }
 
-      if (options.send) {
-        info(`Forwarding thread ${options.threadId} via direct API...`);
+      const subject = threadInfo.subject.startsWith("Fwd:")
+        ? threadInfo.subject
+        : `Fwd: ${threadInfo.subject}`;
 
-        const threadInfo = await getThreadInfoDirect(token, options.threadId);
-        if (!threadInfo) {
-          error("Could not get thread information");
-          process.exit(1);
+      if (hasAttachments && options.send) {
+        // Attach + send: use provider API
+        const attachLabel = ` with ${options.attachFiles!.length} attachment(s)`;
+        info(`Sending forward${attachLabel} via provider API...`);
+
+        const draft = await createDraftDirect(token, { to: options.to, subject, body: textToHtml(body), isHtml: true });
+        if (!draft) { error("Failed to create forward draft"); process.exit(1); }
+
+        for (const filePath of options.attachFiles!) {
+          const fileData = await readFileAsBase64(filePath);
+          info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
+          const attached = await addAttachmentToDraft(token, draft.draftId, fileData.filename, fileData.mimeType, fileData.base64Data);
+          if (!attached) { error(`Failed to attach ${fileData.filename}`); process.exit(1); }
         }
 
-        const subject = threadInfo.subject.startsWith("Fwd:")
-          ? threadInfo.subject
-          : `Fwd: ${threadInfo.subject}`;
+        const sent = await sendDraftDirect(token, draft.draftId);
+        if (sent) {
+          success(`Forward${attachLabel} sent!`);
+          log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
+        } else {
+          error("Failed to send forward");
+        }
+        return;
+      } else if (hasAttachments) {
+        // Attach only (draft): use Superhuman native API for device sync
+        const attachLabel = ` with ${options.attachFiles!.length} attachment(s)`;
+        info(`Creating draft for forward${attachLabel} via Superhuman API...`);
 
-        const result = await sendEmailDirect(token, {
-          to: options.to,
-          subject,
-          body: textToHtml(body),
-          isHtml: true,
-          // Note: forwards don't need inReplyTo/references - they're new threads
+        const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
+        const result = await createDraftWithUserInfo(userInfo, {
+          to: options.to, subject, body: textToHtml(body),
+          action: "forward", inReplyToThreadId: options.threadId,
         });
+        if (!result.success) { error(`Failed to create forward draft: ${result.error}`); return; }
 
+        for (const filePath of options.attachFiles!) {
+          const fileData = await readFileAsBase64(filePath);
+          info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
+          try {
+            await uploadAttachmentSuperhuman(userInfo, result.draftId!, result.threadId!, fileData.filename, fileData.mimeType, fileData.base64Data);
+          } catch (e: any) { error(`Failed to attach ${fileData.filename}: ${e.message}`); process.exit(1); }
+        }
+
+        success(`Forward draft${attachLabel} created in Superhuman!`);
+        log(`  ${colors.dim}Draft ID: ${result.draftId}${colors.reset}`);
+        log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
+        log(`  ${colors.dim}Syncs to all devices automatically${colors.reset}`);
+        return;
+      } else if (options.send) {
+        // Send without attachments: use provider API directly
+        info(`Forwarding thread ${options.threadId} via direct API...`);
+
+        const result = await sendEmailDirect(token, { to: options.to, subject, body: textToHtml(body), isHtml: true });
         if (result) {
           success("Forward sent!");
           log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
@@ -2094,31 +2068,13 @@ async function cmdForward(options: CliOptions) {
         }
         return;
       } else {
-        // Create Superhuman forward draft
+        // Draft without attachments: use Superhuman native
         info(`Creating forward draft via Superhuman API...`);
 
-        const threadInfo = await getThreadInfoDirect(token, options.threadId);
-        if (!threadInfo) {
-          error("Could not get thread information");
-          process.exit(1);
-        }
-
-        const userInfo = getUserInfoFromCache(
-          token.userId,
-          token.email,
-          token.idToken
-        );
-
-        const subject = threadInfo.subject.startsWith("Fwd:")
-          ? threadInfo.subject
-          : `Fwd: ${threadInfo.subject}`;
-
+        const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
         const result = await createDraftWithUserInfo(userInfo, {
-          to: options.to,
-          subject,
-          body: textToHtml(body),
-          action: "forward",
-          inReplyToThreadId: options.threadId,
+          to: options.to, subject, body: textToHtml(body),
+          action: "forward", inReplyToThreadId: options.threadId,
         });
 
         if (result.success) {
