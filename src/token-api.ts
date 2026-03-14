@@ -1165,15 +1165,19 @@ export async function getWellKnownFolder(
  *
  * @param token - Token info
  * @param limit - Maximum threads to return
+ * @param focusedOnly - When true, only return important/primary emails (Gmail: category:primary, Outlook: Focused Inbox)
  * @returns Array of InboxThread
  */
 export async function listInboxDirect(
   token: TokenInfo,
-  limit: number = 10
+  limit: number = 10,
+  focusedOnly: boolean = false
 ): Promise<InboxThread[]> {
   if (token.isMicrosoft) {
     // MS Graph: Get messages from Inbox folder
-    const path = `/me/mailFolders/Inbox/messages?$top=${limit}&$select=id,conversationId,subject,from,receivedDateTime,bodyPreview,isRead`;
+    const fields = `id,conversationId,subject,from,receivedDateTime,bodyPreview,isRead${focusedOnly ? ',inferenceClassification' : ''}`;
+    const filter = focusedOnly ? `&$filter=inferenceClassification eq 'focused'` : '';
+    const path = `/me/mailFolders/Inbox/messages?$top=${limit}&$select=${fields}${filter}`;
     const result = await msgraphFetch(token.accessToken, path);
 
     if (!result || !result.value) {
@@ -1218,7 +1222,8 @@ export async function listInboxDirect(
     return threads;
   } else {
     // Gmail: Search for inbox messages
-    return searchGmailDirect(token, "label:INBOX", limit);
+    const query = focusedOnly ? "label:INBOX category:primary" : "label:INBOX";
+    return searchGmailDirect(token, query, limit);
   }
 }
 

@@ -72,7 +72,7 @@ import { OutlookDraftProvider } from "./providers/outlook-draft-provider";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
 const VERSION = "0.14.0";
-const CDP_PORT = parseInt(process.env.CDP_PORT || "9400", 10);
+const CDP_PORT = parseInt(process.env.CDP_PORT || "9222", 10);
 
 // ANSI colors
 const colors = {
@@ -377,6 +377,8 @@ interface CliOptions {
   contactsQuery: string; // search query for contacts
   // search options
   includeDone: boolean; // use direct Gmail API to search all emails including archived
+  // inbox filter
+  focused: boolean; // only show important/primary emails (Gmail: category:primary, Outlook: Focused Inbox)
   // ai options
   aiQuery: string; // question to ask the AI
   // snippet options
@@ -434,6 +436,7 @@ function parseArgs(args: string[]): CliOptions {
     eventId: "",
     contactsQuery: "",
     includeDone: false,
+    focused: false,
     aiQuery: "",
     snippetQuery: "",
     vars: "",
@@ -599,6 +602,10 @@ function parseArgs(args: string[]): CliOptions {
           break;
         case "include-done":
           options.includeDone = true;
+          i += 1;
+          break;
+        case "focused":
+          options.focused = true;
           i += 1;
           break;
         case "vars":
@@ -1518,7 +1525,7 @@ function truncate(str: string | null | undefined, maxLen: number): string {
 async function cmdInbox(options: CliOptions) {
   const provider = await getProvider(options);
 
-  const threads = await listInbox(provider, { limit: options.limit });
+  const threads = await listInbox(provider, { limit: options.limit, focusedOnly: options.focused });
 
   if (options.json) {
     console.log(JSON.stringify(threads, null, 2));

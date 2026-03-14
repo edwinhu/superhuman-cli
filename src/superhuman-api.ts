@@ -110,13 +110,17 @@ export async function connectToSuperhuman(
 
   const targets = await CDP.List({ host, port });
 
-  const mainPage = targets.find(
-    (t) =>
+  // Prefer the page with an account path (e.g., /user@example.com) over the root page
+  const superhumanPages = targets.filter(
+    (t: any) =>
       t.url.includes("mail.superhuman.com") &&
       !t.url.includes("background") &&
       !t.url.includes("serviceworker") &&
       t.type === "page"
   );
+  // Sort by URL length descending — pages with account paths are longer
+  superhumanPages.sort((a: any, b: any) => b.url.length - a.url.length);
+  const mainPage = superhumanPages[0];
 
   if (!mainPage) {
     console.error("Could not find Superhuman main page");
