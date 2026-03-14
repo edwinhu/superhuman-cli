@@ -379,6 +379,7 @@ interface CliOptions {
   includeDone: boolean; // use direct Gmail API to search all emails including archived
   // inbox filter
   focused: boolean; // only show important/primary emails (Gmail: category:primary, Outlook: Focused Inbox)
+  unread: boolean; // only show unread emails
   // ai options
   aiQuery: string; // question to ask the AI
   // snippet options
@@ -437,6 +438,7 @@ function parseArgs(args: string[]): CliOptions {
     contactsQuery: "",
     includeDone: false,
     focused: false,
+    unread: false,
     aiQuery: "",
     snippetQuery: "",
     vars: "",
@@ -606,6 +608,10 @@ function parseArgs(args: string[]): CliOptions {
           break;
         case "focused":
           options.focused = true;
+          i += 1;
+          break;
+        case "unread":
+          options.unread = true;
           i += 1;
           break;
         case "vars":
@@ -1525,7 +1531,7 @@ function truncate(str: string | null | undefined, maxLen: number): string {
 async function cmdInbox(options: CliOptions) {
   const provider = await getProvider(options);
 
-  const threads = await listInbox(provider, { limit: options.limit, focusedOnly: options.focused });
+  const threads = await listInbox(provider, { limit: options.limit, focusedOnly: options.focused, unreadOnly: options.unread });
 
   if (options.json) {
     console.log(JSON.stringify(threads, null, 2));

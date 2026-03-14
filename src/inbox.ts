@@ -27,6 +27,8 @@ export interface ListInboxOptions {
   limit?: number;
   /** When true, only return important/primary emails (Gmail: category:primary, Outlook: Focused Inbox) */
   focusedOnly?: boolean;
+  /** When true, only return unread emails */
+  unreadOnly?: boolean;
 }
 
 export interface SearchOptions {
@@ -52,8 +54,9 @@ export async function listInbox(
 ): Promise<InboxThread[]> {
   const limit = options.limit ?? 10;
   const focusedOnly = options.focusedOnly ?? false;
+  const unreadOnly = options.unreadOnly ?? false;
   const token = await provider.getToken();
-  return listInboxDirect(token, limit, focusedOnly);
+  return listInboxDirect(token, limit, focusedOnly, unreadOnly);
 }
 
 /**

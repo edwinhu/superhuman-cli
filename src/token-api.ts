@@ -1171,12 +1171,16 @@ export async function getWellKnownFolder(
 export async function listInboxDirect(
   token: TokenInfo,
   limit: number = 10,
-  focusedOnly: boolean = false
+  focusedOnly: boolean = false,
+  unreadOnly: boolean = false
 ): Promise<InboxThread[]> {
   if (token.isMicrosoft) {
     // MS Graph: Get messages from Inbox folder
     const fields = `id,conversationId,subject,from,receivedDateTime,bodyPreview,isRead${focusedOnly ? ',inferenceClassification' : ''}`;
-    const filter = focusedOnly ? `&$filter=inferenceClassification eq 'focused'` : '';
+    const filters: string[] = [];
+    if (focusedOnly) filters.push("inferenceClassification eq 'focused'");
+    if (unreadOnly) filters.push("isRead eq false");
+    const filter = filters.length > 0 ? `&$filter=${filters.join(' and ')}` : '';
     const path = `/me/mailFolders/Inbox/messages?$top=${limit}&$select=${fields}${filter}`;
     const result = await msgraphFetch(token.accessToken, path);
 
@@ -1222,7 +1226,9 @@ export async function listInboxDirect(
     return threads;
   } else {
     // Gmail: Search for inbox messages
-    const query = focusedOnly ? "label:INBOX category:primary" : "label:INBOX";
+    let query = "label:INBOX";
+    if (focusedOnly) query += " category:primary";
+    if (unreadOnly) query += " is:unread";
     return searchGmailDirect(token, query, limit);
   }
 }
