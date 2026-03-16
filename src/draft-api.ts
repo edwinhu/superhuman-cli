@@ -4,7 +4,7 @@
  * Creates drafts via /v3/userdata.writeMessage without CDP UI manipulation.
  */
 
-import { SuperhumanConnection } from "./superhuman-api";
+import type { SuperhumanConnection } from "./superhuman-api";
 
 const SUPERHUMAN_BACKEND = "https://mail.superhuman.com/~backend";
 

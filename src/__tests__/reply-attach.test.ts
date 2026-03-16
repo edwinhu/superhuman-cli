@@ -35,7 +35,7 @@ describe("--attach flag parsing", () => {
     // reply with --attach should not error on the flag itself
     // It will fail because no credentials, but the flag should be parsed (no "unknown" error)
     const { output } = await getOutput(
-      spawnCli("reply", "thread123", "--body=Test", "--attach=/tmp/file.csv")
+      spawnCli("reply", "thread123", "--body=Test", "--attach=/tmp/file.csv", "--account=test@example.com")
     );
     // Should NOT say "unknown option" or similar parse error for --attach
     expect(output).not.toContain("unknown");
@@ -49,7 +49,8 @@ describe("--attach flag parsing", () => {
         "thread123",
         "--body=Test",
         "--attach=/tmp/file1.csv",
-        "--attach=/tmp/file2.pdf"
+        "--attach=/tmp/file2.pdf",
+        "--account=test@example.com"
       )
     );
     expect(output).not.toContain("unknown");
@@ -63,7 +64,8 @@ describe("--attach flag parsing", () => {
         "thread123",
         "--to=r@example.com",
         "--body=FYI",
-        "--attach=/tmp/doc.pdf"
+        "--attach=/tmp/doc.pdf",
+        "--account=test@example.com"
       )
     );
     expect(output).not.toContain("unknown");
@@ -76,7 +78,8 @@ describe("--attach flag parsing", () => {
         "reply-all",
         "thread123",
         "--body=Test",
-        "--attach=/tmp/spreadsheet.xlsx"
+        "--attach=/tmp/spreadsheet.xlsx",
+        "--account=test@example.com"
       )
     );
     expect(output).not.toContain("unknown");

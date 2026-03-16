@@ -157,6 +157,8 @@ export async function resolveProvider(
     if (token) {
       return new CachedTokenProvider(options.account);
     }
+    // Explicit --account not found — don't fall through to other accounts
+    return null;
   }
 
   // If any cached tokens are valid, use the first one

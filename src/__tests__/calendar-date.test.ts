@@ -119,7 +119,7 @@ describe("parseEventTime", () => {
 describe("calendar list --start/--end CLI flags", () => {
   test("calendar list accepts --start and --end flags without error", async () => {
     const proc = Bun.spawn(
-      [process.execPath, "src/cli.ts", "calendar", "list", "--start", "2026-02-10T00:00:00", "--end", "2026-02-10T23:59:59"],
+      [process.execPath, "src/cli.ts", "calendar", "list", "--start", "2026-02-10T00:00:00", "--end", "2026-02-10T23:59:59", "--account=test@example.com"],
       {
         cwd: import.meta.dir + "/../..",
         stdout: "pipe",
@@ -136,7 +136,7 @@ describe("calendar list --start/--end CLI flags", () => {
 
   test("calendar list accepts --start without --end", async () => {
     const proc = Bun.spawn(
-      [process.execPath, "src/cli.ts", "calendar", "list", "--start", "2026-02-10T00:00:00"],
+      [process.execPath, "src/cli.ts", "calendar", "list", "--start", "2026-02-10T00:00:00", "--account=test@example.com"],
       {
         cwd: import.meta.dir + "/../..",
         stdout: "pipe",

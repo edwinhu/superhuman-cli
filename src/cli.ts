@@ -12,6 +12,7 @@
 
 import {
   connectToSuperhuman,
+  isSuperhmanRunning,
   disconnect,
   disconnectChrome,
   connectToSuperhumanChrome,
@@ -772,12 +773,27 @@ async function getProvider(options: CliOptions): Promise<ConnectionProvider> {
   if (provider) {
     return provider;
   }
-  // No cached tokens — fall back to CDP
-  const conn = await checkConnection(options.port);
-  if (!conn) {
-    error("No cached tokens and could not connect to Superhuman");
+
+  // If --account was explicitly specified but not found, don't fall back to CDP
+  if (options.account) {
+    error(`No cached tokens for account "${options.account}"`);
+    info("Run 'superhuman account auth' to authenticate this account");
+    process.exit(1);
+  }
+
+  // No cached tokens — check if Superhuman is already running on CDP port
+  // (don't auto-launch; that's too slow and inappropriate for scripted/test use)
+  const running = await isSuperhmanRunning(options.port);
+  if (!running) {
+    error("No cached tokens and Superhuman is not running");
     info("Run 'superhuman account auth' to authenticate, or start Superhuman with:");
     info(`  /Applications/Superhuman.app/Contents/MacOS/Superhuman --remote-debugging-port=${options.port}`);
+    process.exit(1);
+  }
+  const conn = await connectToSuperhuman(options.port, false);
+  if (!conn) {
+    error("Could not connect to Superhuman");
+    info("Superhuman may not be installed or failed to launch");
     process.exit(1);
   }
   return new CDPConnectionProvider(conn);
@@ -868,6 +884,12 @@ async function resolveSuperhumanToken(account?: string): Promise<TokenInfo | nul
   if (account && await hasCachedSuperhumanCredentials(account)) {
     const token = await getCachedToken(account);
     if (token?.idToken && token?.userId) return token;
+  }
+
+  // If --account was explicitly specified but not found, don't fall through
+  // to other accounts — respect the user's explicit choice
+  if (account) {
+    return null;
   }
 
   const accounts = getCachedAccounts();
@@ -1156,23 +1178,37 @@ async function cmdDraft(options: CliOptions) {
   const bodyContent = options.html || textToHtml(options.body);
 
   if (options.provider === "superhuman") {
-    // Fallback: Superhuman via CDP provider
-    info("Creating draft via Superhuman API (CDP)...");
+    // Try native Superhuman API via provider token (produces draft00... IDs)
+    const token = await provider.getToken();
+    if (token?.idToken && token?.userId) {
+      info("Creating draft via Superhuman API...");
+      const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
+      const result = await createDraftWithUserInfo(userInfo, {
+        to: resolvedTo,
+        cc: resolvedCc,
+        bcc: resolvedBcc,
+        subject: options.subject || "",
+        body: bodyContent,
+      });
 
-    const result = await createDraftViaProvider(provider, {
-      to: resolvedTo,
-      cc: resolvedCc,
-      bcc: resolvedBcc,
-      subject: options.subject || "",
-      body: bodyContent,
-    });
-
-    if (result.success) {
-      success("Draft created in Superhuman!");
-      log(`  ${colors.dim}Draft ID: ${result.draftId}${colors.reset}`);
-      log(`  ${colors.dim}Syncs to all devices automatically${colors.reset}`);
+      if (result.success) {
+        success("Draft created in Superhuman!");
+        log(`  ${colors.dim}Draft ID: ${result.draftId}${colors.reset}`);
+        log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
+        log(`  ${colors.dim}Syncs to all devices automatically${colors.reset}`);
+      } else {
+        error(`Failed to create draft: ${result.error}`);
+      }
     } else {
-      error(`Failed to create draft: ${result.error}`);
+      // No native Superhuman credentials (idToken/userId) available.
+      // Do NOT fall back to createDraftViaProvider, which dispatches via the
+      // provider's native API (MS Graph for Outlook) and produces Exchange IDs
+      // instead of native draft00... IDs.
+      error("No Superhuman native credentials found (missing idToken/userId)");
+      error("Run 'superhuman account auth' to authenticate with Superhuman");
+      error("This will capture the credentials needed to create native drafts");
+      await provider.disconnect();
+      process.exit(1);
     }
   } else {
     // Direct API approach (Gmail/MS Graph)
