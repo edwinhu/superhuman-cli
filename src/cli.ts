@@ -320,7 +320,7 @@ ${colors.bold}REQUIREMENTS${colors.reset}
 // Commands that use noun+verb subcommand groups (e.g., "calendar create", "draft delete")
 const GROUPED_COMMANDS = new Set([
   "calendar", "draft", "label", "star", "snooze", "mark",
-  "attachment", "snippet", "account", "contact",
+  "attachment", "snippet", "snippets", "account", "contact",
 ]);
 
 interface CliOptions {
@@ -722,7 +722,7 @@ function parseArgs(args: string[]): CliOptions {
       // contact search <query>
       options.contactsQuery = unescapeString(arg);
       i += 1;
-    } else if (options.command === "snippet" && options.subcommand === "use" && !options.snippetQuery) {
+    } else if ((options.command === "snippet" || options.command === "snippets") && options.subcommand === "use" && !options.snippetQuery) {
       // snippet use <name>
       options.snippetQuery = unescapeString(arg);
       i += 1;
@@ -3648,7 +3648,8 @@ async function main() {
       await cmdAi(options);
       break;
 
-    // snippet list|use
+    // snippet list|use (accept plural "snippets" too)
+    case "snippets":
     case "snippet":
       switch (options.subcommand) {
         case "list":
