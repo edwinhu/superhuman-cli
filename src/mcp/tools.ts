@@ -68,7 +68,7 @@ async function resolveSuperhumanToken(): Promise<TokenInfo | null> {
  * Shared schema for email composition (draft and send use the same fields)
  */
 export const EmailSchema = z.object({
-  to: z.string().describe("Recipient email address"),
+  to: z.string().optional().describe("Recipient email address (optional if cc or bcc provided)"),
   subject: z.string().describe("Email subject line"),
   body: z.string().describe("Email body content (plain text or HTML)"),
   cc: z.string().optional().describe("CC recipient email address (optional)"),
@@ -339,22 +339,31 @@ async function getMcpProvider(): Promise<ConnectionProvider> {
  */
 export async function draftHandler(args: z.infer<typeof DraftSchema>): Promise<ToolResult> {
   try {
+    // Require at least one recipient
+    if (!args.to && !args.cc && !args.bcc) {
+      return errorResult("At least one recipient is required (provide 'to', 'cc', or 'bcc')");
+    }
+
+    const toList = args.to ? [args.to] : [];
+    const ccList = args.cc ? [args.cc] : undefined;
+    const bccList = args.bcc ? [args.bcc] : undefined;
+
     // Try Superhuman native API first (no CDP needed)
     const token = await resolveSuperhumanToken();
     if (token) {
       const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
       const bodyHtml = textToHtml(args.body);
       const result = await createDraftWithUserInfo(userInfo, {
-        to: [args.to],
-        cc: args.cc ? [args.cc] : undefined,
-        bcc: args.bcc ? [args.bcc] : undefined,
+        to: toList,
+        cc: ccList,
+        bcc: bccList,
         subject: args.subject,
         body: bodyHtml,
       });
 
       if (result.success) {
         return successResult(
-          `Draft created successfully.\nTo: ${args.to}\nSubject: ${args.subject}\nDraft ID: ${result.draftId || "(unknown)"}\nAccount: ${token.email}`
+          `Draft created successfully.\nTo: ${args.to || "(none)"}\nSubject: ${args.subject}\nDraft ID: ${result.draftId || "(unknown)"}\nAccount: ${token.email}`
         );
       } else {
         return errorResult(`Failed to create draft: ${result.error}`);
@@ -366,16 +375,16 @@ export async function draftHandler(args: z.infer<typeof DraftSchema>): Promise<T
     try {
       const bodyHtml = textToHtml(args.body);
       const result = await createDraftViaProvider(provider, {
-        to: [args.to],
-        cc: args.cc ? [args.cc] : undefined,
-        bcc: args.bcc ? [args.bcc] : undefined,
+        to: toList,
+        cc: ccList,
+        bcc: bccList,
         subject: args.subject,
         body: bodyHtml,
       });
 
       if (result.success) {
         return successResult(
-          `Draft created successfully.\nTo: ${args.to}\nSubject: ${args.subject}\nDraft ID: ${result.draftId || "(unknown)"}`
+          `Draft created successfully.\nTo: ${args.to || "(none)"}\nSubject: ${args.subject}\nDraft ID: ${result.draftId || "(unknown)"}`
         );
       } else {
         return errorResult(`Failed to create draft: ${result.error}`);

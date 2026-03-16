@@ -936,7 +936,8 @@ async function cmdSnippet(options: CliOptions) {
 
   // Apply template variables
   const vars = options.vars ? parseVars(options.vars) : {};
-  let body = snippet.body;
+  // CLI --body overrides snippet body (convert plain text to HTML like cmdDraft does)
+  let body = options.body ? textToHtml(options.body) : snippet.body;
   let subject = snippet.subject;
   if (Object.keys(vars).length > 0) {
     body = applyVars(body, vars);
@@ -1105,9 +1106,9 @@ async function cmdDraft(options: CliOptions) {
     return;
   }
 
-  // Creating a new draft - requires at least one recipient
-  if (options.to.length === 0) {
-    error("At least one recipient is required (--to)");
+  // Creating a new draft - requires at least one recipient (to, cc, or bcc)
+  if (options.to.length === 0 && options.cc.length === 0 && options.bcc.length === 0) {
+    error("At least one recipient is required (--to, --cc, or --bcc)");
     process.exit(1);
   }
 
@@ -1473,9 +1474,9 @@ async function cmdSend(options: CliOptions) {
     return;
   }
 
-  // Composing and sending a new email - requires at least one recipient
-  if (options.to.length === 0) {
-    error("At least one recipient is required (--to)");
+  // Composing and sending a new email - requires at least one recipient (to, cc, or bcc)
+  if (options.to.length === 0 && options.cc.length === 0 && options.bcc.length === 0) {
+    error("At least one recipient is required (--to, --cc, or --bcc)");
     process.exit(1);
   }
 
