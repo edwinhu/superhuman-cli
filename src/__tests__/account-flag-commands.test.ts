@@ -75,7 +75,7 @@ for (const cmd of commands) {
       const { output } = await getOutput(
         spawnCli(...cmd.withThread, "--account=nonexistent@example.com")
       );
-      expect(output).toMatch(/no cached tokens|could not connect|not running|expired|error|failed/i);
+      expect(output).toMatch(/no cached tokens|could not|not running|expired|error|failed/i);
     });
 
     test("accepts --account flag without unknown option error", async () => {

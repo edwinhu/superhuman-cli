@@ -25,7 +25,7 @@ export function getCDPHost(): string {
 /**
  * Check if Superhuman is running with CDP enabled
  */
-export async function isSuperhmanRunning(port = 9333): Promise<boolean> {
+export async function isSuperhumanRunning(port = 9333): Promise<boolean> {
   try {
     const host = getCDPHost();
     const targets = await CDP.List({ host, port });
@@ -41,7 +41,7 @@ export async function isSuperhmanRunning(port = 9333): Promise<boolean> {
  */
 export async function launchSuperhuman(port = 9333): Promise<boolean> {
   // Check if already running (works for both local and remote)
-  if (await isSuperhmanRunning(port)) {
+  if (await isSuperhumanRunning(port)) {
     return true;
   }
 
@@ -66,7 +66,7 @@ export async function launchSuperhuman(port = 9333): Promise<boolean> {
     // Wait for Superhuman to be ready (up to 30 seconds)
     for (let i = 0; i < 30; i++) {
       await new Promise(r => setTimeout(r, 1000));
-      if (await isSuperhmanRunning(port)) {
+      if (await isSuperhumanRunning(port)) {
         console.log("Superhuman is ready");
         // Give it a bit more time to fully initialize
         await new Promise(r => setTimeout(r, 2000));
@@ -85,7 +85,7 @@ export async function launchSuperhuman(port = 9333): Promise<boolean> {
  * Ensure Superhuman is running, launching it if necessary
  */
 export async function ensureSuperhuman(port = 9333): Promise<boolean> {
-  if (await isSuperhmanRunning(port)) {
+  if (await isSuperhumanRunning(port)) {
     return true;
   }
   return launchSuperhuman(port);
@@ -101,7 +101,7 @@ export async function connectToSuperhuman(
   const host = getCDPHost();
 
   // Auto-launch if not running
-  if (autoLaunch && !(await isSuperhmanRunning(port))) {
+  if (autoLaunch && !(await isSuperhumanRunning(port))) {
     const launched = await launchSuperhuman(port);
     if (!launched) {
       return null;

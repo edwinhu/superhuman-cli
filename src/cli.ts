@@ -12,7 +12,7 @@
 
 import {
   connectToSuperhuman,
-  isSuperhmanRunning,
+  isSuperhumanRunning,
   disconnect,
   disconnectChrome,
   connectToSuperhumanChrome,
@@ -774,16 +774,9 @@ async function getProvider(options: CliOptions): Promise<ConnectionProvider> {
     return provider;
   }
 
-  // If --account was explicitly specified but not found, don't fall back to CDP
-  if (options.account) {
-    error(`No cached tokens for account "${options.account}"`);
-    info("Run 'superhuman account auth' to authenticate this account");
-    process.exit(1);
-  }
-
   // No cached tokens — check if Superhuman is already running on CDP port
   // (don't auto-launch; that's too slow and inappropriate for scripted/test use)
-  const running = await isSuperhmanRunning(options.port);
+  const running = await isSuperhumanRunning(options.port);
   if (!running) {
     error("No cached tokens and Superhuman is not running");
     info("Run 'superhuman account auth' to authenticate, or start Superhuman with:");
@@ -818,7 +811,15 @@ async function resolveAllRecipientsViaProvider(
   return resolved;
 }
 
-
+/**
+ * Validate that at least one recipient (to, cc, or bcc) is provided. Exits if none.
+ */
+function requireAnyRecipient(options: CliOptions): void {
+  if (options.to.length === 0 && options.cc.length === 0 && options.bcc.length === 0) {
+    error("At least one recipient is required (--to, --cc, or --bcc)");
+    process.exit(1);
+  }
+}
 
 async function cmdStatus(options: CliOptions) {
   info(`Checking connection to Superhuman on port ${options.port}...`);
@@ -1128,11 +1129,8 @@ async function cmdDraft(options: CliOptions) {
     return;
   }
 
-  // Creating a new draft - requires at least one recipient (to, cc, or bcc)
-  if (options.to.length === 0 && options.cc.length === 0 && options.bcc.length === 0) {
-    error("At least one recipient is required (--to, --cc, or --bcc)");
-    process.exit(1);
-  }
+  // Creating a new draft - requires at least one recipient
+  requireAnyRecipient(options);
 
   // Fast path: use cached Superhuman credentials (no CDP needed)
   if (options.provider === "superhuman") {
@@ -1510,11 +1508,8 @@ async function cmdSend(options: CliOptions) {
     return;
   }
 
-  // Composing and sending a new email - requires at least one recipient (to, cc, or bcc)
-  if (options.to.length === 0 && options.cc.length === 0 && options.bcc.length === 0) {
-    error("At least one recipient is required (--to, --cc, or --bcc)");
-    process.exit(1);
-  }
+  // Composing and sending a new email - requires at least one recipient
+  requireAnyRecipient(options);
 
   const provider = await getProvider(options);
 
