@@ -8,6 +8,8 @@ import type { ConnectionProvider } from "./connection-provider";
 import {
   searchGmailDirect,
   listInboxDirect,
+  listLabelsDirect,
+  type TokenInfo,
 } from "./token-api";
 
 export interface InboxThread {
@@ -29,6 +31,17 @@ export interface ListInboxOptions {
   focusedOnly?: boolean;
   /** When true, only return unread emails */
   unreadOnly?: boolean;
+  /** When true, exclude threads where the user was the last sender */
+  needsReply?: boolean;
+  /** Filter to threads that have ANY of these label names */
+  labels?: string[];
+  /**
+   * Filter by split inbox classification.
+   * "important" = Gmail category:personal / Outlook inferenceClassification:focused
+   * "other" = Gmail -category:personal / Outlook inferenceClassification:other
+   * Applied server-side via provider API query — no CDP needed.
+   */
+  splitInbox?: "important" | "other";
 }
 
 export interface SearchOptions {
@@ -55,8 +68,88 @@ export async function listInbox(
   const limit = options.limit ?? 10;
   const focusedOnly = options.focusedOnly ?? false;
   const unreadOnly = options.unreadOnly ?? false;
+  const needsReply = options.needsReply ?? false;
+  const labels = options.labels ?? [];
+  const splitInbox = options.splitInbox;
   const token = await provider.getToken();
-  return listInboxDirect(token, limit, focusedOnly, unreadOnly);
+
+  // --split is applied server-side by listInboxDirect (query/filter parameter).
+  // --needs-reply and --label are client-side filters, so over-fetch to compensate.
+  const hasClientFilters = needsReply || labels.length > 0;
+  const fetchLimit = hasClientFilters ? Math.max(limit * 3, 50) : limit;
+  let threads = await listInboxDirect(token, fetchLimit, focusedOnly, unreadOnly, splitInbox);
+
+  // Apply --label filter
+  if (labels.length > 0) {
+    threads = await filterByLabels(token, threads, labels);
+  }
+
+  // Apply --needs-reply filter
+  if (needsReply) {
+    threads = filterNeedsReply(token, threads);
+  }
+
+  // Trim to requested limit after filtering
+  return threads.slice(0, limit);
+}
+
+/**
+ * Filter threads to only those with ANY of the specified label names.
+ * Resolves label names to IDs first.
+ */
+async function filterByLabels(
+  token: TokenInfo,
+  threads: InboxThread[],
+  labelNames: string[]
+): Promise<InboxThread[]> {
+  // For Gmail, labelIds are already on each thread from the search
+  // For Outlook, we don't have labelIds — skip label filtering (labels don't apply)
+  if (token.isMicrosoft) {
+    // Outlook doesn't have Gmail-style labels
+    return threads;
+  }
+
+  // Resolve label names to IDs
+  const allLabels = await listLabelsDirect(token);
+  const nameToId = new Map<string, string>();
+  for (const label of allLabels) {
+    nameToId.set(label.name.toLowerCase(), label.id);
+  }
+
+  const targetIds = new Set<string>();
+  for (const name of labelNames) {
+    const id = nameToId.get(name.toLowerCase());
+    if (id) {
+      targetIds.add(id);
+    } else {
+      // Try using name as ID directly (user might pass label ID)
+      targetIds.add(name);
+    }
+  }
+
+  return threads.filter((thread) =>
+    thread.labelIds.some((id) => targetIds.has(id))
+  );
+}
+
+/**
+ * Filter out threads where the user was the last sender.
+ *
+ * Uses from.email on each thread:
+ * - Gmail: from shows the last message sender (reliable)
+ * - Outlook: from shows the original sender, not last (imperfect but avoids N API calls)
+ */
+function filterNeedsReply(
+  token: TokenInfo,
+  threads: InboxThread[]
+): InboxThread[] {
+  const userEmail = token.email.toLowerCase();
+  return threads.filter((thread) => {
+    // Single-message threads always pass (new, unanswered)
+    if (thread.messageCount <= 1) return true;
+    // Exclude if user was the last sender
+    return thread.from.email.toLowerCase() !== userEmail;
+  });
 }
 
 /**

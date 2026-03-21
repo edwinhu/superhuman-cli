@@ -76,6 +76,34 @@ describe("draft create uses native Superhuman API when credentials available", (
     expect(result.success).toBe(true);
     expect(result.draftId!.startsWith("draft00")).toBe(true);
   });
+
+  test("comma-separated BCC creates separate recipients in API payload", async () => {
+    const mockFetch = createMockFetch({ ok: true, data: {} });
+
+    const userInfo = getUserInfoFromCache(
+      "user123",
+      "ehu@law.virginia.edu",
+      "fake-id-token"
+    );
+
+    // Simulate what CLI does after splitting "a@test.com,b@test.com,c@test.com"
+    const result = await createDraftWithUserInfo(userInfo, {
+      to: [],
+      bcc: ["a@test.com", "b@test.com", "c@test.com"],
+      subject: "Multi BCC Test",
+      body: "<p>Hello</p>",
+    });
+
+    expect(result.success).toBe(true);
+
+    // Verify the API payload has 3 separate BCC recipients
+    const calls = mockFetch.mock.calls;
+    const [, reqInit] = calls[0] as unknown as [string, RequestInit];
+    const body = JSON.parse(reqInit.body as string);
+    const draftValue = body.writes[0].value;
+    expect(draftValue.bcc).toEqual(["a@test.com", "b@test.com", "c@test.com"]);
+    expect(draftValue.bcc.length).toBe(3);
+  });
 });
 
 describe("CLI fallback path rejects provider API when provider is superhuman", () => {

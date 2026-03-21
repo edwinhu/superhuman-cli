@@ -1172,25 +1172,36 @@ export async function listInboxDirect(
   token: TokenInfo,
   limit: number = 10,
   focusedOnly: boolean = false,
-  unreadOnly: boolean = false
+  unreadOnly: boolean = false,
+  splitInbox?: "important" | "other"
 ): Promise<InboxThread[]> {
   if (token.isMicrosoft) {
     // MS Graph: Get messages from Inbox folder
-    const fields = `id,conversationId,subject,from,receivedDateTime,bodyPreview,isRead${focusedOnly ? ',inferenceClassification' : ''}`;
+    const fields = `id,conversationId,subject,from,receivedDateTime,bodyPreview,isRead,inferenceClassification`;
+    // MS Graph doesn't support $orderby with $filter on inferenceClassification (returns 400).
+    // Use $filter only for isRead; apply inferenceClassification filter client-side after fetching.
+    const wantClassification = focusedOnly ? "focused" : splitInbox === "important" ? "focused" : splitInbox === "other" ? "other" : null;
     const filters: string[] = [];
-    if (focusedOnly) filters.push("inferenceClassification eq 'focused'");
     if (unreadOnly) filters.push("isRead eq false");
     const filter = filters.length > 0 ? `&$filter=${filters.join(' and ')}` : '';
-    const path = `/me/mailFolders/Inbox/messages?$top=${limit}&$select=${fields}${filter}`;
+    // Over-fetch when we'll filter client-side by classification
+    const fetchLimit = wantClassification ? Math.max(limit * 3, 50) : limit;
+    const path = `/me/mailFolders/Inbox/messages?$top=${fetchLimit}&$select=${fields}&$orderby=receivedDateTime desc${filter}`;
     const result = await msgraphFetch(token.accessToken, path);
 
     if (!result || !result.value) {
       return [];
     }
 
+    // Filter by inferenceClassification client-side
+    let messages = result.value;
+    if (wantClassification) {
+      messages = messages.filter((m: any) => m.inferenceClassification === wantClassification);
+    }
+
     // Group by conversationId
     const conversationMap = new Map<string, any[]>();
-    for (const msg of result.value) {
+    for (const msg of messages) {
       const existing = conversationMap.get(msg.conversationId);
       if (!existing) {
         conversationMap.set(msg.conversationId, [msg]);
@@ -1201,11 +1212,11 @@ export async function listInboxDirect(
 
     const threads: InboxThread[] = [];
     const convEntries = Array.from(conversationMap.entries());
-    for (const [convId, messages] of convEntries) {
-      messages.sort((a, b) =>
+    for (const [convId, msgs] of convEntries) {
+      msgs.sort((a, b) =>
         new Date(b.receivedDateTime).getTime() - new Date(a.receivedDateTime).getTime()
       );
-      const latest = messages[0];
+      const latest = msgs[0];
 
       threads.push({
         id: convId,
@@ -1216,12 +1227,18 @@ export async function listInboxDirect(
         },
         date: latest.receivedDateTime,
         snippet: latest.bodyPreview || "",
-        labelIds: latest.isRead ? [] : ["UNREAD"],
-        messageCount: messages.length,
+        labelIds: [
+          ...(latest.isRead ? [] : ["UNREAD"]),
+          ...(latest.inferenceClassification === "focused" ? ["FOCUSED"] : latest.inferenceClassification === "other" ? ["OTHER"] : []),
+        ],
+        messageCount: msgs.length,
       });
 
       if (threads.length >= limit) break;
     }
+
+    // Sort by date descending (server sorts by receivedDateTime but grouping may reorder)
+    threads.sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
 
     return threads;
   } else {
@@ -1229,6 +1246,9 @@ export async function listInboxDirect(
     let query = "label:INBOX";
     if (focusedOnly) query += " category:primary";
     if (unreadOnly) query += " is:unread";
+    // --split: filter by Gmail category (category:personal = Superhuman's Important)
+    if (splitInbox === "important") query += " category:personal";
+    else if (splitInbox === "other") query += " -category:personal";
     return searchGmailDirect(token, query, limit);
   }
 }

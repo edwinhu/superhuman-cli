@@ -180,7 +180,9 @@ ${colors.bold}OPTIONS${colors.reset}
   --draft <id>       Draft ID to send (for send command)
   --thread <id>      Thread ID for reply/forward drafts (for draft send)
   --delay <seconds>  Delay before sending in seconds (for draft send, default: 20)
-  --label <id>       Label ID (for label add/remove)
+  --label <name|id>  Label name or ID (for label add/remove, or inbox filter; repeatable)
+  --needs-reply      Exclude threads where you were the last sender (for inbox)
+  --split <bucket>   Filter by Superhuman split inbox: "important" or "other" (uses CDP)
   --until <time>     Snooze until: preset (tomorrow, next-week, weekend, evening) or ISO datetime
   --output <path>    Output directory or file path (for attachment download)
   --attachment <id>  Specific attachment ID (for attachment download)
@@ -210,6 +212,8 @@ ${colors.bold}EXAMPLES${colors.reset}
   ${colors.dim}# List recent emails${colors.reset}
   superhuman inbox
   superhuman inbox --limit 5 --json
+  superhuman inbox --needs-reply --limit 50 --json
+  superhuman inbox --label "AI/Respond" --label "AI/Meeting" --json
 
   ${colors.dim}# Search emails${colors.reset}
   superhuman search "from:john subject:meeting"
@@ -381,6 +385,9 @@ interface CliOptions {
   // inbox filter
   focused: boolean; // only show important/primary emails (Gmail: category:primary, Outlook: Focused Inbox)
   unread: boolean; // only show unread emails
+  needsReply: boolean; // exclude threads where user was last sender
+  labels: string[]; // filter to threads with any of these label names
+  splitInbox: "important" | "other" | ""; // Superhuman split inbox filter
   // ai options
   aiQuery: string; // question to ask the AI
   // snippet options
@@ -440,6 +447,9 @@ function parseArgs(args: string[]): CliOptions {
     includeDone: false,
     focused: false,
     unread: false,
+    needsReply: false,
+    labels: [],
+    splitInbox: "",
     aiQuery: "",
     snippetQuery: "",
     vars: "",
@@ -472,15 +482,21 @@ function parseArgs(args: string[]): CliOptions {
 
       switch (key) {
         case "to":
-          options.to.push(unescapeString(value));
+          for (const addr of unescapeString(value).split(",").map(s => s.trim()).filter(Boolean)) {
+            options.to.push(addr);
+          }
           i += inc;
           break;
         case "cc":
-          options.cc.push(unescapeString(value));
+          for (const addr of unescapeString(value).split(",").map(s => s.trim()).filter(Boolean)) {
+            options.cc.push(addr);
+          }
           i += inc;
           break;
         case "bcc":
-          options.bcc.push(unescapeString(value));
+          for (const addr of unescapeString(value).split(",").map(s => s.trim()).filter(Boolean)) {
+            options.bcc.push(addr);
+          }
           i += inc;
           break;
         case "subject":
@@ -537,6 +553,7 @@ function parseArgs(args: string[]): CliOptions {
           break;
         case "label":
           options.labelId = unescapeString(value);
+          options.labels.push(unescapeString(value));
           i += inc;
           break;
         case "until":
@@ -614,6 +631,19 @@ function parseArgs(args: string[]): CliOptions {
         case "unread":
           options.unread = true;
           i += 1;
+          break;
+        case "needs-reply":
+          options.needsReply = true;
+          i += 1;
+          break;
+        case "split":
+          if (value === "important" || value === "other") {
+            options.splitInbox = value;
+          } else {
+            error(`Invalid --split value: ${value}. Use 'important' or 'other'`);
+            process.exit(1);
+          }
+          i += inc;
           break;
         case "vars":
           options.vars = unescapeString(value);
@@ -1563,7 +1593,14 @@ function truncate(str: string | null | undefined, maxLen: number): string {
 async function cmdInbox(options: CliOptions) {
   const provider = await getProvider(options);
 
-  const threads = await listInbox(provider, { limit: options.limit, focusedOnly: options.focused, unreadOnly: options.unread });
+  const threads = await listInbox(provider, {
+    limit: options.limit,
+    focusedOnly: options.focused,
+    unreadOnly: options.unread,
+    needsReply: options.needsReply,
+    labels: options.labels,
+    splitInbox: options.splitInbox || undefined,
+  });
 
   if (options.json) {
     console.log(JSON.stringify(threads, null, 2));
