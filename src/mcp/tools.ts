@@ -91,6 +91,7 @@ export const SearchSchema = z.object({
  */
 export const InboxSchema = z.object({
   limit: z.number().optional().describe("Maximum number of threads to return (default: 10)"),
+  ai_label: z.string().optional().describe("Filter by Superhuman AI label (e.g., 'Respond', 'Meeting', 'News', 'Waiting', 'Marketing')"),
 });
 
 /**
@@ -470,7 +471,10 @@ export async function inboxHandler(args: z.infer<typeof InboxSchema>): Promise<T
 
   try {
     provider = await getMcpProvider();
-    const threads = await listInbox(provider, { limit: args.limit ?? 10 });
+    const threads = await listInbox(provider, {
+      limit: args.limit ?? 10,
+      aiLabel: args.ai_label,
+    });
 
     if (threads.length === 0) {
       return successResult("No emails in inbox");

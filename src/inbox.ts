@@ -42,6 +42,8 @@ export interface ListInboxOptions {
    * Applied server-side via provider API query — no CDP needed.
    */
   splitInbox?: "important" | "other";
+  /** Filter by Superhuman AI label (e.g., "Respond", "Meeting", "News") */
+  aiLabel?: string;
 }
 
 export interface SearchOptions {
@@ -71,13 +73,14 @@ export async function listInbox(
   const needsReply = options.needsReply ?? false;
   const labels = options.labels ?? [];
   const splitInbox = options.splitInbox;
+  const aiLabel = options.aiLabel;
   const token = await provider.getToken();
 
-  // --split is applied server-side by listInboxDirect (query/filter parameter).
+  // --split and --ai-label are applied server-side by listInboxDirect (query/filter parameter).
   // --needs-reply and --label are client-side filters, so over-fetch to compensate.
   const hasClientFilters = needsReply || labels.length > 0;
   const fetchLimit = hasClientFilters ? Math.max(limit * 3, 50) : limit;
-  let threads = await listInboxDirect(token, fetchLimit, focusedOnly, unreadOnly, splitInbox);
+  let threads = await listInboxDirect(token, fetchLimit, focusedOnly, unreadOnly, splitInbox, aiLabel);
 
   // Apply --label filter
   if (labels.length > 0) {

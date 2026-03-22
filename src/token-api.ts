@@ -1173,19 +1173,25 @@ export async function listInboxDirect(
   limit: number = 10,
   focusedOnly: boolean = false,
   unreadOnly: boolean = false,
-  splitInbox?: "important" | "other"
+  splitInbox?: "important" | "other",
+  aiLabel?: string
 ): Promise<InboxThread[]> {
   if (token.isMicrosoft) {
     // MS Graph: Get messages from Inbox folder
-    const fields = `id,conversationId,subject,from,receivedDateTime,bodyPreview,isRead,inferenceClassification`;
+    const fields = `id,conversationId,subject,from,receivedDateTime,bodyPreview,isRead,inferenceClassification,categories`;
     // MS Graph doesn't support $orderby with $filter on inferenceClassification (returns 400).
     // Use $filter only for isRead; apply inferenceClassification filter client-side after fetching.
     const wantClassification = focusedOnly ? "focused" : splitInbox === "important" ? "focused" : splitInbox === "other" ? "other" : null;
+    // Normalize AI label name to Outlook category format: "Respond" → "Respond (Superhuman/AI)"
+    const wantAiCategory = aiLabel ? `${aiLabel} (Superhuman/AI)` : null;
     const filters: string[] = [];
     if (unreadOnly) filters.push("isRead eq false");
+    // categories/any works with $orderby (unlike inferenceClassification)
+    if (wantAiCategory) filters.push(`categories/any(c: c eq '${wantAiCategory}')`);
     const filter = filters.length > 0 ? `&$filter=${filters.join(' and ')}` : '';
     // Over-fetch when we'll filter client-side by classification
-    const fetchLimit = wantClassification ? Math.max(limit * 3, 50) : limit;
+    const hasClientFilter = !!wantClassification;
+    const fetchLimit = hasClientFilter ? Math.max(limit * 3, 50) : limit;
     const path = `/me/mailFolders/Inbox/messages?$top=${fetchLimit}&$select=${fields}&$orderby=receivedDateTime desc${filter}`;
     const result = await msgraphFetch(token.accessToken, path);
 
@@ -1230,6 +1236,7 @@ export async function listInboxDirect(
         labelIds: [
           ...(latest.isRead ? [] : ["UNREAD"]),
           ...(latest.inferenceClassification === "focused" ? ["FOCUSED"] : latest.inferenceClassification === "other" ? ["OTHER"] : []),
+          ...(latest.categories || []).filter((c: string) => c.endsWith("(Superhuman/AI)")).map((c: string) => `AI/${c.replace(" (Superhuman/AI)", "")}`),
         ],
         messageCount: msgs.length,
       });
@@ -1249,6 +1256,8 @@ export async function listInboxDirect(
     // --split: filter by Gmail category (category:personal = Superhuman's Important)
     if (splitInbox === "important") query += " category:personal";
     else if (splitInbox === "other") query += " -category:personal";
+    // --ai-label: filter by Superhuman AI label (e.g., "Respond" → label:[Superhuman]/AI/Respond)
+    if (aiLabel) query += ` label:[Superhuman]/AI/${aiLabel}`;
     return searchGmailDirect(token, query, limit);
   }
 }

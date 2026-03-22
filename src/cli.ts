@@ -182,6 +182,7 @@ ${colors.bold}OPTIONS${colors.reset}
   --delay <seconds>  Delay before sending in seconds (for draft send, default: 20)
   --label <name|id>  Label name or ID (for label add/remove, or inbox filter; repeatable)
   --needs-reply      Exclude threads where you were the last sender (for inbox)
+  --ai-label <name>  Filter by Superhuman AI label (e.g., Respond, Meeting, News, Waiting)
   --split <bucket>   Filter by Superhuman split inbox: "important" or "other" (uses CDP)
   --until <time>     Snooze until: preset (tomorrow, next-week, weekend, evening) or ISO datetime
   --output <path>    Output directory or file path (for attachment download)
@@ -213,6 +214,7 @@ ${colors.bold}EXAMPLES${colors.reset}
   superhuman inbox
   superhuman inbox --limit 5 --json
   superhuman inbox --needs-reply --limit 50 --json
+  superhuman inbox --ai-label Respond --json
   superhuman inbox --label "AI/Respond" --label "AI/Meeting" --json
 
   ${colors.dim}# Search emails${colors.reset}
@@ -388,6 +390,7 @@ interface CliOptions {
   needsReply: boolean; // exclude threads where user was last sender
   labels: string[]; // filter to threads with any of these label names
   splitInbox: "important" | "other" | ""; // Superhuman split inbox filter
+  aiLabel: string; // Superhuman AI label filter (e.g., "Respond", "Meeting")
   // ai options
   aiQuery: string; // question to ask the AI
   // snippet options
@@ -450,6 +453,7 @@ function parseArgs(args: string[]): CliOptions {
     needsReply: false,
     labels: [],
     splitInbox: "",
+    aiLabel: "",
     aiQuery: "",
     snippetQuery: "",
     vars: "",
@@ -643,6 +647,10 @@ function parseArgs(args: string[]): CliOptions {
             error(`Invalid --split value: ${value}. Use 'important' or 'other'`);
             process.exit(1);
           }
+          i += inc;
+          break;
+        case "ai-label":
+          options.aiLabel = unescapeString(value);
           i += inc;
           break;
         case "vars":
@@ -1600,6 +1608,7 @@ async function cmdInbox(options: CliOptions) {
     needsReply: options.needsReply,
     labels: options.labels,
     splitInbox: options.splitInbox || undefined,
+    aiLabel: options.aiLabel || undefined,
   });
 
   if (options.json) {
