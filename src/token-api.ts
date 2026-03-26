@@ -886,6 +886,73 @@ export async function searchGmailDirect(
 }
 
 /**
+ * Stream Gmail search results as an async generator.
+ * Yields each InboxThread as soon as it's fetched, rather than waiting for all results.
+ * For MS Graph, falls back to fetching all at once and yielding each item.
+ */
+export async function* streamSearchGmailDirect(
+  token: TokenInfo,
+  query: string,
+  limit: number = 10
+): AsyncGenerator<InboxThread> {
+  if (token.isMicrosoft) {
+    // MS Graph fetches in bulk; just yield each item
+    const threads = await searchMSGraphDirect(token, query, limit);
+    for (const thread of threads) {
+      yield thread;
+    }
+    return;
+  }
+
+  // Step 1: Get list of messages matching query
+  const searchPath = `/messages?q=${encodeURIComponent(query)}&maxResults=${limit}`;
+  const searchResult = await gmailFetch(token.accessToken, searchPath) as GmailMessagesListResponse | null;
+
+  if (!searchResult || !searchResult.messages || searchResult.messages.length === 0) {
+    return;
+  }
+
+  // Step 2: Get unique thread IDs
+  const threadIdSet = new Set(searchResult.messages.map(m => m.threadId));
+  const threadIds = Array.from(threadIdSet);
+
+  // Step 3: Fetch and yield each thread as soon as it's ready
+  for (const threadId of threadIds.slice(0, limit)) {
+    const threadPath = `/threads/${threadId}?format=metadata&metadataHeaders=Subject&metadataHeaders=From&metadataHeaders=Date`;
+    const threadResult = await gmailFetch(token.accessToken, threadPath) as GmailThreadResponse | null;
+
+    if (!threadResult || !threadResult.messages || threadResult.messages.length === 0) {
+      continue;
+    }
+
+    const lastMessage = threadResult.messages[threadResult.messages.length - 1];
+    const headers = lastMessage.payload.headers;
+
+    const subjectHeader = headers.find(h => h.name.toLowerCase() === "subject");
+    const fromHeader = headers.find(h => h.name.toLowerCase() === "from");
+    const dateHeader = headers.find(h => h.name.toLowerCase() === "date");
+
+    const fromValue = fromHeader?.value || "";
+    const fromMatch = fromValue.match(/^(?:"?([^"<]*)"?\s*)?<?([^>]+)>?$/);
+    const fromName = fromMatch?.[1]?.trim() || "";
+    const fromEmail = fromMatch?.[2]?.trim() || fromValue;
+
+    yield {
+      id: threadResult.id,
+      subject: subjectHeader?.value || "(no subject)",
+      from: {
+        email: fromEmail,
+        name: fromName,
+      },
+      date: dateHeader?.value || new Date(parseInt(lastMessage.internalDate)).toISOString(),
+      snippet: lastMessage.snippet || "",
+      labelIds: lastMessage.labelIds || [],
+      messageCount: threadResult.messages.length,
+    };
+  }
+}
+
+/**
  * Search emails using MS Graph API (for Microsoft accounts).
  *
  * @param token - Token info with accessToken
@@ -1260,6 +1327,37 @@ export async function listInboxDirect(
     if (aiLabel) query += ` label:[Superhuman]/AI/${aiLabel}`;
     return searchGmailDirect(token, query, limit);
   }
+}
+
+/**
+ * Stream inbox threads as an async generator, yielding each as soon as it's fetched.
+ * Gmail path yields each thread individually; MS Graph yields after the bulk fetch.
+ */
+export async function* streamListInboxDirect(
+  token: TokenInfo,
+  limit: number = 10,
+  focusedOnly: boolean = false,
+  unreadOnly: boolean = false,
+  splitInbox?: "important" | "other",
+  aiLabel?: string
+): AsyncGenerator<InboxThread> {
+  if (token.isMicrosoft) {
+    // MS Graph fetches in bulk; yield each thread after processing
+    const threads = await listInboxDirect(token, limit, focusedOnly, unreadOnly, splitInbox, aiLabel);
+    for (const thread of threads) {
+      yield thread;
+    }
+    return;
+  }
+
+  // Gmail: build query and stream via streamSearchGmailDirect
+  let query = "label:INBOX";
+  if (focusedOnly) query += " category:primary";
+  if (unreadOnly) query += " is:unread";
+  if (splitInbox === "important") query += " category:personal";
+  else if (splitInbox === "other") query += " -category:personal";
+  if (aiLabel) query += ` label:[Superhuman]/AI/${aiLabel}`;
+  yield* streamSearchGmailDirect(token, query, limit);
 }
 
 /**

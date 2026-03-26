@@ -7,6 +7,8 @@
 import type { ConnectionProvider } from "./connection-provider";
 import {
   searchGmailDirect,
+  streamSearchGmailDirect,
+  streamListInboxDirect,
   listInboxDirect,
   listLabelsDirect,
   type TokenInfo,
@@ -243,6 +245,96 @@ export async function searchInbox(
       // Gmail: Add label:INBOX to the query
       const inboxQuery = `label:INBOX ${query}`;
       return searchGmailDirect(token, inboxQuery, limit);
+    }
+  }
+}
+
+/**
+ * Stream inbox threads as they arrive, applying client-side filters on the fly.
+ * Yields each thread as soon as it's fetched and passes all filters.
+ */
+export async function* streamListInbox(
+  provider: ConnectionProvider,
+  options: ListInboxOptions = {}
+): AsyncGenerator<InboxThread> {
+  const limit = options.limit ?? 10;
+  const focusedOnly = options.focusedOnly ?? false;
+  const unreadOnly = options.unreadOnly ?? false;
+  const needsReply = options.needsReply ?? false;
+  const labels = options.labels ?? [];
+  const splitInbox = options.splitInbox;
+  const aiLabel = options.aiLabel;
+  const token = await provider.getToken();
+
+  // Resolve label IDs once if we need label filtering
+  let targetLabelIds: Set<string> | null = null;
+  if (labels.length > 0 && !token.isMicrosoft) {
+    const allLabels = await listLabelsDirect(token);
+    const nameToId = new Map<string, string>();
+    for (const label of allLabels) {
+      nameToId.set(label.name.toLowerCase(), label.id);
+    }
+    targetLabelIds = new Set<string>();
+    for (const name of labels) {
+      const id = nameToId.get(name.toLowerCase());
+      if (id) {
+        targetLabelIds.add(id);
+      } else {
+        targetLabelIds.add(name);
+      }
+    }
+  }
+
+  const hasClientFilters = needsReply || labels.length > 0;
+  const fetchLimit = hasClientFilters ? Math.max(limit * 3, 50) : limit;
+  const userEmail = token.email.toLowerCase();
+
+  let yielded = 0;
+  for await (const thread of streamListInboxDirect(token, fetchLimit, focusedOnly, unreadOnly, splitInbox, aiLabel)) {
+    if (yielded >= limit) break;
+
+    // Apply --label filter
+    if (targetLabelIds !== null) {
+      if (!thread.labelIds.some((id) => targetLabelIds!.has(id))) {
+        continue;
+      }
+    }
+
+    // Apply --needs-reply filter
+    if (needsReply) {
+      if (thread.messageCount > 1 && thread.from.email.toLowerCase() === userEmail) {
+        continue;
+      }
+    }
+
+    yield thread;
+    yielded++;
+  }
+}
+
+/**
+ * Stream search results as they arrive.
+ * Yields each thread as soon as it's fetched from the API.
+ */
+export async function* streamSearchInbox(
+  provider: ConnectionProvider,
+  options: SearchOptions
+): AsyncGenerator<InboxThread> {
+  const { query, limit = 10, includeDone = false } = options;
+  const token = await provider.getToken();
+
+  if (includeDone) {
+    yield* streamSearchGmailDirect(token, query, limit);
+  } else {
+    if (token.isMicrosoft) {
+      // MS Graph: bulk fetch then yield
+      const threads = await searchInbox(provider, options);
+      for (const thread of threads) {
+        yield thread;
+      }
+    } else {
+      const inboxQuery = `label:INBOX ${query}`;
+      yield* streamSearchGmailDirect(token, inboxQuery, limit);
     }
   }
 }
