@@ -33,14 +33,16 @@ superhuman account switch user@example.com
 ### Reading Email
 
 ```bash
-# List recent inbox emails
+# List recent inbox emails (★ marks starred/flagged threads)
 superhuman inbox
 superhuman inbox --limit 20 --json
+superhuman inbox --stream               # NDJSON: one thread per line as fetched
 
 # Search emails
 superhuman search "from:john subject:meeting"
 superhuman search "project update" --limit 20
 superhuman search "from:anthropic" --include-done    # Search all including archived
+superhuman search "meeting" --stream    # NDJSON streaming output
 
 # Read a specific thread (requires --account)
 superhuman read <thread-id> --account user@gmail.com
@@ -299,6 +301,7 @@ superhuman calendar free --date tomorrow --range 7
 | `--event <id>` | Event ID (for calendar update/delete) |
 | `--calendar <name>` | Calendar name or ID (default: primary) |
 | `--json` | Output as JSON |
+| `--stream` / `--ndjson` | Stream arrays as NDJSON (one JSON object per line, results appear as fetched); implies `--json` |
 | `--port <number>` | CDP port (default: 9400) |
 
 ## MCP Server

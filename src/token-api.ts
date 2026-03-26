@@ -966,7 +966,7 @@ async function searchMSGraphDirect(
   limit: number
 ): Promise<InboxThread[]> {
   // MS Graph uses $search for full-text search
-  const searchPath = `/me/messages?$search="${encodeURIComponent(query)}"&$top=${limit}&$select=id,conversationId,subject,from,receivedDateTime,bodyPreview`;
+  const searchPath = `/me/messages?$search="${encodeURIComponent(query)}"&$top=${limit}&$select=id,conversationId,subject,from,receivedDateTime,bodyPreview,flag`;
   const result = await msgraphFetch(token.accessToken, searchPath) as MSGraphMessagesResponse | null;
 
   if (!result || !result.value || result.value.length === 0) {
@@ -1004,7 +1004,9 @@ async function searchMSGraphDirect(
       },
       date: latestMessage.receivedDateTime,
       snippet: latestMessage.bodyPreview || "",
-      labelIds: [], // MS Graph doesn't have labelIds in the same way
+      labelIds: [
+        ...((latestMessage as any).flag?.flagStatus === "flagged" ? ["FLAGGED"] : []),
+      ],
       messageCount: messages.length,
     });
 
@@ -1245,7 +1247,7 @@ export async function listInboxDirect(
 ): Promise<InboxThread[]> {
   if (token.isMicrosoft) {
     // MS Graph: Get messages from Inbox folder
-    const fields = `id,conversationId,subject,from,receivedDateTime,bodyPreview,isRead,inferenceClassification,categories`;
+    const fields = `id,conversationId,subject,from,receivedDateTime,bodyPreview,isRead,inferenceClassification,categories,flag`;
     // MS Graph doesn't support $orderby with $filter on inferenceClassification (returns 400).
     // Use $filter only for isRead; apply inferenceClassification filter client-side after fetching.
     const wantClassification = focusedOnly ? "focused" : splitInbox === "important" ? "focused" : splitInbox === "other" ? "other" : null;
@@ -1304,6 +1306,7 @@ export async function listInboxDirect(
           ...(latest.isRead ? [] : ["UNREAD"]),
           ...(latest.inferenceClassification === "focused" ? ["FOCUSED"] : latest.inferenceClassification === "other" ? ["OTHER"] : []),
           ...(latest.categories || []).filter((c: string) => c.endsWith("(Superhuman/AI)")).map((c: string) => `AI/${c.replace(" (Superhuman/AI)", "")}`),
+          ...(latest.flag?.flagStatus === "flagged" ? ["FLAGGED"] : []),
         ],
         messageCount: msgs.length,
       });

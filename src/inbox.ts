@@ -180,7 +180,7 @@ export async function searchInbox(
     if (token.isMicrosoft) {
       // MS Graph: search within inbox folder
       // Note: MS Graph $search works across all messages, so we use folder filter
-      const path = `/me/mailFolders/Inbox/messages?$search="${encodeURIComponent(query)}"&$top=${limit}&$select=id,conversationId,subject,from,receivedDateTime,bodyPreview`;
+      const path = `/me/mailFolders/Inbox/messages?$search="${encodeURIComponent(query)}"&$top=${limit}&$select=id,conversationId,subject,from,receivedDateTime,bodyPreview,flag`;
       const response = await fetch(
         `https://graph.microsoft.com/v1.0${path}`,
         {
@@ -199,6 +199,7 @@ export async function searchInbox(
         from?: { emailAddress?: { address?: string; name?: string } };
         receivedDateTime: string;
         bodyPreview?: string;
+        flag?: { flagStatus: string };
       }
 
       const result = await response.json() as { value?: MSGraphMessage[] };
@@ -233,7 +234,9 @@ export async function searchInbox(
           },
           date: latest.receivedDateTime,
           snippet: latest.bodyPreview || "",
-          labelIds: [],
+          labelIds: [
+            ...(latest.flag?.flagStatus === "flagged" ? ["FLAGGED"] : []),
+          ],
           messageCount: messages.length,
         });
 

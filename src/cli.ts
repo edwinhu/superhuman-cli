@@ -72,7 +72,7 @@ import { GmailDraftProvider } from "./providers/gmail-draft-provider";
 import { OutlookDraftProvider } from "./providers/outlook-draft-provider";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.14.0";
+const VERSION = "0.15.0";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9222", 10);
 
 // ANSI colors
@@ -1651,15 +1651,17 @@ async function cmdInbox(options: CliOptions) {
     } else {
       // Print header
       console.log(
-        `${colors.dim}${"From".padEnd(25)} ${"Subject".padEnd(40)} ${"Date".padEnd(10)}${colors.reset}`
+        `${colors.dim}${"  From".padEnd(27)} ${"Subject".padEnd(40)} ${"Date".padEnd(10)}${colors.reset}`
       );
-      console.log(colors.dim + "─".repeat(78) + colors.reset);
+      console.log(colors.dim + "─".repeat(80) + colors.reset);
 
       for (const thread of threads) {
+        const starred = thread.labelIds.includes("STARRED") || thread.labelIds.includes("FLAGGED");
+        const star = starred ? `${colors.yellow}★${colors.reset} ` : "  ";
         const from = truncate(thread.from.name || thread.from.email, 24);
         const subject = truncate(thread.subject, 39);
         const date = formatDate(thread.date);
-        console.log(`${from.padEnd(25)} ${subject.padEnd(40)} ${date}`);
+        console.log(`${star}${from.padEnd(25)} ${subject.padEnd(40)} ${date}`);
       }
     }
   }
@@ -1697,15 +1699,17 @@ async function cmdSearch(options: CliOptions) {
     } else {
       info(`Found ${threads.length} result(s) for "${options.query}":\n`);
       console.log(
-        `${colors.dim}${"From".padEnd(25)} ${"Subject".padEnd(40)} ${"Date".padEnd(10)}${colors.reset}`
+        `${colors.dim}${"  From".padEnd(27)} ${"Subject".padEnd(40)} ${"Date".padEnd(10)}${colors.reset}`
       );
-      console.log(colors.dim + "─".repeat(78) + colors.reset);
+      console.log(colors.dim + "─".repeat(80) + colors.reset);
 
       for (const thread of threads) {
+        const starred = thread.labelIds.includes("STARRED") || thread.labelIds.includes("FLAGGED");
+        const star = starred ? `${colors.yellow}★${colors.reset} ` : "  ";
         const from = truncate(thread.from.name || thread.from.email, 24);
         const subject = truncate(thread.subject, 39);
         const date = formatDate(thread.date);
-        console.log(`${from.padEnd(25)} ${subject.padEnd(40)} ${date}`);
+        console.log(`${star}${from.padEnd(25)} ${subject.padEnd(40)} ${date}`);
       }
     }
   }
