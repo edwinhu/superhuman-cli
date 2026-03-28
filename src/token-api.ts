@@ -370,6 +370,11 @@ export function setTokenCacheForTest(email: string, token: TokenInfo): void {
   tokenCache.set(email, token);
 }
 
+// OAuth client IDs used by Superhuman for token refresh (public clients, no secret needed)
+const GOOGLE_OAUTH_CLIENT_ID =
+  "649336022844-5drlcmeo8tov7aabf8atnrbnsv3t1447.apps.googleusercontent.com";
+const MICROSOFT_OAUTH_CLIENT_ID = "d8404a9f-e18c-4e79-af6f-fecc33a50f8f";
+
 /**
  * Refresh OAuth access token using refresh token.
  *
@@ -390,6 +395,10 @@ export async function refreshAccessToken(
     ? "https://login.microsoftonline.com/common/oauth2/v2.0/token"
     : "https://oauth2.googleapis.com/token";
 
+  const clientId = token.isMicrosoft
+    ? MICROSOFT_OAUTH_CLIENT_ID
+    : GOOGLE_OAUTH_CLIENT_ID;
+
   try {
     const response = await fetch(endpoint, {
       method: "POST",
@@ -399,6 +408,7 @@ export async function refreshAccessToken(
       body: new URLSearchParams({
         grant_type: "refresh_token",
         refresh_token: token.refreshToken,
+        client_id: clientId,
       }),
     });
 

@@ -250,6 +250,7 @@ describe("refreshAccessToken", () => {
       expect(capturedUrl).toBe("https://oauth2.googleapis.com/token");
       expect(capturedBody).toContain("grant_type=refresh_token");
       expect(capturedBody).toContain("refresh_token=test-refresh-token");
+      expect(capturedBody).toContain("client_id=649336022844");
       expect(result?.accessToken).toBe("new-access-token");
       expect(result?.refreshToken).toBe("new-refresh-token");
     } finally {
@@ -260,9 +261,11 @@ describe("refreshAccessToken", () => {
   test("calls Microsoft OAuth endpoint for Microsoft accounts", async () => {
     const originalFetch = globalThis.fetch;
     let capturedUrl = "";
+    let capturedBody = "";
 
     globalThis.fetch = async (url: string | URL | Request, init?: RequestInit) => {
       capturedUrl = url.toString();
+      capturedBody = init?.body?.toString() || "";
       return new Response(JSON.stringify({
         access_token: "ms-new-access",
         expires_in: 3600,
@@ -281,6 +284,7 @@ describe("refreshAccessToken", () => {
       const result = await refreshAccessToken(token);
 
       expect(capturedUrl).toBe("https://login.microsoftonline.com/common/oauth2/v2.0/token");
+      expect(capturedBody).toContain("client_id=d8404a9f");
       expect(result?.accessToken).toBe("ms-new-access");
     } finally {
       globalThis.fetch = originalFetch;
