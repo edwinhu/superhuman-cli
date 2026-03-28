@@ -42,8 +42,8 @@ export async function archiveThread(
   if (provider instanceof McpConnectionProvider) {
     try {
       await provider.callTool("update_email", {
-        thread_ids: [threadId],
-        actions: { done: true },
+        thread_id: threadId,
+        action: "mark_done",
       });
       return { success: true };
     } catch (e: any) {
@@ -102,8 +102,8 @@ export async function deleteThread(
   if (provider instanceof McpConnectionProvider) {
     try {
       await provider.callTool("update_email", {
-        thread_ids: [threadId],
-        actions: { trash: true },
+        thread_id: threadId,
+        action: "trash",
       });
       return { success: true };
     } catch (e: any) {
