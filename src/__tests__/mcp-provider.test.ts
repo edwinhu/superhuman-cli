@@ -47,7 +47,12 @@ describe("mcp-provider", () => {
       expect(provider.getAccountInfo).toBeFunction();
       expect(provider.disconnect).toBeFunction();
       expect(provider.callTool).toBeFunction();
-      expect(provider.listTools).toBeFunction();
+      // High-level operation methods
+      expect(provider.listInbox).toBeFunction();
+      expect(provider.readThread).toBeFunction();
+      expect(provider.sendEmail).toBeFunction();
+      expect(provider.createDraft).toBeFunction();
+      expect(provider.replyToThread).toBeFunction();
     });
 
     test("getCurrentEmail returns provided email", async () => {

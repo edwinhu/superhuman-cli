@@ -6,6 +6,7 @@
  */
 
 import type { ConnectionProvider } from "./connection-provider";
+import { McpConnectionProvider } from "./mcp-provider";
 import {
   modifyThreadLabels,
   updateMessage,
@@ -31,6 +32,19 @@ export async function markAsRead(
   provider: ConnectionProvider,
   threadId: string
 ): Promise<ReadStatusResult> {
+  // MCP: update_email with Read action
+  if (provider instanceof McpConnectionProvider) {
+    try {
+      await provider.callTool("update_email", {
+        thread_ids: [threadId],
+        actions: { read: true },
+      });
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  }
+
   try {
     const token = await provider.getToken();
 
@@ -72,6 +86,19 @@ export async function markAsUnread(
   provider: ConnectionProvider,
   threadId: string
 ): Promise<ReadStatusResult> {
+  // MCP: update_email with Unread action
+  if (provider instanceof McpConnectionProvider) {
+    try {
+      await provider.callTool("update_email", {
+        thread_ids: [threadId],
+        actions: { read: false },
+      });
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  }
+
   try {
     const token = await provider.getToken();
 

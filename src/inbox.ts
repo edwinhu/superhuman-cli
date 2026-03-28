@@ -5,6 +5,7 @@
  */
 
 import type { ConnectionProvider } from "./connection-provider";
+import { McpConnectionProvider } from "./mcp-provider";
 import {
   searchGmailDirect,
   streamSearchGmailDirect,
@@ -69,6 +70,11 @@ export async function listInbox(
   provider: ConnectionProvider,
   options: ListInboxOptions = {}
 ): Promise<InboxThread[]> {
+  // Route through MCP if available
+  if (provider instanceof McpConnectionProvider) {
+    return provider.listInbox(options);
+  }
+
   const limit = options.limit ?? 10;
   const focusedOnly = options.focusedOnly ?? false;
   const unreadOnly = options.unreadOnly ?? false;
@@ -167,6 +173,11 @@ export async function searchInbox(
   provider: ConnectionProvider,
   options: SearchOptions
 ): Promise<InboxThread[]> {
+  // Route through MCP if available
+  if (provider instanceof McpConnectionProvider) {
+    return provider.searchInbox(options.query, options.limit);
+  }
+
   const { query, limit = 10, includeDone = false } = options;
   const token = await provider.getToken();
 
@@ -260,6 +271,15 @@ export async function* streamListInbox(
   provider: ConnectionProvider,
   options: ListInboxOptions = {}
 ): AsyncGenerator<InboxThread> {
+  // MCP: no streaming support, yield all at once
+  if (provider instanceof McpConnectionProvider) {
+    const threads = await provider.listInbox(options);
+    for (const thread of threads) {
+      yield thread;
+    }
+    return;
+  }
+
   const limit = options.limit ?? 10;
   const focusedOnly = options.focusedOnly ?? false;
   const unreadOnly = options.unreadOnly ?? false;
@@ -323,6 +343,15 @@ export async function* streamSearchInbox(
   provider: ConnectionProvider,
   options: SearchOptions
 ): AsyncGenerator<InboxThread> {
+  // MCP: no streaming support, yield all at once
+  if (provider instanceof McpConnectionProvider) {
+    const threads = await provider.searchInbox(options.query, options.limit);
+    for (const thread of threads) {
+      yield thread;
+    }
+    return;
+  }
+
   const { query, limit = 10, includeDone = false } = options;
   const token = await provider.getToken();
 

@@ -6,6 +6,7 @@
  */
 
 import type { ConnectionProvider } from "./connection-provider";
+import { McpConnectionProvider } from "./mcp-provider";
 import {
   modifyThreadLabels,
   updateMessage,
@@ -110,6 +111,19 @@ export async function addLabel(
   threadId: string,
   labelId: string
 ): Promise<LabelResult> {
+  // MCP: update_email with add_label action
+  if (provider instanceof McpConnectionProvider) {
+    try {
+      await provider.callTool("update_email", {
+        thread_ids: [threadId],
+        actions: { add_label: labelId },
+      });
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  }
+
   try {
     const token = await provider.getToken();
 
@@ -144,6 +158,19 @@ export async function removeLabel(
   threadId: string,
   labelId: string
 ): Promise<LabelResult> {
+  // MCP: update_email with remove_label action
+  if (provider instanceof McpConnectionProvider) {
+    try {
+      await provider.callTool("update_email", {
+        thread_ids: [threadId],
+        actions: { remove_label: labelId },
+      });
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  }
+
   try {
     const token = await provider.getToken();
 
@@ -173,6 +200,19 @@ export async function starThread(
   provider: ConnectionProvider,
   threadId: string
 ): Promise<LabelResult> {
+  // MCP: update_email with Star action
+  if (provider instanceof McpConnectionProvider) {
+    try {
+      await provider.callTool("update_email", {
+        thread_ids: [threadId],
+        actions: { star: true },
+      });
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  }
+
   try {
     const token = await provider.getToken();
 
@@ -213,6 +253,19 @@ export async function unstarThread(
   provider: ConnectionProvider,
   threadId: string
 ): Promise<LabelResult> {
+  // MCP: update_email with Unstar action
+  if (provider instanceof McpConnectionProvider) {
+    try {
+      await provider.callTool("update_email", {
+        thread_ids: [threadId],
+        actions: { star: false },
+      });
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  }
+
   try {
     const token = await provider.getToken();
 

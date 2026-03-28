@@ -6,6 +6,7 @@
  */
 
 import type { ConnectionProvider } from "./connection-provider";
+import { McpConnectionProvider } from "./mcp-provider";
 import {
   modifyThreadLabels,
   moveMessageToFolder,
@@ -37,6 +38,19 @@ export async function archiveThread(
   provider: ConnectionProvider,
   threadId: string
 ): Promise<ArchiveResult> {
+  // MCP: update_email with Done action
+  if (provider instanceof McpConnectionProvider) {
+    try {
+      await provider.callTool("update_email", {
+        thread_ids: [threadId],
+        actions: { done: true },
+      });
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  }
+
   try {
     const token = await provider.getToken();
 
@@ -84,6 +98,19 @@ export async function deleteThread(
   provider: ConnectionProvider,
   threadId: string
 ): Promise<DeleteResult> {
+  // MCP: update_email with Trash action
+  if (provider instanceof McpConnectionProvider) {
+    try {
+      await provider.callTool("update_email", {
+        thread_ids: [threadId],
+        actions: { trash: true },
+      });
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  }
+
   try {
     const token = await provider.getToken();
 

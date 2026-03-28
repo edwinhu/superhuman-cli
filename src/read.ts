@@ -5,6 +5,7 @@
  */
 
 import type { ConnectionProvider } from "./connection-provider";
+import { McpConnectionProvider } from "./mcp-provider";
 import { gmailFetch, msgraphFetch } from "./token-api";
 
 export interface ThreadMessage {
@@ -57,6 +58,11 @@ export async function readThread(
   provider: ConnectionProvider,
   threadId: string
 ): Promise<ThreadMessage[]> {
+  // Route through MCP if available
+  if (provider instanceof McpConnectionProvider) {
+    return provider.readThread(threadId);
+  }
+
   const token = await provider.getToken();
 
   if (token.isMicrosoft) {

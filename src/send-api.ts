@@ -9,6 +9,7 @@
  */
 
 import type { ConnectionProvider } from "./connection-provider";
+import { McpConnectionProvider } from "./mcp-provider";
 import type { TokenInfo } from "./token-api";
 import {
   sendEmailDirect,
@@ -360,6 +361,9 @@ export async function sendEmailViaProvider(
   provider: ConnectionProvider,
   options: SendEmailOptions
 ): Promise<SendResult> {
+  if (provider instanceof McpConnectionProvider) {
+    return provider.sendEmail(options);
+  }
   const token = await provider.getToken();
   return sendEmailWithToken(token, options);
 }
@@ -371,6 +375,9 @@ export async function createDraftViaProvider(
   provider: ConnectionProvider,
   options: SendEmailOptions
 ): Promise<DraftResult> {
+  if (provider instanceof McpConnectionProvider) {
+    return provider.createDraft(options);
+  }
   const token = await provider.getToken();
   return createDraftWithToken(token, options);
 }

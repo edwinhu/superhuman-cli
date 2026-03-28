@@ -6,6 +6,7 @@
  */
 
 import type { ConnectionProvider } from "./connection-provider";
+import { McpConnectionProvider } from "./mcp-provider";
 import { textToHtml } from "./superhuman-api.js";
 import {
   sendReplyWithToken,
@@ -61,6 +62,12 @@ async function replyImpl(
   send: boolean,
   replyAll: boolean
 ): Promise<ReplyResult> {
+  // Route through MCP if available
+  if (provider instanceof McpConnectionProvider) {
+    const htmlBody = textToHtml(body);
+    return provider.replyToThread(threadId, htmlBody, { replyAll, send });
+  }
+
   const token = await provider.getToken();
   const htmlBody = textToHtml(body);
   const opts = { replyAll, isHtml: true };
@@ -101,6 +108,36 @@ export async function forwardThread(
   body: string,
   send: boolean = false
 ): Promise<ReplyResult> {
+  // Route through MCP if available
+  if (provider instanceof McpConnectionProvider) {
+    const htmlBody = body ? textToHtml(body) : "";
+    // Read thread to build forward body
+    const messages = await provider.readThread(threadId);
+    const lastMessage = messages[messages.length - 1];
+    const subject = lastMessage?.subject?.startsWith("Fwd:")
+      ? lastMessage.subject
+      : `Fwd: ${lastMessage?.subject || "(no subject)"}`;
+
+    const forwardBody = htmlBody
+      ? `${htmlBody}<br><br>---------- Forwarded message ---------<br>${lastMessage?.snippet || ""}`
+      : `---------- Forwarded message ---------<br>${lastMessage?.snippet || ""}`;
+
+    if (send) {
+      return provider.sendEmail({
+        to: [toEmail],
+        subject,
+        body: forwardBody,
+        isHtml: true,
+      });
+    }
+    return provider.createDraft({
+      to: [toEmail],
+      subject,
+      body: forwardBody,
+      isHtml: true,
+    });
+  }
+
   const token = await provider.getToken();
 
   // Get thread info for headers (subject, from, to, date)

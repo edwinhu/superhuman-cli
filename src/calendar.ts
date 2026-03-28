@@ -6,6 +6,7 @@
  */
 
 import type { ConnectionProvider } from "./connection-provider";
+import { McpConnectionProvider, getMcpText } from "./mcp-provider";
 import {
   type CalendarEventDirect as CalendarEvent,
   type CreateCalendarEventInput as CreateEventInput,
@@ -62,6 +63,47 @@ export async function listEvents(
   provider: ConnectionProvider,
   options?: ListEventsOptions
 ): Promise<CalendarEvent[]> {
+  // MCP: use query_email_and_calendar for calendar listing
+  if (provider instanceof McpConnectionProvider) {
+    try {
+      const toISOString = (v: Date | string): string =>
+        typeof v === "string" ? v : v.toISOString();
+
+      const args: Record<string, unknown> = {
+        query: "calendar events",
+      };
+      if (options?.timeMin) args.start_date = toISOString(options.timeMin);
+      if (options?.timeMax) args.end_date = toISOString(options.timeMax);
+      if (options?.limit) args.limit = options.limit;
+
+      const result = await provider.callTool("query_email_and_calendar", args);
+      const text = getMcpText(result);
+      // Parse MCP response into CalendarEvent format
+      try {
+        const json = JSON.parse(text);
+        const events = Array.isArray(json) ? json : (json.events || []);
+        return events.map((e: any) => ({
+          id: e.id || e.event_id || "",
+          summary: e.summary || e.title || e.subject || "",
+          description: e.description || "",
+          start: e.start || e.start_time || "",
+          end: e.end || e.end_time || "",
+          location: e.location || "",
+          attendees: e.attendees || [],
+          organizer: e.organizer || "",
+          isAllDay: e.is_all_day || e.allDay || false,
+          status: e.status || "",
+          calendarId: e.calendar_id || "",
+        }));
+      } catch {
+        return [];
+      }
+    } catch (e: any) {
+      console.error("listEvents (MCP) error:", e.message);
+      return [];
+    }
+  }
+
   try {
     const token = await provider.getToken();
 
@@ -91,6 +133,31 @@ export async function createEvent(
   provider: ConnectionProvider,
   event: CreateEventInput
 ): Promise<CalendarResult> {
+  // MCP: use create_or_update_event
+  if (provider instanceof McpConnectionProvider) {
+    try {
+      const args: Record<string, unknown> = {
+        title: event.summary,
+        start_time: event.start,
+        end_time: event.end,
+      };
+      if (event.description) args.description = event.description;
+      if (event.location) args.location = event.location;
+      if (event.attendees?.length) args.attendees = event.attendees;
+
+      const result = await provider.callTool("create_or_update_event", args);
+      const text = getMcpText(result);
+      try {
+        const json = JSON.parse(text);
+        return { success: true, eventId: json.event_id || json.id };
+      } catch {
+        return { success: !result.isError };
+      }
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  }
+
   try {
     const token = await provider.getToken();
     const result = await createCalendarEventDirect(token, event);
@@ -118,6 +185,11 @@ export async function deleteEvent(
   eventId: string,
   calendarId?: string
 ): Promise<CalendarResult> {
+  // MCP: use delete_calendar_event (not in the 10 tools list — but we can
+  // try create_or_update_event with a cancel/delete action)
+  // Note: The MCP server doesn't expose a direct delete — this falls through
+  // to the direct API path. MCP users would need CDP fallback for this.
+
   try {
     const token = await provider.getToken();
 
@@ -182,6 +254,39 @@ export async function getFreeBusy(
   provider: ConnectionProvider,
   options: FreeBusyOptions
 ): Promise<FreeBusyResult> {
+  // MCP: use get_availability_calendar
+  if (provider instanceof McpConnectionProvider) {
+    try {
+      const toISOString = (v: Date | string): string =>
+        typeof v === "string" ? v : v.toISOString();
+
+      const result = await provider.callTool("get_availability_calendar", {
+        start_time: toISOString(options.timeMin),
+        end_time: toISOString(options.timeMax),
+        attendees: options.calendarIds || [],
+      });
+      const text = getMcpText(result);
+      try {
+        const json = JSON.parse(text);
+        return {
+          busy: (json.busy || []).map((s: any) => ({
+            start: s.start || s.start_time || "",
+            end: s.end || s.end_time || "",
+          })),
+          free: (json.free || json.available || []).map((s: any) => ({
+            start: s.start || s.start_time || "",
+            end: s.end || s.end_time || "",
+          })),
+        };
+      } catch {
+        return { busy: [], free: [] };
+      }
+    } catch (e: any) {
+      console.error("getFreeBusy (MCP) error:", e.message);
+      return { busy: [], free: [] };
+    }
+  }
+
   try {
     const token = await provider.getToken();
 
