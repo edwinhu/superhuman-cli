@@ -113,7 +113,7 @@ export const MCP_SUPPORTED_TOOLS = [
   "list_email",
   "get_email_thread",
   "get_read_statuses",
-  "create_or_update_draft",
+  "draft_email",
   "send_email",
   "update_email",
   "create_or_update_event",
@@ -427,8 +427,7 @@ export class McpConnectionProvider implements ConnectionProvider {
    */
   async searchInbox(query: string, limit: number = 10): Promise<InboxThread[]> {
     const result = await this.callTool("query_email_and_calendar", {
-      query,
-      limit,
+      question: query,
     });
     return parseMcpInboxThreads(result).slice(0, limit);
   }
@@ -448,13 +447,17 @@ export class McpConnectionProvider implements ConnectionProvider {
    */
   async sendEmail(options: SendEmailOptions): Promise<SendResult> {
     try {
+      // MCP send_email expects to/cc/bcc as [{email, name}] objects
+      const toRecipients = (emails: string[]) =>
+        emails.map((e) => ({ email: e }));
+
       const args: Record<string, unknown> = {
-        to: options.to,
+        to: toRecipients(options.to),
         subject: options.subject,
-        body: options.body,
+        body: options.body || "",
       };
-      if (options.cc?.length) args.cc = options.cc;
-      if (options.bcc?.length) args.bcc = options.bcc;
+      if (options.cc?.length) args.cc = toRecipients(options.cc);
+      if (options.bcc?.length) args.bcc = toRecipients(options.bcc);
       if (options.inReplyTo) args.in_reply_to = options.inReplyTo;
       if (options.threadId) args.thread_id = options.threadId;
 
@@ -473,21 +476,21 @@ export class McpConnectionProvider implements ConnectionProvider {
   }
 
   /**
-   * Create or update a draft via MCP create_or_update_draft tool.
+   * Create or update a draft via MCP draft_email tool.
+   *
+   * Note: draft_email is AI-powered and takes `instructions` rather than
+   * a literal body. We pass the body as instructions for the AI to compose.
    */
   async createDraft(options: SendEmailOptions): Promise<DraftResult> {
     try {
       const args: Record<string, unknown> = {
-        to: options.to,
-        subject: options.subject,
-        body: options.body,
+        instructions: options.body || options.subject || "Draft email",
       };
-      if (options.cc?.length) args.cc = options.cc;
-      if (options.bcc?.length) args.bcc = options.bcc;
+      if (options.to?.length) args.to = options.to;
+      if (options.subject) args.subject = options.subject;
       if (options.threadId) args.thread_id = options.threadId;
-      if (options.inReplyTo) args.in_reply_to = options.inReplyTo;
 
-      const result = await this.callTool("create_or_update_draft", args);
+      const result = await this.callTool("draft_email", args);
       const text = getMcpText(result);
       const json = tryParseJson(text);
 
@@ -535,6 +538,7 @@ export class McpConnectionProvider implements ConnectionProvider {
         to: filteredTo,
         subject,
         body,
+        isHtml: true,
         threadId,
         inReplyTo: lastMessage.id,
       });
@@ -547,6 +551,26 @@ export class McpConnectionProvider implements ConnectionProvider {
       threadId,
       inReplyTo: lastMessage.id,
     });
+  }
+
+  /**
+   * Send an existing draft by ID.
+   *
+   * MCP send_email requires full content (to, subject, body) — not supported
+   * for sending by draft ID alone. Callers should use the draft_id/draft_thread_id
+   * fields if the draft was created via MCP draft_email.
+   */
+  async sendDraftById(
+    draftId: string,
+    draftThreadId?: string
+  ): Promise<SendResult> {
+    // MCP send_email can reference a draft via draft_id + draft_thread_id
+    // but still requires to, subject, body as required fields.
+    // Without knowing the draft content, we cannot send via MCP alone.
+    return {
+      success: false,
+      error: "Sending drafts by ID is not supported via MCP. Use the Gmail/Microsoft API path instead.",
+    };
   }
 
   // ========================================================================

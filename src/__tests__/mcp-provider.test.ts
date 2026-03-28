@@ -94,7 +94,7 @@ describe("mcp-provider", () => {
       expect(isMcpSupported("get_email_thread")).toBe(true);
       expect(isMcpSupported("send_email")).toBe(true);
       expect(isMcpSupported("query_email_and_calendar")).toBe(true);
-      expect(isMcpSupported("create_or_update_draft")).toBe(true);
+      expect(isMcpSupported("draft_email")).toBe(true);
       expect(isMcpSupported("create_or_update_event")).toBe(true);
     });
 
