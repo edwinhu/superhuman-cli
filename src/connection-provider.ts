@@ -15,6 +15,7 @@ import {
   hasValidCachedTokens,
 } from "./token-api";
 import { listAccounts } from "./accounts";
+import { McpConnectionProvider, hasMcpTokens } from "./mcp-provider";
 
 /**
  * Account type detection result (matches send-api.ts AccountInfo)
@@ -139,8 +140,9 @@ export class CDPConnectionProvider implements ConnectionProvider {
  * Priority:
  * 1. If --account specified and token is cached -> CachedTokenProvider
  * 2. If any cached tokens exist -> CachedTokenProvider (first account)
- * 3. If CDP available -> CDPConnectionProvider
- * 4. null (caller must handle)
+ * 3. If MCP tokens available -> McpConnectionProvider
+ * 4. If CDP available -> CDPConnectionProvider
+ * 5. null (caller must handle)
  *
  * @param options - Object with optional `account` and `port` fields
  * @returns ConnectionProvider or null if no tokens and no CDP
@@ -157,8 +159,7 @@ export async function resolveProvider(
     if (token) {
       return new CachedTokenProvider(options.account);
     }
-    // Explicit --account not found — don't fall through to other accounts
-    return null;
+    // Fall through to MCP if explicit account not in cached tokens
   }
 
   // If any cached tokens are valid, use the first one
@@ -169,7 +170,15 @@ export async function resolveProvider(
     }
   }
 
+  // Try MCP provider if no cached tokens are available
+  if (await hasMcpTokens()) {
+    return new McpConnectionProvider(options.account);
+  }
+
   // No cached tokens — would need CDP, but we don't connect here
   // (caller can fall back to CDP themselves if needed)
   return null;
 }
+
+// Re-export MCP provider for direct use
+export { McpConnectionProvider } from "./mcp-provider";
