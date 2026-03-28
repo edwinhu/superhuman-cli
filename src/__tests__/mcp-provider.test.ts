@@ -85,12 +85,12 @@ describe("mcp-provider", () => {
     test("recognizes supported MCP tools", async () => {
       const { isMcpSupported } = await import("../mcp-provider");
 
-      expect(isMcpSupported("list_emails")).toBe(true);
-      expect(isMcpSupported("get_email")).toBe(true);
+      expect(isMcpSupported("list_email")).toBe(true);
+      expect(isMcpSupported("get_email_thread")).toBe(true);
       expect(isMcpSupported("send_email")).toBe(true);
-      expect(isMcpSupported("search_emails")).toBe(true);
-      expect(isMcpSupported("create_draft")).toBe(true);
-      expect(isMcpSupported("list_calendar_events")).toBe(true);
+      expect(isMcpSupported("query_email_and_calendar")).toBe(true);
+      expect(isMcpSupported("create_or_update_draft")).toBe(true);
+      expect(isMcpSupported("create_or_update_event")).toBe(true);
     });
 
     test("rejects unsupported operations", async () => {

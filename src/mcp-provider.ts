@@ -149,18 +149,18 @@ async function listMcpTools(
   return result.result?.tools || [];
 }
 
-// MCP tool names that map to our operations
+// Actual MCP tool names from Superhuman's server
 export const MCP_SUPPORTED_TOOLS = [
-  "list_emails",
-  "get_email",
-  "search_emails",
+  "query_email_and_calendar",
+  "list_email",
+  "get_email_thread",
+  "get_read_statuses",
+  "create_or_update_draft",
   "send_email",
-  "create_draft",
-  "get_draft",
-  "list_calendar_events",
-  "get_calendar_event",
-  "create_calendar_event",
-  "delete_calendar_event",
+  "update_email",
+  "create_or_update_event",
+  "get_availability_calendar",
+  "update_preferences_email_and_calendar",
 ] as const;
 
 export type McpToolName = (typeof MCP_SUPPORTED_TOOLS)[number];
