@@ -69,14 +69,15 @@ export async function listEvents(
       const toISOString = (v: Date | string): string =>
         typeof v === "string" ? v : v.toISOString();
 
-      const args: Record<string, unknown> = {
-        query: "calendar events",
-      };
-      if (options?.timeMin) args.start_date = toISOString(options.timeMin);
-      if (options?.timeMax) args.end_date = toISOString(options.timeMax);
-      if (options?.limit) args.limit = options.limit;
+      // Build a natural language question for the MCP tool
+      const parts = ["List my calendar events"];
+      if (options?.timeMin) parts.push(`from ${toISOString(options.timeMin)}`);
+      if (options?.timeMax) parts.push(`until ${toISOString(options.timeMax)}`);
+      if (options?.limit) parts.push(`(limit ${options.limit})`);
 
-      const result = await provider.callTool("query_email_and_calendar", args);
+      const result = await provider.callTool("query_email_and_calendar", {
+        question: parts.join(" "),
+      });
       const text = getMcpText(result);
       // Parse MCP response into CalendarEvent format
       try {
@@ -137,9 +138,9 @@ export async function createEvent(
   if (provider instanceof McpConnectionProvider) {
     try {
       const args: Record<string, unknown> = {
-        title: event.summary,
-        start_time: event.start,
-        end_time: event.end,
+        summary: event.summary,
+        start: event.start,
+        end: event.end,
       };
       if (event.description) args.description = event.description;
       if (event.location) args.location = event.location;
@@ -220,6 +221,31 @@ export async function updateEvent(
   updates: UpdateEventInput,
   calendarId?: string
 ): Promise<CalendarResult> {
+  // MCP: use create_or_update_event with event_id
+  if (provider instanceof McpConnectionProvider) {
+    try {
+      const args: Record<string, unknown> = { event_id: eventId };
+      if (updates.summary) args.summary = updates.summary;
+      if (updates.start) args.start = updates.start;
+      if (updates.end) args.end = updates.end;
+      if (updates.description) args.description = updates.description;
+      if (updates.location) args.location = updates.location;
+      if (updates.attendees?.length) args.attendees = updates.attendees;
+      if (calendarId) args.calendar_id = calendarId;
+
+      const result = await provider.callTool("create_or_update_event", args);
+      const text = getMcpText(result);
+      try {
+        const json = JSON.parse(text);
+        return { success: true, eventId: json.event_id || json.id || eventId };
+      } catch {
+        return { success: !result.isError, eventId };
+      }
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  }
+
   try {
     const token = await provider.getToken();
     const success = await updateCalendarEventDirect(token, eventId, updates, calendarId);
@@ -261,9 +287,7 @@ export async function getFreeBusy(
         typeof v === "string" ? v : v.toISOString();
 
       const result = await provider.callTool("get_availability_calendar", {
-        start_time: toISOString(options.timeMin),
-        end_time: toISOString(options.timeMax),
-        attendees: options.calendarIds || [],
+        participants: options.calendarIds || [],
       });
       const text = getMcpText(result);
       try {
