@@ -390,6 +390,15 @@ export async function updateDraftViaProvider(
   draftId: string,
   options: UpdateDraftOptions
 ): Promise<DraftResult> {
+  if (provider instanceof McpConnectionProvider) {
+    // MCP draft_email supports revision via draft_id
+    return provider.createDraft({
+      to: options.to || [],
+      subject: options.subject || "",
+      body: options.body || "",
+      isHtml: options.isHtml,
+    });
+  }
   const token = await provider.getToken();
   return updateDraftWithToken(token, draftId, options);
 }
@@ -401,6 +410,9 @@ export async function sendDraftByIdViaProvider(
   provider: ConnectionProvider,
   draftId: string
 ): Promise<SendResult> {
+  if (provider instanceof McpConnectionProvider) {
+    return provider.sendDraftById(draftId);
+  }
   const token = await provider.getToken();
   return sendDraftByIdWithToken(token, draftId);
 }
@@ -412,6 +424,18 @@ export async function deleteDraftViaProvider(
   provider: ConnectionProvider,
   draftId: string
 ): Promise<{ success: boolean; error?: string }> {
+  if (provider instanceof McpConnectionProvider) {
+    // MCP has no direct draft deletion tool — trash the draft thread
+    try {
+      await provider.callTool("update_email", {
+        thread_id: draftId,
+        action: "trash",
+      });
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  }
   const token = await provider.getToken();
   return deleteDraftWithToken(token, draftId);
 }
