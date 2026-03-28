@@ -115,8 +115,9 @@ export async function addLabel(
   if (provider instanceof McpConnectionProvider) {
     try {
       await provider.callTool("update_email", {
-        thread_ids: [threadId],
-        actions: { add_label: labelId },
+        thread_id: threadId,
+        action: "add_label",
+        label: labelId,
       });
       return { success: true };
     } catch (e: any) {
@@ -162,8 +163,9 @@ export async function removeLabel(
   if (provider instanceof McpConnectionProvider) {
     try {
       await provider.callTool("update_email", {
-        thread_ids: [threadId],
-        actions: { remove_label: labelId },
+        thread_id: threadId,
+        action: "remove_label",
+        label: labelId,
       });
       return { success: true };
     } catch (e: any) {
@@ -204,8 +206,8 @@ export async function starThread(
   if (provider instanceof McpConnectionProvider) {
     try {
       await provider.callTool("update_email", {
-        thread_ids: [threadId],
-        actions: { star: true },
+        thread_id: threadId,
+        action: "star",
       });
       return { success: true };
     } catch (e: any) {
@@ -257,8 +259,8 @@ export async function unstarThread(
   if (provider instanceof McpConnectionProvider) {
     try {
       await provider.callTool("update_email", {
-        thread_ids: [threadId],
-        actions: { star: false },
+        thread_id: threadId,
+        action: "unstar",
       });
       return { success: true };
     } catch (e: any) {
