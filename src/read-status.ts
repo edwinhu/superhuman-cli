@@ -36,8 +36,8 @@ export async function markAsRead(
   if (provider instanceof McpConnectionProvider) {
     try {
       await provider.callTool("update_email", {
-        thread_ids: [threadId],
-        actions: { read: true },
+        thread_id: threadId,
+        action: "mark_read",
       });
       return { success: true };
     } catch (e: any) {
@@ -90,8 +90,8 @@ export async function markAsUnread(
   if (provider instanceof McpConnectionProvider) {
     try {
       await provider.callTool("update_email", {
-        thread_ids: [threadId],
-        actions: { read: false },
+        thread_id: threadId,
+        action: "mark_unread",
       });
       return { success: true };
     } catch (e: any) {
