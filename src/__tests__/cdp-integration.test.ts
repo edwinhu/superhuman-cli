@@ -21,7 +21,7 @@ let skip = false;
 
 beforeAll(async () => {
   try {
-    conn = await connectToSuperhuman(CDP_PORT);
+    conn = await connectToSuperhuman(CDP_PORT, false); // don't auto-launch in tests
     if (!conn) skip = true;
   } catch {
     skip = true;

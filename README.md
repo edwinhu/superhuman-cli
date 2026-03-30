@@ -35,14 +35,14 @@ superhuman account switch user@example.com
 ```bash
 # List recent inbox emails (★ marks starred/flagged threads)
 superhuman inbox
-superhuman inbox --limit 20 --json
-superhuman inbox --stream               # NDJSON: one thread per line as fetched
+superhuman inbox --limit 20
+superhuman inbox --limit 20 --json      # NDJSON: one thread per line as fetched
 
 # Search emails
 superhuman search "from:john subject:meeting"
 superhuman search "project update" --limit 20
 superhuman search "from:anthropic" --include-done    # Search all including archived
-superhuman search "meeting" --stream    # NDJSON streaming output
+superhuman search "meeting" --json      # NDJSON streaming output
 
 # Read a specific thread (requires --account)
 superhuman read <thread-id> --account user@gmail.com
@@ -300,8 +300,8 @@ superhuman calendar free --date tomorrow --range 7
 | `--title <text>` | Event title (for calendar create/update) |
 | `--event <id>` | Event ID (for calendar update/delete) |
 | `--calendar <name>` | Calendar name or ID (default: primary) |
-| `--json` | Output as JSON |
-| `--stream` / `--ndjson` | Stream arrays as NDJSON (one JSON object per line, results appear as fetched); implies `--json` |
+| `--json` | Output as NDJSON: arrays print one object per line; single objects are pretty-printed |
+| `--stream` / `--ndjson` | Alias for `--json` |
 | `--port <number>` | CDP port (default: 9400) |
 
 ## MCP Server
@@ -388,15 +388,24 @@ Most operations use **direct Gmail API and Microsoft Graph API** calls with cach
 
 OAuth tokens (including refresh tokens) are extracted from Superhuman and cached to disk. When tokens expire, they are automatically refreshed via OAuth endpoints without requiring CDP connection.
 
-### CDP (Secondary)
+### MCP Provider (Alternative)
+
+When no cached OAuth tokens are available, the CLI falls back to Superhuman's official MCP server (`https://mcp.mail.superhuman.com/mcp`) using WorkOS tokens stored by `mcp-remote`. This path supports:
+
+- Inbox listing, email search, thread reading
+- Sending emails, creating drafts, updating read status
+- Labels, archive, calendar operations
+
+Run `npx @superhuman/mcp-mail` once to authenticate the MCP path. Note: the MCP provider uses WorkOS tokens and cannot call Gmail/MS Graph APIs directly.
+
+### CDP (Last Resort)
 
 Chrome DevTools Protocol is only needed for:
 
 - `account auth` — One-time token extraction from `window.GoogleAccount` (also stores AI user prefix)
 - `status` — Check Superhuman connection
-- `search` / `inbox` (when no cached tokens) — Fallback via Superhuman's portal API
 
-All other operations (read, reply, forward, draft, archive, delete, labels, star, snooze, attachments, calendar, contacts, snippets) use direct API with cached tokens.
+All other operations use direct API with cached tokens, or the MCP provider as fallback.
 
 ### Benefits
 

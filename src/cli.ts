@@ -72,7 +72,7 @@ import { GmailDraftProvider } from "./providers/gmail-draft-provider";
 import { OutlookDraftProvider } from "./providers/outlook-draft-provider";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.15.0";
+const VERSION = "0.17.0";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9222", 10);
 
 // ANSI colors
@@ -191,9 +191,9 @@ ${colors.bold}OPTIONS${colors.reset}
   --limit <number>   Number of results (default: 10, for inbox/search)
   --include-done     Search all emails including archived/done (uses Gmail API directly)
   --context <number> Number of messages to show full body (default: all, for read)
-  --json             Output as JSON
-  --stream           Output arrays as NDJSON (one JSON object per line); implies --json
-  --ndjson           Alias for --stream
+  --json             Output as NDJSON (arrays: one object per line; objects: pretty-printed)
+  --stream           Alias for --json
+  --ndjson           Alias for --json
   --date <date>      Date for calendar (YYYY-MM-DD or "today", "tomorrow")
   --calendar <name>  Calendar name or ID (default: primary)
   --range <days>     Days to show for calendar (default: 1)
@@ -546,6 +546,7 @@ function parseArgs(args: string[]): CliOptions {
           break;
         case "json":
           options.json = true;
+          options.stream = true; // --json always outputs NDJSON for arrays
           i += 1;
           break;
         case "send":
@@ -958,7 +959,7 @@ async function cmdSnippets(options: CliOptions) {
   const snippets = await listSnippets(userInfo);
 
   if (options.json) {
-    printJson(snippets, options.stream);
+    printJson(snippets);
   } else {
     if (snippets.length === 0) {
       info("No snippets found");
@@ -1502,7 +1503,7 @@ async function cmdListDrafts(options: CliOptions) {
     }
 
     if (options.json) {
-      printJson(drafts, options.stream);
+      printJson(drafts);
       return;
     }
 
@@ -1610,11 +1611,11 @@ function truncate(str: string | null | undefined, maxLen: number): string {
 }
 
 /**
- * Output data as JSON. When stream=true and data is an array, outputs one
- * JSON object per line (NDJSON). Otherwise outputs pretty-printed JSON.
+ * Output data as JSON. Arrays are output as NDJSON (one object per line);
+ * single objects are pretty-printed.
  */
-function printJson(data: unknown, stream: boolean): void {
-  if (stream && Array.isArray(data)) {
+function printJson(data: unknown): void {
+  if (Array.isArray(data)) {
     for (const item of data) {
       console.log(JSON.stringify(item));
     }
@@ -1636,14 +1637,11 @@ async function cmdInbox(options: CliOptions) {
     aiLabel: options.aiLabel || undefined,
   };
 
-  if (options.stream) {
-    // Stream mode: yield each thread as NDJSON as soon as it's fetched
+  if (options.json) {
+    // NDJSON streaming: yield each thread as it's fetched
     for await (const thread of streamListInbox(provider, inboxOptions)) {
       console.log(JSON.stringify(thread));
     }
-  } else if (options.json) {
-    const threads = await listInbox(provider, inboxOptions);
-    printJson(threads, false);
   } else {
     const threads = await listInbox(provider, inboxOptions);
     if (threads.length === 0) {
@@ -1684,14 +1682,11 @@ async function cmdSearch(options: CliOptions) {
     includeDone: options.includeDone,
   };
 
-  if (options.stream) {
-    // Stream mode: yield each result as NDJSON as soon as it's fetched
+  if (options.json) {
+    // NDJSON streaming: yield each result as it's fetched
     for await (const thread of streamSearchInbox(provider, searchOptions)) {
       console.log(JSON.stringify(thread));
     }
-  } else if (options.json) {
-    const threads = await searchInbox(provider, searchOptions);
-    printJson(threads, false);
   } else {
     const threads = await searchInbox(provider, searchOptions);
     if (threads.length === 0) {
@@ -1744,7 +1739,7 @@ async function cmdRead(options: CliOptions) {
   if (options.json) {
     // Inject threadId into each message so JSON/NDJSON consumers can reference it
     const withThreadId = messages.map((m) => ({ ...m, threadId: options.threadId }));
-    printJson(withThreadId, options.stream);
+    printJson(withThreadId);
     return;
   }
 
@@ -2393,7 +2388,7 @@ async function cmdLabels(options: CliOptions) {
   const labels = await listLabels(provider);
 
   if (options.json) {
-    printJson(labels, options.stream);
+    printJson(labels);
   } else {
     if (labels.length === 0) {
       info("No labels found");
@@ -2422,7 +2417,7 @@ async function cmdGetLabels(options: CliOptions) {
   const labels = await getThreadLabels(provider, options.threadId);
 
   if (options.json) {
-    printJson(labels, options.stream);
+    printJson(labels);
   } else {
     if (labels.length === 0) {
       info("No labels on this thread");
@@ -2577,7 +2572,7 @@ async function cmdStarred(options: CliOptions) {
   const threads = await listStarred(provider, options.limit);
 
   if (options.json) {
-    printJson(threads, options.stream);
+    printJson(threads);
   } else {
     if (threads.length === 0) {
       info("No starred threads");
@@ -2678,7 +2673,7 @@ async function cmdSnoozed(options: CliOptions) {
   const threads = await listSnoozedViaProvider(provider, options.limit);
 
   if (options.json) {
-    printJson(threads, options.stream);
+    printJson(threads);
   } else {
     if (threads.length === 0) {
       info("No snoozed threads");
@@ -2714,7 +2709,7 @@ async function cmdAttachments(options: CliOptions) {
   const attachments = await listAttachments(provider, options.threadId);
 
   if (options.json) {
-    printJson(attachments, options.stream);
+    printJson(attachments);
   } else {
     if (attachments.length === 0) {
       info("No attachments in this thread");
@@ -2884,7 +2879,7 @@ async function cmdAccounts(options: CliOptions) {
   const accounts = await listAccounts(conn);
 
   if (options.json) {
-    printJson(accounts, options.stream);
+    printJson(accounts);
   } else {
     if (accounts.length === 0) {
       info("No linked accounts found");
@@ -3226,7 +3221,7 @@ async function cmdCalendar(options: CliOptions) {
   });
 
   if (options.json) {
-    printJson(allEvents, options.stream);
+    printJson(allEvents);
   } else {
     if (allEvents.length === 0) {
       info("No events found for the specified date range");
@@ -3451,7 +3446,7 @@ async function cmdContacts(options: CliOptions) {
     }
 
     if (options.json) {
-      printJson(contacts, options.stream);
+      printJson(contacts);
     } else {
       if (contacts.length === 0) {
         info("No contacts found");
