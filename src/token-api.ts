@@ -738,7 +738,7 @@ export async function superhumanFetch(
     headers: {
       ...options?.headers,
       Authorization: `Bearer ${token}`,
-      "Content-Type": "application/json",
+      "Content-Type": "text/plain;charset=UTF-8",
     },
   });
 
@@ -1085,7 +1085,7 @@ export async function askAISearch(
     method: "POST",
     headers: {
       Authorization: `Bearer ${superhumanToken}`,
-      "Content-Type": "application/json",
+      "Content-Type": "text/plain;charset=UTF-8",
     },
     body: JSON.stringify(payload),
   });

@@ -123,19 +123,58 @@ function buildGetThreadsFilter(options: ListInboxOptions): { listId: string } {
 // Superhuman backend path
 // ---------------------------------------------------------------------------
 
+/**
+ * Parse a portal listAsync result (array of thread objects) into InboxThread[].
+ */
+function parsePortalListResult(result: any): InboxThread[] {
+  if (!Array.isArray(result)) return [];
+  return result.map((item: any) => ({
+    id: item.id || item.threadId || "",
+    subject: item.subject || "",
+    from: parseFrom(item.from || ""),
+    date: item.date || "",
+    snippet: item.snippet || "",
+    labelIds: item.labelIds || [],
+    messageCount: item.messageCount || 1,
+  }));
+}
+
 async function listInboxSuperhuman(
   provider: SuperhumanProvider,
   options: ListInboxOptions = {}
 ): Promise<InboxThread[]> {
   const limit = options.limit ?? 10;
   const filter = buildGetThreadsFilter(options);
+  const isInboxRequest =
+    filter.listId === "INBOX" ||
+    filter.listId === "SH_IMPORTANT" ||
+    filter.listId === "SH_OTHER";
 
-  const data = await provider.backendFetch("/v3/userdata.getThreads", {
-    method: "POST",
-    body: JSON.stringify({ filter, offset: 0, limit }),
-  });
+  let threads: InboxThread[];
 
-  let threads = parseGetThreadsResponse(data);
+  if (isInboxRequest) {
+    // Inbox listing requires portal RPC (the backend getThreads API
+    // does not support inbox/listId filters).
+    if (!provider.hasPortal()) {
+      throw new Error(
+        "Inbox listing requires running Superhuman app (portal RPC). " +
+          "Run 'superhuman account auth' with the app open."
+      );
+    }
+    const result = await provider.portalInvoke(
+      "threadInternal",
+      "listAsync",
+      [filter.listId, { limit, query: "" }]
+    );
+    threads = parsePortalListResult(result);
+  } else {
+    // Non-inbox data (reminders, snippets, etc.) use the backend API
+    const data = await provider.backendFetch("/v3/userdata.getThreads", {
+      method: "POST",
+      body: JSON.stringify({ filter, offset: 0, limit }),
+    });
+    threads = parseGetThreadsResponse(data);
+  }
 
   // Client-side filters
   if (options.unreadOnly) {

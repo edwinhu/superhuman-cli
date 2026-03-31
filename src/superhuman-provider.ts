@@ -58,6 +58,8 @@ export class SuperhumanProvider implements ConnectionProvider {
       email: this.tokenInfo.email,
       expires,
       isMicrosoft: false,
+      idToken: this.tokenInfo.token,
+      idTokenExpires: expires,
       superhumanToken: {
         token: this.tokenInfo.token,
         expires,
@@ -146,7 +148,7 @@ export class SuperhumanProvider implements ConnectionProvider {
       headers: {
         ...options?.headers,
         Authorization: `Bearer ${this.tokenInfo.token}`,
-        "Content-Type": "application/json",
+        "Content-Type": "text/plain;charset=UTF-8",
       },
     });
 
@@ -155,8 +157,9 @@ export class SuperhumanProvider implements ConnectionProvider {
     }
 
     if (!response.ok) {
+      const errorBody = await response.text();
       throw new Error(
-        `Superhuman API error: ${response.status} ${response.statusText}`
+        `Superhuman API error: ${response.status} ${response.statusText} — ${errorBody}`
       );
     }
 
