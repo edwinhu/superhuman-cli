@@ -24,6 +24,13 @@ const MCP_SERVER_URL = "https://mcp.mail.superhuman.com/mcp";
 const MCP_AUTH_BASE = join(process.env.HOME || "~", ".mcp-auth");
 const SERVER_URL_HASH = createHash("md5").update(MCP_SERVER_URL).digest("hex");
 
+/**
+ * Token relay URL. Containers set TOKEN_RELAY_URL to fetch fresh tokens
+ * from the host's relay server instead of refreshing directly.
+ * Default: http://host.docker.internal:9401 (Docker convention)
+ */
+const TOKEN_RELAY_URL = process.env.TOKEN_RELAY_URL || null;
+
 interface McpTokens {
   access_token: string;
   refresh_token?: string;
@@ -83,13 +90,24 @@ export async function loadMcpTokens(): Promise<McpTokens | null> {
 /**
  * Parse an SSE response body into JSONRPC result.
  * MCP server returns `event: message\ndata: {...}\n\n` format.
+ * Some tools return multiple events (e.g. progress + result) —
+ * we want the last event that has a `result` field.
  */
 function parseSseResponse(text: string): any {
+  let lastResult: any = null;
   for (const line of text.split("\n")) {
     if (line.startsWith("data: ")) {
-      return JSON.parse(line.slice(6));
+      try {
+        const parsed = JSON.parse(line.slice(6));
+        if (parsed.result !== undefined) {
+          lastResult = parsed;
+        } else if (!lastResult) {
+          lastResult = parsed;
+        }
+      } catch { /* skip malformed lines */ }
     }
   }
+  if (lastResult) return lastResult;
   // If no SSE prefix, try parsing as plain JSON
   return JSON.parse(text);
 }
@@ -103,6 +121,27 @@ async function loadClientInfo(): Promise<McpClientInfo | null> {
   try {
     const content = await readFile(join(dir, `${SERVER_URL_HASH}_client_info.json`), "utf-8");
     return JSON.parse(content) as McpClientInfo;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Fetch a fresh access token from the token relay server.
+ * Returns updated tokens or null if relay is unavailable.
+ */
+async function fetchFromRelay(): Promise<McpTokens | null> {
+  if (!TOKEN_RELAY_URL) return null;
+  try {
+    const resp = await fetch(`${TOKEN_RELAY_URL}/token`, { signal: AbortSignal.timeout(3000) });
+    if (!resp.ok) return null;
+    const data = (await resp.json()) as { access_token: string; expires_at: number };
+    if (!data.access_token) return null;
+    return {
+      access_token: data.access_token,
+      token_type: "bearer",
+      expires_at: data.expires_at,
+    };
   } catch {
     return null;
   }
@@ -204,9 +243,13 @@ export const MCP_SUPPORTED_TOOLS = [
 export type McpToolName = (typeof MCP_SUPPORTED_TOOLS)[number];
 
 /**
- * Check if MCP tokens are available and valid.
+ * Check if MCP tokens are available (local file or relay).
  */
 export async function hasMcpTokens(): Promise<boolean> {
+  if (TOKEN_RELAY_URL) {
+    const relay = await fetchFromRelay();
+    if (relay) return true;
+  }
   const tokens = await loadMcpTokens();
   return tokens !== null && !!tokens.access_token;
 }
@@ -450,7 +493,8 @@ export class McpConnectionProvider implements ConnectionProvider {
 
   private async ensureTokens(): Promise<McpTokens> {
     if (!this.tokens) {
-      this.tokens = await loadMcpTokens();
+      // Try relay first (containers), then local file
+      this.tokens = await fetchFromRelay() || await loadMcpTokens();
     }
     if (!this.tokens) {
       throw new Error(
@@ -460,7 +504,8 @@ export class McpConnectionProvider implements ConnectionProvider {
     // Proactively refresh if token is expired or about to expire (30s buffer)
     const expiresAt = this.tokens.expires_at;
     if (expiresAt && Date.now() > expiresAt - 30_000) {
-      const refreshed = await refreshMcpTokens(this.tokens);
+      // Try relay first, then direct refresh
+      const refreshed = await fetchFromRelay() || await refreshMcpTokens(this.tokens);
       if (refreshed) {
         this.tokens = refreshed;
       }
@@ -480,8 +525,8 @@ export class McpConnectionProvider implements ConnectionProvider {
       return await callMcpTool(tokens.access_token, toolName, args);
     } catch (e: any) {
       // Retry once with refreshed token on 401
-      if (e.message?.includes("(401)") && tokens.refresh_token) {
-        const refreshed = await refreshMcpTokens(tokens);
+      if (e.message?.includes("(401)")) {
+        const refreshed = await fetchFromRelay() || await refreshMcpTokens(tokens);
         if (refreshed) {
           this.tokens = refreshed;
           return callMcpTool(refreshed.access_token, toolName, args);
