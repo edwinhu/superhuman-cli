@@ -93,19 +93,17 @@ superhuman contact search "john" --account user@gmail.com
 superhuman contact search "john" --account user@company.com
 ```
 
-**How it works:** The CLI extracts OAuth tokens directly from Superhuman and makes API calls to Gmail or Microsoft Graph. Tokens are cached to disk with automatic background refresh when expiring.
+**How it works:** The CLI uses Superhuman's MCP server for all email operations. Run `superhuman account auth` once to set up authentication.
 
-### Token Management
+### Authentication
 
 ```bash
-# Extract and cache tokens from Superhuman (required once)
+# Set up MCP authentication (required once)
 superhuman account auth
 
-# Tokens are automatically refreshed when expiring
-# If refresh fails, you'll see: "Token for user@email.com expired. Run 'superhuman account auth' to re-authenticate."
+# Tokens are cached to ~/.config/superhuman-cli/tokens.json
+# Re-run 'account auth' if tokens expire
 ```
-
-Tokens are stored in `~/.config/superhuman-cli/tokens.json` and automatically refreshed using OAuth refresh tokens when they expire (within 5 minutes of expiry). No CDP connection is needed for token refresh.
 
 ### Composing Email
 
@@ -116,7 +114,7 @@ Recipients can be specified as email addresses or contact names. Names are autom
 superhuman draft create --to user@example.com --subject "Hello" --body "Hi there!"
 superhuman draft create --to "john" --subject "Hello" --body "Hi there!"
 
-# List drafts (shows both provider and native Superhuman drafts)
+# List drafts
 superhuman draft list
 superhuman draft list --account user@example.com
 superhuman draft list --to jon@example.com        # Filter by recipient
@@ -150,29 +148,9 @@ superhuman send --draft <draft-id>
 superhuman draft send <draft-id> --account=user@example.com --to=recipient@example.com --subject="Subject" --body="Body"
 ```
 
-#### Draft Sources
+#### Drafts
 
-The `draft list` command shows drafts from multiple sources with a "Source" column:
-
-| Source | Description | Example ID |
-|--------|-------------|------------|
-| `native` | Superhuman-only drafts | `draft00ce4679cc58a64c` |
-| `gmail` | Synced to Gmail | Gmail message ID |
-| `outlook` | Synced to Outlook | Outlook message ID |
-
-Native Superhuman drafts (IDs starting with `draft00...`) are fetched from Superhuman's backend API and only exist in Superhuman. Provider-synced drafts are fetched from Gmail/Outlook APIs and are visible in native email clients.
-
-#### Drafts Limitation
-
-Drafts created via `draft create` use **native Gmail/Outlook APIs**, not Superhuman's proprietary draft system. This means:
-
-| Where | Visible? |
-|-------|----------|
-| Native Gmail/Outlook web | Yes |
-| Native mobile apps | Yes |
-| Superhuman UI | No |
-
-This is acceptable for CLI workflows where you iterate on drafts with LLMs and send via `--send` flag. If you need to edit in Superhuman UI, open the draft in native Gmail/Outlook first.
+Drafts are created via Superhuman's native API and exist only in Superhuman. Use `draft list` to see all drafts, and `draft send` or `--send` flag to send them.
 
 ### Managing Threads
 
@@ -368,53 +346,47 @@ Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
 
 ## How It Works
 
-### Direct API (Primary)
+### MCP Provider (Primary)
 
-Most operations use **direct Gmail API and Microsoft Graph API** calls with cached OAuth tokens:
+All email operations use Superhuman's official MCP server (`https://mcp.mail.superhuman.com/mcp`):
 
-| Operation | Gmail API | MS Graph API |
-|-----------|-----------|--------------|
-| List inbox | `GET /messages?q=label:INBOX` | `GET /mailFolders/Inbox/messages` |
-| Search | `GET /messages?q=...` | `GET /messages?$search=...` |
-| Labels | `POST /threads/{id}/modify` | `PATCH /messages/{id}` |
-| Read status | Add/remove UNREAD label | `PATCH /messages/{id}` with `isRead` |
-| Archive | Remove INBOX label | `POST /messages/{id}/move` |
-| Star | Add STARRED label | `PATCH /messages/{id}` with `flag` |
-| Attachments | `GET /messages/{id}/attachments/{id}` | `GET /messages/{id}/attachments/{id}` |
-| Contacts | Google People API | MS Graph People API |
-| Calendar events | Google Calendar API | MS Graph Calendar API |
-| Free/busy | `POST /freeBusy` | `POST /me/calendar/getSchedule` |
-| Snippets | Superhuman backend API | Superhuman backend API |
+| Operation | MCP Tool |
+|-----------|----------|
+| List inbox | `list_email` |
+| Search | `query_email_and_calendar` |
+| Read thread | `get_email_thread` |
+| Send / Reply / Forward | `send_email` |
+| Create draft | `draft_email` |
+| Archive / Delete | `update_email` (mark_done / trash) |
+| Labels / Star | `update_email` |
+| Read status | `update_email` (mark_read / mark_unread) |
+| Calendar events | `create_or_update_event` |
+| Free/busy | `get_availability_calendar` |
 
-OAuth tokens (including refresh tokens) are extracted from Superhuman and cached to disk. When tokens expire, they are automatically refreshed via OAuth endpoints without requiring CDP connection.
+### Superhuman Backend
 
-### MCP Provider (Alternative)
+Some operations use Superhuman's native backend API directly:
 
-When no cached OAuth tokens are available, the CLI falls back to Superhuman's official MCP server (`https://mcp.mail.superhuman.com/mcp`) using WorkOS tokens stored by `mcp-remote`. This path supports:
+- **AI queries** — `ai.compose`, `ai.askAIProxy`
+- **Snooze** — `reminders/create`, `reminders/cancel`
+- **Native drafts** — `userdata.writeMessage`
+- **Attachments** — `attachments.upload`
+- **Send with undo** — `messages/send`
+- **Snippets** — Superhuman backend API
 
-- Inbox listing, email search, thread reading
-- Sending emails, creating drafts, updating read status
-- Labels, archive, calendar operations
-
-Run `npx @superhuman/mcp-mail` once to authenticate the MCP path. Note: the MCP provider uses WorkOS tokens and cannot call Gmail/MS Graph APIs directly.
-
-### CDP (Last Resort)
+### CDP (Setup Only)
 
 Chrome DevTools Protocol is only needed for:
 
-- `account auth` — One-time token extraction from `window.GoogleAccount` (also stores AI user prefix)
+- `account auth` — One-time token extraction from Superhuman
 - `status` — Check Superhuman connection
-
-All other operations use direct API with cached tokens, or the MCP provider as fallback.
 
 ### Benefits
 
-- **Reliability**: Direct API calls don't depend on Superhuman's UI state
-- **Speed**: No CDP round-trips for most operations
-- **Offline from CDP**: After initial `account auth`, most operations work without CDP
-- **Multi-account**: Cached tokens enable operating on any linked account
-
-Supports both Gmail and Microsoft/Outlook accounts.
+- **Simple auth**: Single MCP authentication, no provider OAuth management
+- **Reliability**: No token refresh, no OAuth expiry issues
+- **Speed**: No CDP round-trips for email operations
+- **Multi-account**: Works with both Gmail and Microsoft/Outlook accounts
 
 ## License
 
