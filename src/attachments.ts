@@ -1,16 +1,12 @@
 /**
  * Attachments Module
  *
- * Functions for listing and downloading attachments from Superhuman emails
- * via direct Gmail/MS Graph API.
+ * Functions for listing and downloading attachments from Superhuman emails.
+ * Provider-specific OAuth APIs have been removed. Attachment listing/downloading
+ * now requires MCP provider support (not yet available in MCP server).
  */
 
 import type { ConnectionProvider } from "./connection-provider";
-import {
-  getThreadDirect,
-  downloadAttachmentDirect,
-  addAttachmentToDraft,
-} from "./token-api";
 
 export interface Attachment {
   id: string;
@@ -99,79 +95,58 @@ function getExtension(filename: string): string {
 }
 
 /**
- * List all attachments from a thread
+ * List all attachments from a thread.
+ *
+ * Note: Provider-specific OAuth APIs (Gmail/MS Graph) have been removed.
+ * This function is no longer operational until MCP server adds attachment support.
  */
 export async function listAttachments(
-  provider: ConnectionProvider,
-  threadId: string
+  _provider: ConnectionProvider,
+  _threadId: string
 ): Promise<Attachment[]> {
-  const token = await provider.getToken();
-  const thread = await getThreadDirect(token, threadId);
-
-  if (!thread) {
-    return [];
-  }
-
-  const attachments: Attachment[] = [];
-
-  for (const msg of thread.messages) {
-    for (const att of msg.attachments) {
-      attachments.push({
-        id: att.id,
-        attachmentId: att.attachmentId,
-        name: att.filename,
-        mimeType: att.mimeType,
-        extension: getExtension(att.filename),
-        messageId: att.messageId,
-        threadId: threadId,
-        inline: false, // Direct API doesn't easily distinguish inline
-      });
-    }
-  }
-
-  return attachments;
+  throw new Error(
+    "listAttachments requires provider API support which has been removed. " +
+    "Attachment listing is not yet supported via MCP. " +
+    "Use 'superhuman account auth --mcp' and check for MCP server updates."
+  );
 }
 
 /**
- * Download attachment content as base64
- * Works for both Gmail and Microsoft accounts
+ * Download attachment content as base64.
+ *
+ * Note: Provider-specific OAuth APIs (Gmail/MS Graph) have been removed.
+ * This function is no longer operational until MCP server adds attachment support.
  */
 export async function downloadAttachment(
-  provider: ConnectionProvider,
-  messageId: string,
-  attachmentId: string,
-  _threadId?: string, // Kept for backward compatibility
-  _mimeType?: string  // Kept for backward compatibility
+  _provider: ConnectionProvider,
+  _messageId: string,
+  _attachmentId: string,
+  _threadId?: string,
+  _mimeType?: string
 ): Promise<AttachmentContent> {
-  const token = await provider.getToken();
-  return downloadAttachmentDirect(token, messageId, attachmentId);
+  throw new Error(
+    "downloadAttachment requires provider API support which has been removed. " +
+    "Attachment downloading is not yet supported via MCP. " +
+    "Use 'superhuman account auth --mcp' and check for MCP server updates."
+  );
 }
 
 /**
- * Add an attachment to a draft via direct API
+ * Add an attachment to a draft.
  *
- * This function adds attachments to drafts created via the direct API
- * (createDraftGmail/createDraftMsgraph). The draft must exist in the
- * native email provider's Drafts folder.
- *
- * @param provider - The connection provider (for token extraction)
- * @param draftId - The draft ID (Gmail draft ID or MS Graph message ID)
- * @param filename - Name of the file
- * @param base64Data - File content as base64 string
- * @param mimeType - MIME type of the file
+ * Note: Provider-specific OAuth APIs (Gmail/MS Graph) have been removed.
+ * Attachments for drafts created via the Superhuman native API use
+ * uploadAttachmentSuperhuman() in draft-api.ts instead.
  */
 export async function addAttachmentDirect(
-  provider: ConnectionProvider,
-  draftId: string,
-  filename: string,
-  base64Data: string,
-  mimeType: string
+  _provider: ConnectionProvider,
+  _draftId: string,
+  _filename: string,
+  _base64Data: string,
+  _mimeType: string
 ): Promise<AddAttachmentResult> {
-  try {
-    const token = await provider.getToken();
-    const success = await addAttachmentToDraft(token, draftId, filename, mimeType, base64Data);
-    return { success };
-  } catch (e: any) {
-    return { success: false, error: e.message || "Failed to add attachment" };
-  }
+  throw new Error(
+    "addAttachmentDirect requires provider API support which has been removed. " +
+    "Use the Superhuman native attachment upload path in draft-api.ts instead."
+  );
 }

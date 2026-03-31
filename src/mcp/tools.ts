@@ -39,10 +39,6 @@ import {
   getCachedAccounts,
   hasCachedSuperhumanCredentials,
   askAISearch,
-  createReplyDraftDirect,
-  createDraftDirect,
-  addAttachmentToDraft,
-  sendDraftDirect,
   type TokenInfo,
 } from "../token-api";
 
@@ -629,28 +625,8 @@ export async function replyHandler(args: z.infer<typeof ReplySchema>): Promise<T
     const send = args.send ?? false;
     const hasAttachments = args.attachments && args.attachments.length > 0;
 
-    if (hasAttachments && send) {
-      // Attach + send: use provider API (sendDraftSuperhuman has pre-existing 520 bug)
-      const token = await provider.getToken();
-      const htmlBody = textToHtml(args.body);
-      const providerDraft = await createReplyDraftDirect(token, args.threadId, htmlBody, { replyAll: false, isHtml: true });
-      if (!providerDraft) {
-        throw new Error("Failed to create provider reply draft for sending");
-      }
-      for (const filePath of args.attachments!) {
-        const fileData = await readFileAsBase64(filePath);
-        const attached = await addAttachmentToDraft(token, providerDraft.draftId, fileData.filename, fileData.mimeType, fileData.base64Data);
-        if (!attached) {
-          throw new Error(`Failed to attach ${fileData.filename}`);
-        }
-      }
-      const sent = await sendDraftDirect(token, providerDraft.draftId);
-      if (!sent) {
-        throw new Error("Failed to send reply with attachments");
-      }
-      return successResult(`Reply with ${args.attachments!.length} attachment(s) sent successfully to thread ${args.threadId}`);
-    } else if (hasAttachments) {
-      // Attach only (draft): use Superhuman native API for device sync
+    if (hasAttachments) {
+      // Create draft via Superhuman native API and attach files
       const token = await provider.getToken();
       const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
       const htmlBody = textToHtml(args.body);
@@ -667,6 +643,19 @@ export async function replyHandler(args: z.infer<typeof ReplySchema>): Promise<T
         await uploadAttachmentSuperhuman(
           userInfo, draft.draftId!, draft.threadId!, fileData.filename, fileData.mimeType, fileData.base64Data
         );
+      }
+      if (send) {
+        const sendResult = await sendDraftSuperhuman(userInfo, {
+          draftId: draft.draftId!,
+          threadId: draft.threadId!,
+          to: [], // reply recipients resolved by Superhuman
+          subject: "",
+          body: htmlBody,
+        });
+        if (!sendResult.success) {
+          throw new Error(sendResult.error || "Failed to send reply with attachments");
+        }
+        return successResult(`Reply with ${args.attachments!.length} attachment(s) sent successfully to thread ${args.threadId}`);
       }
       return successResult(`Reply draft with ${args.attachments!.length} attachment(s) created for thread ${args.threadId}\nDraft ID: ${draft.draftId}`);
     }
@@ -702,28 +691,8 @@ export async function replyAllHandler(args: z.infer<typeof ReplyAllSchema>): Pro
     const send = args.send ?? false;
     const hasAttachments = args.attachments && args.attachments.length > 0;
 
-    if (hasAttachments && send) {
-      // Attach + send: use provider API (sendDraftSuperhuman has pre-existing 520 bug)
-      const token = await provider.getToken();
-      const htmlBody = textToHtml(args.body);
-      const providerDraft = await createReplyDraftDirect(token, args.threadId, htmlBody, { replyAll: true, isHtml: true });
-      if (!providerDraft) {
-        throw new Error("Failed to create provider reply-all draft for sending");
-      }
-      for (const filePath of args.attachments!) {
-        const fileData = await readFileAsBase64(filePath);
-        const attached = await addAttachmentToDraft(token, providerDraft.draftId, fileData.filename, fileData.mimeType, fileData.base64Data);
-        if (!attached) {
-          throw new Error(`Failed to attach ${fileData.filename}`);
-        }
-      }
-      const sent = await sendDraftDirect(token, providerDraft.draftId);
-      if (!sent) {
-        throw new Error("Failed to send reply-all with attachments");
-      }
-      return successResult(`Reply-all with ${args.attachments!.length} attachment(s) sent successfully to thread ${args.threadId}`);
-    } else if (hasAttachments) {
-      // Attach only (draft): use Superhuman native API for device sync
+    if (hasAttachments) {
+      // Create draft via Superhuman native API and attach files
       const token = await provider.getToken();
       const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
       const htmlBody = textToHtml(args.body);
@@ -740,6 +709,19 @@ export async function replyAllHandler(args: z.infer<typeof ReplyAllSchema>): Pro
         await uploadAttachmentSuperhuman(
           userInfo, draft.draftId!, draft.threadId!, fileData.filename, fileData.mimeType, fileData.base64Data
         );
+      }
+      if (send) {
+        const sendResult = await sendDraftSuperhuman(userInfo, {
+          draftId: draft.draftId!,
+          threadId: draft.threadId!,
+          to: [], // reply-all recipients resolved by Superhuman
+          subject: "",
+          body: htmlBody,
+        });
+        if (!sendResult.success) {
+          throw new Error(sendResult.error || "Failed to send reply-all with attachments");
+        }
+        return successResult(`Reply-all with ${args.attachments!.length} attachment(s) sent successfully to thread ${args.threadId}`);
       }
       return successResult(`Reply-all draft with ${args.attachments!.length} attachment(s) created for thread ${args.threadId}\nDraft ID: ${draft.draftId}`);
     }
@@ -775,28 +757,8 @@ export async function forwardHandler(args: z.infer<typeof ForwardSchema>): Promi
     const send = args.send ?? false;
     const hasAttachments = args.attachments && args.attachments.length > 0;
 
-    if (hasAttachments && send) {
-      // Attach + send: use provider API (sendDraftSuperhuman has pre-existing 520 bug)
-      const token = await provider.getToken();
-      const htmlBody = textToHtml(args.body);
-      const providerDraft = await createDraftDirect(token, { to: args.toEmail, subject: "", body: htmlBody, isHtml: true });
-      if (!providerDraft) {
-        throw new Error("Failed to create provider forward draft for sending");
-      }
-      for (const filePath of args.attachments!) {
-        const fileData = await readFileAsBase64(filePath);
-        const attached = await addAttachmentToDraft(token, providerDraft.draftId, fileData.filename, fileData.mimeType, fileData.base64Data);
-        if (!attached) {
-          throw new Error(`Failed to attach ${fileData.filename}`);
-        }
-      }
-      const sent = await sendDraftDirect(token, providerDraft.draftId);
-      if (!sent) {
-        throw new Error("Failed to send forward with attachments");
-      }
-      return successResult(`Email with ${args.attachments!.length} attachment(s) forwarded successfully to ${args.toEmail}`);
-    } else if (hasAttachments) {
-      // Attach only (draft): use Superhuman native API for device sync
+    if (hasAttachments) {
+      // Create draft via Superhuman native API and attach files
       const token = await provider.getToken();
       const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
       const htmlBody = textToHtml(args.body);
@@ -814,6 +776,19 @@ export async function forwardHandler(args: z.infer<typeof ForwardSchema>): Promi
         await uploadAttachmentSuperhuman(
           userInfo, draft.draftId!, draft.threadId!, fileData.filename, fileData.mimeType, fileData.base64Data
         );
+      }
+      if (send) {
+        const sendResult = await sendDraftSuperhuman(userInfo, {
+          draftId: draft.draftId!,
+          threadId: draft.threadId!,
+          to: [args.toEmail],
+          subject: "",
+          body: htmlBody,
+        });
+        if (!sendResult.success) {
+          throw new Error(sendResult.error || "Failed to send forward with attachments");
+        }
+        return successResult(`Email with ${args.attachments!.length} attachment(s) forwarded successfully to ${args.toEmail}`);
       }
       return successResult(`Forward draft with ${args.attachments!.length} attachment(s) created for ${args.toEmail}\nDraft ID: ${draft.draftId}`);
     }
@@ -1746,9 +1721,12 @@ export async function askAIHandler(args: z.infer<z.ZodObject<typeof AskAISchema>
 
     const result = await askAISearch(
       token.idToken,
-      token,
       args.query,
-      { threadId: args.thread_id },
+      {
+        threadId: args.thread_id,
+        email: token.email,
+        userPrefix: token.userPrefix,
+      },
     );
 
     return successResult(result.response);

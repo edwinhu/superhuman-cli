@@ -21,7 +21,7 @@ function createTestToken(overrides: Partial<TokenInfo> = {}): TokenInfo {
   };
 }
 
-describe("readThread direct API", () => {
+describe("readThread", () => {
   const originalFetch = globalThis.fetch;
 
   beforeEach(async () => {
@@ -36,125 +36,25 @@ describe("readThread direct API", () => {
     clearTokenCache();
   });
 
-  test("readThread returns messages from Gmail thread via API", async () => {
+  test("readThread requires MCP provider (CachedTokenProvider throws)", async () => {
     const token = createTestToken();
     setTokenCacheForTest(token.email, token);
     const provider = new CachedTokenProvider(token.email);
 
-    // Mock Gmail thread response
-    globalThis.fetch = mock(() =>
-      Promise.resolve({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve({
-          id: "thread123",
-          messages: [
-            {
-              id: "msg1",
-              snippet: "Hello there",
-              payload: {
-                headers: [
-                  { name: "Subject", value: "Test Subject" },
-                  { name: "From", value: "Alice <alice@example.com>" },
-                  { name: "To", value: "Bob <bob@example.com>" },
-                  { name: "Cc", value: "Charlie <charlie@example.com>" },
-                  { name: "Date", value: "2025-02-04T10:00:00Z" },
-                ],
-              },
-            },
-            {
-              id: "msg2",
-              snippet: "Got it, thanks",
-              payload: {
-                headers: [
-                  { name: "Subject", value: "Re: Test Subject" },
-                  { name: "From", value: "Bob <bob@example.com>" },
-                  { name: "To", value: "Alice <alice@example.com>" },
-                  { name: "Cc", value: "" },
-                  { name: "Date", value: "2025-02-04T11:00:00Z" },
-                ],
-              },
-            },
-          ],
-        }),
-        text: () => Promise.resolve(""),
-      } as Response)
-    ) as unknown as typeof fetch;
-
     const { readThread } = await import("../read");
-    const messages = await readThread(provider, "thread123");
-
-    expect(messages).toHaveLength(2);
-
-    // First message
-    expect(messages[0].id).toBe("msg1");
-    expect(messages[0].threadId).toBe("thread123");
-    expect(messages[0].subject).toBe("Test Subject");
-    expect(messages[0].from.email).toBe("alice@example.com");
-    expect(messages[0].from.name).toBe("Alice");
-    expect(messages[0].to[0].email).toBe("bob@example.com");
-    expect(messages[0].cc[0].email).toBe("charlie@example.com");
-    expect(messages[0].snippet).toBe("Hello there");
-
-    // Second message
-    expect(messages[1].id).toBe("msg2");
-    expect(messages[1].from.email).toBe("bob@example.com");
+    await expect(readThread(provider, "thread123")).rejects.toThrow(
+      "readThread requires an MCP provider"
+    );
   });
 
-  test("readThread returns messages from MS Graph conversation", async () => {
+  test("readThread requires MCP provider for MS Graph too", async () => {
     const token = createTestToken({ isMicrosoft: true });
     setTokenCacheForTest(token.email, token);
     const provider = new CachedTokenProvider(token.email);
 
-    // Mock MS Graph response
-    globalThis.fetch = mock(() =>
-      Promise.resolve({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve({
-          value: [
-            {
-              id: "msgA",
-              conversationId: "convABC",
-              subject: "Outlook Thread",
-              from: { emailAddress: { address: "sender@outlook.com", name: "Sender" } },
-              toRecipients: [{ emailAddress: { address: "receiver@outlook.com", name: "Receiver" } }],
-              ccRecipients: [],
-              receivedDateTime: "2025-02-04T10:00:00Z",
-              bodyPreview: "Preview text",
-            },
-          ],
-        }),
-        text: () => Promise.resolve(""),
-      } as Response)
-    ) as unknown as typeof fetch;
-
     const { readThread } = await import("../read");
-    const messages = await readThread(provider, "convABC");
-
-    expect(messages).toHaveLength(1);
-    expect(messages[0].id).toBe("msgA");
-    expect(messages[0].subject).toBe("Outlook Thread");
-    expect(messages[0].from.email).toBe("sender@outlook.com");
-    expect(messages[0].snippet).toBe("Preview text");
-  });
-
-  test("readThread returns empty array when thread not found", async () => {
-    const token = createTestToken();
-    setTokenCacheForTest(token.email, token);
-    const provider = new CachedTokenProvider(token.email);
-
-    globalThis.fetch = mock(() =>
-      Promise.resolve({
-        ok: true,
-        status: 200,
-        json: () => Promise.resolve({ id: "thread404", messages: [] }),
-        text: () => Promise.resolve(""),
-      } as Response)
-    ) as unknown as typeof fetch;
-
-    const { readThread } = await import("../read");
-    const messages = await readThread(provider, "thread404");
-    expect(messages).toHaveLength(0);
+    await expect(readThread(provider, "convABC")).rejects.toThrow(
+      "readThread requires an MCP provider"
+    );
   });
 });

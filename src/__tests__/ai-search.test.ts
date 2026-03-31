@@ -1,7 +1,7 @@
 // src/__tests__/ai-search.test.ts
 // Unit tests for AI search (askAISearch) using the askAIProxy endpoint
 import { test, expect, describe, afterEach, mock } from "bun:test";
-import { askAISearch, type TokenInfo } from "../token-api";
+import { askAISearch } from "../token-api";
 
 describe("askAISearch", () => {
   const originalFetch = globalThis.fetch;
@@ -34,14 +34,6 @@ describe("askAISearch", () => {
     "fake_signature",
   ].join(".");
 
-  const fakeOauthToken: TokenInfo = {
-    accessToken: "fake_access_token",
-    email: "test@example.com",
-    expires: Date.now() + 3600000,
-    isMicrosoft: false,
-    idToken: fakeIdToken,
-  };
-
   test("calls ai.askAIProxy endpoint with correct payload structure", async () => {
     // SSE response mimicking Superhuman's askAIProxy format
     const sseResponse = [
@@ -54,8 +46,8 @@ describe("askAISearch", () => {
 
     const result = await askAISearch(
       fakeIdToken,
-      fakeOauthToken,
       "find the email about Stanford",
+      { email: "test@example.com" },
     );
 
     // Verify fetch was called
@@ -88,71 +80,49 @@ describe("askAISearch", () => {
 
     createMockFetch({ ok: true, text: sseResponse });
 
-    const result = await askAISearch(fakeIdToken, fakeOauthToken, "test query");
+    const result = await askAISearch(fakeIdToken, "test query", { email: "test@example.com" });
     expect(result.response).toBe("Here is the answer.");
     expect(result.response).not.toContain("<thinking>");
   });
 
-  test("includes thread context when threadId is provided", async () => {
-    // Mock two fetches: first for getThreadMessages (Gmail), second for askAIProxy
-    let callCount = 0;
-    const mockFn = mock(() => {
-      callCount++;
-      if (callCount === 1) {
-        // Gmail thread fetch
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: () =>
-            Promise.resolve({
-              messages: [
-                {
-                  id: "msg1",
-                  threadId: "thread1",
-                  payload: {
-                    headers: [
-                      { name: "Subject", value: "Test Subject" },
-                      { name: "From", value: "sender@example.com" },
-                      { name: "To", value: "test@example.com" },
-                      { name: "Date", value: "2026-01-01T00:00:00Z" },
-                    ],
-                    mimeType: "text/plain",
-                    body: { data: btoa("Hello world") },
-                  },
-                  snippet: "Hello world",
-                },
-              ],
-            }),
-          text: () => Promise.resolve(""),
-        } as Response);
-      }
-      // askAIProxy SSE
-      return Promise.resolve({
-        ok: true,
-        status: 200,
-        text: () =>
-          Promise.resolve(
-            `data: {"event_id":"evt1","content":"Thread summary here.","active_agent":"orchestrator"}\ndata: [DONE]`
-          ),
-        json: () => Promise.resolve({}),
-      } as Response);
-    });
-    globalThis.fetch = mockFn as unknown as typeof fetch;
+  test("includes thread context when threadId and threadMessages are provided", async () => {
+    const sseResponse = `data: {"event_id":"evt1","content":"Thread summary here.","active_agent":"orchestrator"}\ndata: [DONE]`;
+    const mockFetch = createMockFetch({ ok: true, text: sseResponse });
 
-    const result = await askAISearch(fakeIdToken, fakeOauthToken, "summarize this", {
+    const result = await askAISearch(fakeIdToken, "summarize this", {
       threadId: "thread1",
+      threadMessages: [
+        {
+          message_id: "msg1",
+          subject: "Test Subject",
+          body: "Hello world",
+          from: { email: "sender@example.com", name: "Sender" },
+          to: [{ email: "test@example.com", name: "Test" }],
+          cc: [],
+          date: "2026-01-01T00:00:00Z",
+          snippet: "Hello world",
+        },
+      ],
+      email: "test@example.com",
     });
 
     expect(result.response).toBe("Thread summary here.");
-    // Should have called fetch at least twice (Gmail API + askAIProxy)
-    expect(callCount).toBeGreaterThanOrEqual(2);
+    // Should have called fetch once (askAIProxy only, no separate thread fetch)
+    expect(mockFetch).toHaveBeenCalledTimes(1);
+
+    // Verify thread messages were included in the payload
+    const [, options] = mockFetch.mock.calls[0] as unknown as [string, RequestInit];
+    const body = JSON.parse(options.body as string);
+    expect(body.current_thread_id).toBe("thread1");
+    expect(body.current_thread_messages).toHaveLength(1);
+    expect(body.current_thread_messages[0].subject).toBe("Test Subject");
   });
 
   test("handles authentication errors", async () => {
     createMockFetch({ ok: false, status: 401, text: "Unauthorized" });
 
     await expect(
-      askAISearch(fakeIdToken, fakeOauthToken, "test query")
+      askAISearch(fakeIdToken, "test query")
     ).rejects.toThrow("authentication error");
   });
 
@@ -160,7 +130,7 @@ describe("askAISearch", () => {
     createMockFetch({ ok: false, status: 500, text: "Internal Server Error" });
 
     await expect(
-      askAISearch(fakeIdToken, fakeOauthToken, "test query")
+      askAISearch(fakeIdToken, "test query")
     ).rejects.toThrow("AI query failed");
   });
 
@@ -168,7 +138,7 @@ describe("askAISearch", () => {
     const sseResponse = `data: {"event_id":"evt1","content":"Follow-up answer.","active_agent":"orchestrator"}\ndata: [DONE]`;
     const mockFetch = createMockFetch({ ok: true, text: sseResponse });
 
-    await askAISearch(fakeIdToken, fakeOauthToken, "tell me more", {
+    await askAISearch(fakeIdToken, "tell me more", {
       chatHistory: [
         { role: "user", content: "find emails about project" },
         { role: "assistant", content: "I found 3 emails." },

@@ -1,21 +1,14 @@
 /**
  * Reply Module
  *
- * Functions for replying to and forwarding email threads via direct API.
- * Uses token-based API calls (no CDP/browser connection needed).
+ * Functions for replying to and forwarding email threads via MCP.
+ * Provider-specific OAuth paths have been removed.
  */
 
 import type { ConnectionProvider } from "./connection-provider";
 import { McpConnectionProvider } from "./mcp-provider";
 import { textToHtml } from "./superhuman-api.js";
-import {
-  sendReplyWithToken,
-  sendEmailWithToken,
-  createReplyDraftWithToken,
-  createDraftWithToken,
-  getThreadInfoForReplyWithToken,
-} from "./send-api.js";
-import { getThreadMessages } from "./token-api";
+import { readThread } from "./read";
 
 export interface ReplyResult {
   success: boolean;
@@ -24,10 +17,17 @@ export interface ReplyResult {
   error?: string;
 }
 
+function requireMcp(provider: ConnectionProvider): asserts provider is McpConnectionProvider {
+  if (!(provider instanceof McpConnectionProvider)) {
+    throw new Error(
+      "MCP provider required. Provider-specific OAuth has been removed. " +
+      "Use 'superhuman account auth --mcp' to set up MCP authentication."
+    );
+  }
+}
+
 /**
  * Reply to a thread (reply to sender only).
- *
- * Uses direct Gmail/Graph API for both sending and draft creation.
  */
 export async function replyToThread(
   provider: ConnectionProvider,
@@ -40,8 +40,6 @@ export async function replyToThread(
 
 /**
  * Reply-all to a thread (reply to all recipients).
- *
- * Uses direct Gmail/Graph API for both sending and draft creation.
  */
 export async function replyAllToThread(
   provider: ConnectionProvider,
@@ -62,39 +60,18 @@ async function replyImpl(
   send: boolean,
   replyAll: boolean
 ): Promise<ReplyResult> {
-  // Route through MCP if available
-  if (provider instanceof McpConnectionProvider) {
-    const htmlBody = textToHtml(body);
-    return provider.replyToThread(threadId, htmlBody, { replyAll, send });
-  }
-
-  const token = await provider.getToken();
+  requireMcp(provider);
   const htmlBody = textToHtml(body);
-  const opts = { replyAll, isHtml: true };
-
-  if (send) {
-    const result = await sendReplyWithToken(token, threadId, htmlBody, opts);
-    if (result.success) {
-      return { success: true, messageId: result.messageId };
-    }
-    return { success: false, error: result.error };
-  }
-
-  const result = await createReplyDraftWithToken(token, threadId, htmlBody, opts);
-  if (result.success) {
-    return { success: true, draftId: result.draftId };
-  }
-  return { success: false, error: result.error };
+  return provider.replyToThread(threadId, htmlBody, { replyAll, send });
 }
 
 /**
  * Forward a thread
  *
  * Fetches the original message content and constructs a forwarded email
- * with proper "Forwarded message" header. Uses direct API for both
- * sending and draft creation.
+ * with proper "Forwarded message" header.
  *
- * @param provider - Connection provider for token resolution
+ * @param provider - Connection provider (must be MCP)
  * @param threadId - The thread ID to forward
  * @param toEmail - The email address to forward to
  * @param body - The message body to include before the forwarded content
@@ -108,91 +85,34 @@ export async function forwardThread(
   body: string,
   send: boolean = false
 ): Promise<ReplyResult> {
-  // Route through MCP if available
-  if (provider instanceof McpConnectionProvider) {
-    const htmlBody = body ? textToHtml(body) : "";
-    // Read thread to build forward body
-    const messages = await provider.readThread(threadId);
-    const lastMessage = messages[messages.length - 1];
-    const subject = lastMessage?.subject?.startsWith("Fwd:")
-      ? lastMessage.subject
-      : `Fwd: ${lastMessage?.subject || "(no subject)"}`;
+  requireMcp(provider);
 
-    const forwardBody = htmlBody
-      ? `${htmlBody}<br><br>---------- Forwarded message ---------<br>${lastMessage?.snippet || ""}`
-      : `---------- Forwarded message ---------<br>${lastMessage?.snippet || ""}`;
+  const htmlBody = body ? textToHtml(body) : "";
+  // Read thread to build forward body
+  const messages = await provider.readThread(threadId);
+  const lastMessage = messages[messages.length - 1];
+  const subject = lastMessage?.subject?.startsWith("Fwd:")
+    ? lastMessage.subject
+    : `Fwd: ${lastMessage?.subject || "(no subject)"}`;
 
-    if (send) {
-      return provider.sendEmail({
-        to: [toEmail],
-        subject,
-        body: forwardBody,
-        isHtml: true,
-      });
-    }
-    return provider.createDraft({
-      to: [toEmail],
-      subject,
-      body: forwardBody,
-      isHtml: true,
-    });
-  }
-
-  const token = await provider.getToken();
-
-  // Get thread info for headers (subject, from, to, date)
-  const threadInfo = await getThreadInfoForReplyWithToken(token, threadId);
-  if (!threadInfo) {
-    return { success: false, error: "Could not get thread information for forward" };
-  }
-
-  // Get thread messages for the original body content
-  const messages = await getThreadMessages(token, threadId);
-  const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
-  const originalBody = lastMessage?.body || "";
-
-  // Build subject with Fwd: prefix
-  const subject = threadInfo.subject.startsWith("Fwd:")
-    ? threadInfo.subject
-    : `Fwd: ${threadInfo.subject}`;
-
-  // Build the forwarded message body
-  const userHtml = body ? textToHtml(body) : "";
-  const forwardBody = buildForwardBody({
-    userHtml,
-    from: threadInfo.replyTo || "unknown",
-    date: new Date().toUTCString(), // Best effort; threadInfo doesn't have date
-    subject: threadInfo.subject,
-    to: threadInfo.allTo.join(", ") || "unknown",
-    originalBody,
-  });
+  const forwardBody = htmlBody
+    ? `${htmlBody}<br><br>---------- Forwarded message ---------<br>${lastMessage?.snippet || ""}`
+    : `---------- Forwarded message ---------<br>${lastMessage?.snippet || ""}`;
 
   if (send) {
-    const result = await sendEmailWithToken(token, {
+    return provider.sendEmail({
       to: [toEmail],
       subject,
       body: forwardBody,
       isHtml: true,
     });
-
-    if (result.success) {
-      return { success: true, messageId: result.messageId };
-    }
-    return { success: false, error: result.error };
   }
-
-  // Draft mode
-  const result = await createDraftWithToken(token, {
+  return provider.createDraft({
     to: [toEmail],
     subject,
     body: forwardBody,
     isHtml: true,
   });
-
-  if (result.success) {
-    return { success: true, draftId: result.draftId };
-  }
-  return { success: false, error: result.error };
 }
 
 /**

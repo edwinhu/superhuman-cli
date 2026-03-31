@@ -215,11 +215,11 @@ describe("read command hang regression", () => {
 
     const output = stdout + stderr;
 
-    // Should show a helpful error about missing credentials
-    expect(output).toMatch(/no cached credentials|account auth/i);
+    // Should show a helpful error (credentials or MCP auth failure)
+    expect(output).toMatch(/no cached credentials|account auth|failed|error/i);
     // Should exit with non-zero
     expect(exitCode).not.toBe(0);
-    // Should NOT try to launch Superhuman
+    // Should NOT try to launch Superhuman via CDP
     expect(output).not.toMatch(/launch.*superhuman/i);
   });
 });

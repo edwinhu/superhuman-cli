@@ -1,19 +1,11 @@
 /**
  * Labels Module
  *
- * Functions for managing email labels/folders via direct Gmail/MS Graph API.
- * Supports both Microsoft/Outlook accounts (via MS Graph folders) and Gmail accounts (via Gmail labels).
+ * Functions for managing email labels/folders via MCP.
  */
 
 import type { ConnectionProvider } from "./connection-provider";
 import { McpConnectionProvider } from "./mcp-provider";
-import {
-  modifyThreadLabels,
-  updateMessage,
-  listLabelsDirect,
-  searchGmailDirect,
-  getConversationMessageIds,
-} from "./token-api";
 
 export interface Label {
   id: string;
@@ -26,15 +18,22 @@ export interface LabelResult {
   error?: string;
 }
 
+function requireMcp(provider: ConnectionProvider): McpConnectionProvider {
+  if (provider instanceof McpConnectionProvider) {
+    return provider;
+  }
+  throw new Error("MCP connection required. Run 'superhuman account auth' to set up MCP.");
+}
+
 /**
  * List all available labels/folders in the account
  *
  * @param provider - The connection provider
  * @returns Array of labels with id and name
  */
-export async function listLabels(provider: ConnectionProvider): Promise<Label[]> {
-  const token = await provider.getToken();
-  return listLabelsDirect(token);
+export async function listLabels(_provider: ConnectionProvider): Promise<Label[]> {
+  // TODO: Implement via MCP when a list_labels tool is available
+  throw new Error("MCP connection required. Run 'superhuman account auth' to set up MCP.");
 }
 
 /**
@@ -45,57 +44,11 @@ export async function listLabels(provider: ConnectionProvider): Promise<Label[]>
  * @returns Array of labels on the thread
  */
 export async function getThreadLabels(
-  provider: ConnectionProvider,
-  threadId: string
+  _provider: ConnectionProvider,
+  _threadId: string
 ): Promise<Label[]> {
-  const token = await provider.getToken();
-
-  // Get all labels to build name mapping
-  const allLabels = await listLabelsDirect(token);
-  const labelMap = new Map(allLabels.map((l) => [l.id, l]));
-
-  if (token.isMicrosoft) {
-    // For MS Graph, we need to get the message and check its folder
-    const messageIds = await getConversationMessageIds(token, threadId);
-    if (messageIds.length === 0) {
-      return [];
-    }
-
-    // MS Graph messages have parentFolderId
-    const response = await fetch(
-      `https://graph.microsoft.com/v1.0/me/messages/${messageIds[0]}?$select=parentFolderId`,
-      {
-        headers: { Authorization: `Bearer ${token.accessToken}` },
-      }
-    );
-
-    if (!response.ok) {
-      return [];
-    }
-
-    const msg = await response.json() as { parentFolderId?: string };
-    const folderId = msg.parentFolderId;
-    const folder = labelMap.get(folderId);
-
-    return folder ? [folder] : [];
-  } else {
-    // Gmail: Get thread to get labelIds
-    const response = await fetch(
-      `https://www.googleapis.com/gmail/v1/users/me/threads/${threadId}?format=minimal`,
-      {
-        headers: { Authorization: `Bearer ${token.accessToken}` },
-      }
-    );
-
-    if (!response.ok) {
-      return [];
-    }
-
-    const thread = await response.json() as { messages?: Array<{ labelIds?: string[] }> };
-    const labelIds = thread.messages?.[0]?.labelIds || [];
-
-    return labelIds.map((id: string) => labelMap.get(id) || { id, name: id });
-  }
+  // TODO: Implement via MCP when a get_thread_labels tool is available
+  throw new Error("MCP connection required. Run 'superhuman account auth' to set up MCP.");
 }
 
 /**
@@ -111,38 +64,16 @@ export async function addLabel(
   threadId: string,
   labelId: string
 ): Promise<LabelResult> {
-  // MCP: update_email with add_label action
-  if (provider instanceof McpConnectionProvider) {
-    try {
-      await provider.callTool("update_email", {
-        thread_id: threadId,
-        action: "add_label",
-        label: labelId,
-      });
-      return { success: true };
-    } catch (e: any) {
-      return { success: false, error: e.message };
-    }
-  }
-
+  const mcp = requireMcp(provider);
   try {
-    const token = await provider.getToken();
-
-    if (token.isMicrosoft) {
-      // Microsoft: Move messages to the folder (label = folder in MS)
-      // This is complex because MS Graph doesn't have a direct "add label" concept
-      // For folders, adding a label means moving to that folder
-      return {
-        success: false,
-        error: "Adding labels to Microsoft accounts not yet supported via direct API. Use folders instead.",
-      };
-    } else {
-      // Gmail: Add label via threads.modify
-      const success = await modifyThreadLabels(token, threadId, [labelId], []);
-      return { success };
-    }
+    await mcp.callTool("update_email", {
+      thread_id: threadId,
+      action: "add_label",
+      label: labelId,
+    });
+    return { success: true };
   } catch (e: any) {
-    return { success: false, error: e.message || "Unknown error" };
+    return { success: false, error: e.message };
   }
 }
 
@@ -159,35 +90,16 @@ export async function removeLabel(
   threadId: string,
   labelId: string
 ): Promise<LabelResult> {
-  // MCP: update_email with remove_label action
-  if (provider instanceof McpConnectionProvider) {
-    try {
-      await provider.callTool("update_email", {
-        thread_id: threadId,
-        action: "remove_label",
-        label: labelId,
-      });
-      return { success: true };
-    } catch (e: any) {
-      return { success: false, error: e.message };
-    }
-  }
-
+  const mcp = requireMcp(provider);
   try {
-    const token = await provider.getToken();
-
-    if (token.isMicrosoft) {
-      return {
-        success: false,
-        error: "Removing labels from Microsoft accounts not yet supported via direct API.",
-      };
-    } else {
-      // Gmail: Remove label via threads.modify
-      const success = await modifyThreadLabels(token, threadId, [], [labelId]);
-      return { success };
-    }
+    await mcp.callTool("update_email", {
+      thread_id: threadId,
+      action: "remove_label",
+      label: labelId,
+    });
+    return { success: true };
   } catch (e: any) {
-    return { success: false, error: e.message || "Unknown error" };
+    return { success: false, error: e.message };
   }
 }
 
@@ -202,45 +114,15 @@ export async function starThread(
   provider: ConnectionProvider,
   threadId: string
 ): Promise<LabelResult> {
-  // MCP: update_email with Star action
-  if (provider instanceof McpConnectionProvider) {
-    try {
-      await provider.callTool("update_email", {
-        thread_id: threadId,
-        action: "star",
-      });
-      return { success: true };
-    } catch (e: any) {
-      return { success: false, error: e.message };
-    }
-  }
-
+  const mcp = requireMcp(provider);
   try {
-    const token = await provider.getToken();
-
-    if (token.isMicrosoft) {
-      // Microsoft: Flag all messages in the conversation
-      const messageIds = await getConversationMessageIds(token, threadId);
-
-      if (messageIds.length === 0) {
-        return { success: false, error: "No messages found in conversation" };
-      }
-
-      // Flag each message
-      for (const msgId of messageIds) {
-        await updateMessage(token, msgId, {
-          flag: { flagStatus: "flagged" },
-        });
-      }
-
-      return { success: true };
-    } else {
-      // Gmail: Add STARRED label
-      const success = await modifyThreadLabels(token, threadId, ["STARRED"], []);
-      return { success };
-    }
+    await mcp.callTool("update_email", {
+      thread_id: threadId,
+      action: "star",
+    });
+    return { success: true };
   } catch (e: any) {
-    return { success: false, error: e.message || "Unknown error" };
+    return { success: false, error: e.message };
   }
 }
 
@@ -255,45 +137,15 @@ export async function unstarThread(
   provider: ConnectionProvider,
   threadId: string
 ): Promise<LabelResult> {
-  // MCP: update_email with Unstar action
-  if (provider instanceof McpConnectionProvider) {
-    try {
-      await provider.callTool("update_email", {
-        thread_id: threadId,
-        action: "unstar",
-      });
-      return { success: true };
-    } catch (e: any) {
-      return { success: false, error: e.message };
-    }
-  }
-
+  const mcp = requireMcp(provider);
   try {
-    const token = await provider.getToken();
-
-    if (token.isMicrosoft) {
-      // Microsoft: Unflag all messages in the conversation
-      const messageIds = await getConversationMessageIds(token, threadId);
-
-      if (messageIds.length === 0) {
-        return { success: false, error: "No messages found in conversation" };
-      }
-
-      // Unflag each message
-      for (const msgId of messageIds) {
-        await updateMessage(token, msgId, {
-          flag: { flagStatus: "notFlagged" },
-        });
-      }
-
-      return { success: true };
-    } else {
-      // Gmail: Remove STARRED label
-      const success = await modifyThreadLabels(token, threadId, [], ["STARRED"]);
-      return { success };
-    }
+    await mcp.callTool("update_email", {
+      thread_id: threadId,
+      action: "unstar",
+    });
+    return { success: true };
   } catch (e: any) {
-    return { success: false, error: e.message || "Unknown error" };
+    return { success: false, error: e.message };
   }
 }
 
@@ -305,45 +157,9 @@ export async function unstarThread(
  * @returns Array of starred threads with their IDs
  */
 export async function listStarred(
-  provider: ConnectionProvider,
-  limit: number = 50
+  _provider: ConnectionProvider,
+  _limit: number = 50
 ): Promise<Array<{ id: string }>> {
-  try {
-    const token = await provider.getToken();
-
-    if (token.isMicrosoft) {
-      // MS Graph: Search for flagged messages
-      const response = await fetch(
-        `https://graph.microsoft.com/v1.0/me/messages?$filter=flag/flagStatus eq 'flagged'&$top=${limit}&$select=conversationId`,
-        {
-          headers: { Authorization: `Bearer ${token.accessToken}` },
-        }
-      );
-
-      if (!response.ok) {
-        return [];
-      }
-
-      const result = await response.json() as { value?: Array<{ conversationId?: string }> };
-      if (!result.value) {
-        return [];
-      }
-
-      // Get unique conversation IDs
-      const conversationIds = new Set<string>();
-      for (const msg of result.value) {
-        if (msg.conversationId) {
-          conversationIds.add(msg.conversationId);
-        }
-      }
-
-      return Array.from(conversationIds).map((id) => ({ id }));
-    } else {
-      // Gmail: Search for starred messages
-      const threads = await searchGmailDirect(token, "is:starred", limit);
-      return threads.map((t) => ({ id: t.id }));
-    }
-  } catch (e) {
-    return [];
-  }
+  // TODO: Implement via MCP when a search/filter tool supports starred filter
+  throw new Error("MCP connection required. Run 'superhuman account auth' to set up MCP.");
 }

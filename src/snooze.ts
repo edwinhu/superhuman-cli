@@ -5,11 +5,13 @@
  * Supports both Microsoft/Outlook and Gmail accounts.
  *
  * Uses direct API calls via superhumanFetch (no CDP/browser connection needed).
+ * Thread message IDs are resolved via MCP get_email_thread.
  */
 
-import type { SuperhumanTokenInfo, TokenInfo } from "./token-api";
-import { superhumanFetch, gmailFetch, msgraphFetch } from "./token-api";
+import type { SuperhumanTokenInfo } from "./token-api";
+import { superhumanFetch } from "./token-api";
 import type { ConnectionProvider } from "./connection-provider";
+import { McpConnectionProvider, getMcpText } from "./mcp-provider";
 
 export interface SnoozeResult {
   success: boolean;
@@ -222,30 +224,38 @@ export async function listSnoozedDirect(
 // ============================================================================
 
 /**
- * Get message IDs for a thread using direct Gmail/MS Graph API.
+ * Get message IDs for a thread using MCP get_email_thread.
  */
 async function getThreadMessageIds(
-  token: TokenInfo,
+  provider: ConnectionProvider,
   threadId: string
 ): Promise<string[]> {
-  if (token.isMicrosoft) {
-    // MS Graph: search messages by conversationId
-    const result = await msgraphFetch(token.accessToken, `/me/messages?$top=50&$select=id,conversationId&$orderby=receivedDateTime desc`);
-    if (!result?.value) return [];
-    return result.value
-      .filter((m: any) => m.conversationId === threadId)
-      .map((m: any) => m.id);
-  } else {
-    // Gmail: GET /threads/{threadId} to get message list
-    const result = await gmailFetch(token.accessToken, `/threads/${threadId}?format=minimal`);
-    if (!result?.messages) return [];
-    return result.messages.map((m: any) => m.id);
+  if (!(provider instanceof McpConnectionProvider)) {
+    throw new Error(
+      "MCP provider required to resolve thread message IDs. " +
+      "Provider-specific OAuth has been removed. " +
+      "Use 'superhuman account auth --mcp' to set up MCP authentication."
+    );
+  }
+
+  try {
+    const result = await provider.callTool("get_email_thread", {
+      thread_id: threadId,
+    });
+    const text = getMcpText(result);
+    const json = JSON.parse(text);
+
+    // MCP get_email_thread returns messages array with id fields
+    const messages = Array.isArray(json) ? json : (json.messages || []);
+    return messages.map((m: any) => m.id || m.message_id).filter(Boolean);
+  } catch {
+    return [];
   }
 }
 
 /**
  * Snooze a thread using ConnectionProvider.
- * Gets token from the provider, resolves message IDs, then calls the direct API.
+ * Gets token from the provider, resolves message IDs via MCP, then calls the direct API.
  */
 export async function snoozeThreadViaProvider(
   provider: ConnectionProvider,
@@ -269,8 +279,8 @@ export async function snoozeThreadViaProvider(
   const results: SnoozeResult[] = [];
 
   for (const threadId of threadIds) {
-    // Get message IDs for the thread
-    const messageIds = await getThreadMessageIds(token, threadId);
+    // Get message IDs for the thread via MCP
+    const messageIds = await getThreadMessageIds(provider, threadId);
     if (messageIds.length === 0) {
       results.push({ success: false, error: "No messages found in thread" });
       continue;
