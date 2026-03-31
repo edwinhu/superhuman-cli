@@ -1,11 +1,12 @@
 /**
  * Labels Module
  *
- * Functions for managing email labels/folders via MCP.
+ * Functions for managing email labels/folders.
+ * Routes to Superhuman portal RPC (SuperhumanProvider).
  */
 
 import type { ConnectionProvider } from "./connection-provider";
-import { requireMcp } from "./mcp-guard";
+import { SuperhumanProvider } from "./superhuman-provider";
 
 export interface Label {
   id: string;
@@ -25,8 +26,8 @@ export interface LabelResult {
  * @returns Array of labels with id and name
  */
 export async function listLabels(_provider: ConnectionProvider): Promise<Label[]> {
-  // TODO: Implement via MCP when a list_labels tool is available
-  throw new Error("MCP connection required. Run 'superhuman account auth' to set up MCP.");
+  // TODO: Implement via SuperhumanProvider
+  throw new Error("Not yet implemented. Run 'superhuman account auth' to authenticate.");
 }
 
 /**
@@ -40,8 +41,8 @@ export async function getThreadLabels(
   _provider: ConnectionProvider,
   _threadId: string
 ): Promise<Label[]> {
-  // TODO: Implement via MCP when a get_thread_labels tool is available
-  throw new Error("MCP connection required. Run 'superhuman account auth' to set up MCP.");
+  // TODO: Implement via SuperhumanProvider
+  throw new Error("Not yet implemented. Run 'superhuman account auth' to authenticate.");
 }
 
 /**
@@ -57,17 +58,24 @@ export async function addLabel(
   threadId: string,
   labelId: string
 ): Promise<LabelResult> {
-  const mcp = requireMcp(provider);
-  try {
-    await mcp.callTool("update_email", {
-      thread_id: threadId,
-      action: "add_label",
-      label: labelId,
-    });
-    return { success: true };
-  } catch (e: any) {
-    return { success: false, error: e.message };
+  if (provider instanceof SuperhumanProvider) {
+    if (!provider.hasPortal()) {
+      return { success: false, error: "Requires running Superhuman app with CDP connection for label operations" };
+    }
+    try {
+      await provider.portalInvoke("threadInternal", "modifyLabels", [
+        threadId,
+        { addLabelIds: [labelId], removeLabelIds: [] },
+      ]);
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
   }
+
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
 }
 
 /**
@@ -83,17 +91,24 @@ export async function removeLabel(
   threadId: string,
   labelId: string
 ): Promise<LabelResult> {
-  const mcp = requireMcp(provider);
-  try {
-    await mcp.callTool("update_email", {
-      thread_id: threadId,
-      action: "remove_label",
-      label: labelId,
-    });
-    return { success: true };
-  } catch (e: any) {
-    return { success: false, error: e.message };
+  if (provider instanceof SuperhumanProvider) {
+    if (!provider.hasPortal()) {
+      return { success: false, error: "Requires running Superhuman app with CDP connection for label operations" };
+    }
+    try {
+      await provider.portalInvoke("threadInternal", "modifyLabels", [
+        threadId,
+        { addLabelIds: [], removeLabelIds: [labelId] },
+      ]);
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
   }
+
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
 }
 
 /**
@@ -107,16 +122,24 @@ export async function starThread(
   provider: ConnectionProvider,
   threadId: string
 ): Promise<LabelResult> {
-  const mcp = requireMcp(provider);
-  try {
-    await mcp.callTool("update_email", {
-      thread_id: threadId,
-      action: "star",
-    });
-    return { success: true };
-  } catch (e: any) {
-    return { success: false, error: e.message };
+  if (provider instanceof SuperhumanProvider) {
+    if (!provider.hasPortal()) {
+      return { success: false, error: "Requires running Superhuman app with CDP connection for star operations" };
+    }
+    try {
+      await provider.portalInvoke("threadInternal", "modifyLabels", [
+        threadId,
+        { addLabelIds: ["STARRED"], removeLabelIds: [] },
+      ]);
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
   }
+
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
 }
 
 /**
@@ -130,16 +153,24 @@ export async function unstarThread(
   provider: ConnectionProvider,
   threadId: string
 ): Promise<LabelResult> {
-  const mcp = requireMcp(provider);
-  try {
-    await mcp.callTool("update_email", {
-      thread_id: threadId,
-      action: "unstar",
-    });
-    return { success: true };
-  } catch (e: any) {
-    return { success: false, error: e.message };
+  if (provider instanceof SuperhumanProvider) {
+    if (!provider.hasPortal()) {
+      return { success: false, error: "Requires running Superhuman app with CDP connection for star operations" };
+    }
+    try {
+      await provider.portalInvoke("threadInternal", "modifyLabels", [
+        threadId,
+        { addLabelIds: [], removeLabelIds: ["STARRED"] },
+      ]);
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
   }
+
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
 }
 
 /**
@@ -153,6 +184,6 @@ export async function listStarred(
   _provider: ConnectionProvider,
   _limit: number = 50
 ): Promise<Array<{ id: string }>> {
-  // TODO: Implement via MCP when a search/filter tool supports starred filter
-  throw new Error("MCP connection required. Run 'superhuman account auth' to set up MCP.");
+  // TODO: Implement via SuperhumanProvider
+  throw new Error("Not yet implemented. Run 'superhuman account auth' to authenticate.");
 }

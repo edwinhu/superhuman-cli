@@ -33,36 +33,36 @@ describe("reply.ts with ConnectionProvider", () => {
     clearTokenCache();
   });
 
-  test("replyToThread rejects CachedTokenProvider (requires MCP)", async () => {
+  test("replyToThread rejects CachedTokenProvider (requires SuperhumanProvider)", async () => {
     const token = createTestToken();
     setTokenCacheForTest(token.email, token);
     const provider = new CachedTokenProvider(token.email);
 
     const { replyToThread } = await import("../reply");
     await expect(replyToThread(provider, "thread1", "Thanks!", true)).rejects.toThrow(
-      "MCP connection required"
+      "SuperhumanProvider required"
     );
   });
 
-  test("replyAllToThread rejects CachedTokenProvider (requires MCP)", async () => {
+  test("replyAllToThread rejects CachedTokenProvider (requires SuperhumanProvider)", async () => {
     const token = createTestToken();
     setTokenCacheForTest(token.email, token);
     const provider = new CachedTokenProvider(token.email);
 
     const { replyAllToThread } = await import("../reply");
     await expect(replyAllToThread(provider, "thread1", "Thanks all!", true)).rejects.toThrow(
-      "MCP connection required"
+      "SuperhumanProvider required"
     );
   });
 
-  test("forwardThread rejects CachedTokenProvider (requires MCP)", async () => {
+  test("forwardThread rejects CachedTokenProvider (requires SuperhumanProvider)", async () => {
     const token = createTestToken();
     setTokenCacheForTest(token.email, token);
     const provider = new CachedTokenProvider(token.email);
 
     const { forwardThread } = await import("../reply");
     await expect(forwardThread(provider, "thread1", "bob@example.com", "FYI", true)).rejects.toThrow(
-      "MCP connection required"
+      "SuperhumanProvider required"
     );
   });
 });

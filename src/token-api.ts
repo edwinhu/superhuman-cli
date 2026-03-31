@@ -9,20 +9,40 @@
 import type { SuperhumanConnection, ChromeExtConnection } from "./superhuman-api";
 import { listAccounts, switchAccount } from "./accounts";
 
+/**
+ * Full token info stored in the token cache.
+ *
+ * With the migration to SuperhumanProvider, the primary fields needed are:
+ *   - email, superhumanToken (used by SuperhumanProvider / SuperhumanTokenInfo)
+ *
+ * The following fields are retained for backward compatibility with
+ * CachedTokenProvider and legacy OAuth flows, but are candidates for
+ * removal once all operations route through SuperhumanProvider:
+ *   - accessToken (OAuth access token — replaced by superhumanToken.token)
+ *   - expires (OAuth token expiry — replaced by superhumanToken.expires)
+ *   - isMicrosoft (provider detection — SuperhumanProvider is provider-agnostic)
+ *   - refreshToken (OAuth refresh — not needed for Superhuman JWT)
+ *   - idToken / idTokenExpires (legacy Superhuman auth, superseded by superhumanToken)
+ */
 export interface TokenInfo {
+  /** @deprecated Use superhumanToken.token instead when available */
   accessToken: string;
   email: string;
+  /** @deprecated Use superhumanToken.expires instead when available */
   expires: number;
+  /** @deprecated SuperhumanProvider is provider-agnostic; retained for CachedTokenProvider compat */
   isMicrosoft: boolean;
-  // OAuth refresh token for background refresh
+  /** @deprecated OAuth refresh token — not needed for Superhuman JWT flow */
   refreshToken?: string;
   // Superhuman backend API fields
   userId?: string;
+  /** @deprecated Superseded by superhumanToken.token */
   idToken?: string;
+  /** @deprecated Superseded by superhumanToken.expires */
   idTokenExpires?: number;
   // 4-char user prefix for generating event IDs (e.g., "4sKP")
   userPrefix?: string;
-  // Superhuman backend API token (for userdata.getThreads, etc.)
+  /** Superhuman backend JWT — the primary token for all API operations */
   superhumanToken?: {
     token: string;
     expires: number;

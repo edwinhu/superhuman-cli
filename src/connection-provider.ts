@@ -15,7 +15,7 @@ import {
   hasValidCachedTokens,
 } from "./token-api";
 import { listAccounts } from "./accounts";
-import { McpConnectionProvider, hasMcpTokens } from "./mcp-provider";
+import { SuperhumanProvider, type SuperhumanTokenInfo } from "./superhuman-provider";
 
 /**
  * Account type detection result (matches send-api.ts AccountInfo)
@@ -135,14 +135,30 @@ export class CDPConnectionProvider implements ConnectionProvider {
 }
 
 /**
+ * Build the best provider from a cached TokenInfo.
+ * If the token has a superhumanToken, return SuperhumanProvider;
+ * otherwise fall back to CachedTokenProvider for backward compat.
+ */
+function providerFromToken(token: TokenInfo, email: string): ConnectionProvider {
+  if (token.superhumanToken) {
+    const shTokenInfo: SuperhumanTokenInfo = {
+      token: token.superhumanToken.token,
+      email: token.email,
+      expires: token.superhumanToken.expires,
+    };
+    return new SuperhumanProvider(shTokenInfo);
+  }
+  return new CachedTokenProvider(email);
+}
+
+/**
  * Resolve the best available ConnectionProvider.
  *
  * Priority:
- * 1. If --account specified and token is cached -> CachedTokenProvider
- * 2. If any cached tokens exist -> CachedTokenProvider (first account)
- * 3. If MCP tokens available -> McpConnectionProvider
- * 4. If CDP available -> CDPConnectionProvider
- * 5. null (caller must handle)
+ * 1. If --account specified and token is cached -> SuperhumanProvider (if superhumanToken present) or CachedTokenProvider
+ * 2. If any cached tokens exist -> SuperhumanProvider or CachedTokenProvider (first account)
+ * 3. If CDP available -> CDPConnectionProvider
+ * 4. null (caller must handle)
  *
  * @param options - Object with optional `account` and `port` fields
  * @returns ConnectionProvider or null if no tokens and no CDP
@@ -157,28 +173,24 @@ export async function resolveProvider(
   if (options.account) {
     const token = await getCachedToken(options.account);
     if (token) {
-      return new CachedTokenProvider(options.account);
+      return providerFromToken(token, options.account);
     }
-    // Fall through to MCP if explicit account not in cached tokens
+    // Fall through if explicit account not in cached tokens
   }
 
   // If any cached tokens are valid, use the first one
   if (hasValidCachedTokens()) {
     const accounts = getCachedAccounts();
     if (accounts.length > 0) {
+      const token = await getCachedToken(accounts[0]);
+      if (token) {
+        return providerFromToken(token, accounts[0]);
+      }
       return new CachedTokenProvider(accounts[0]);
     }
-  }
-
-  // Try MCP provider if no cached tokens are available
-  if (await hasMcpTokens()) {
-    return new McpConnectionProvider(options.account);
   }
 
   // No cached tokens — would need CDP, but we don't connect here
   // (caller can fall back to CDP themselves if needed)
   return null;
 }
-
-// Re-export MCP provider for direct use
-export { McpConnectionProvider } from "./mcp-provider";

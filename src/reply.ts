@@ -1,13 +1,18 @@
 /**
  * Reply Module
  *
- * Functions for replying to and forwarding email threads via MCP.
- * Provider-specific OAuth paths have been removed.
+ * Functions for replying to and forwarding email threads.
+ * Routes through SuperhumanProvider (direct backend).
  */
 
 import type { ConnectionProvider } from "./connection-provider";
-import { requireMcp } from "./mcp-guard";
+import { SuperhumanProvider } from "./superhuman-provider";
 import { textToHtml } from "./superhuman-api.js";
+import {
+  getUserInfoFromCache,
+  createDraftWithUserInfo,
+  sendDraftSuperhuman,
+} from "./draft-api";
 
 export interface ReplyResult {
   success: boolean;
@@ -50,9 +55,77 @@ async function replyImpl(
   send: boolean,
   replyAll: boolean
 ): Promise<ReplyResult> {
-  const mcp = requireMcp(provider);
+  if (provider instanceof SuperhumanProvider) {
+    return replyViaSuperhuman(provider, threadId, body, send, replyAll);
+  }
+
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
+}
+
+/**
+ * Reply via Superhuman backend: create a reply draft, optionally send it.
+ */
+async function replyViaSuperhuman(
+  provider: SuperhumanProvider,
+  threadId: string,
+  body: string,
+  send: boolean,
+  _replyAll: boolean
+): Promise<ReplyResult> {
+  const token = await provider.getToken();
+  const email = await provider.getCurrentEmail();
+  const userInfo = getUserInfoFromCache(
+    token.superhumanToken?.token || token.accessToken,
+    email,
+    token.accessToken,
+    email.split("@")[0]
+  );
+
   const htmlBody = textToHtml(body);
-  return mcp.replyToThread(threadId, htmlBody, { replyAll, send });
+
+  // Create a reply draft on the existing thread
+  const draftResult = await createDraftWithUserInfo(userInfo, {
+    body: htmlBody,
+    action: "reply",
+    inReplyToThreadId: threadId,
+  });
+
+  if (!draftResult.success || !draftResult.draftId || !draftResult.threadId) {
+    return {
+      success: false,
+      error: draftResult.error || "Failed to create reply draft",
+    };
+  }
+
+  if (!send) {
+    return {
+      success: true,
+      draftId: draftResult.draftId,
+    };
+  }
+
+  // Send the reply draft
+  const sendResult = await sendDraftSuperhuman(userInfo, {
+    draftId: draftResult.draftId,
+    threadId: draftResult.threadId,
+    to: [], // recipients are set from thread context
+    subject: "",
+    htmlBody,
+    inReplyTo: undefined,
+    references: [],
+  });
+
+  if (!sendResult.success) {
+    return { success: false, error: sendResult.error };
+  }
+
+  return {
+    success: true,
+    draftId: draftResult.draftId,
+    messageId: draftResult.draftId,
+  };
 }
 
 /**
@@ -60,13 +133,6 @@ async function replyImpl(
  *
  * Fetches the original message content and constructs a forwarded email
  * with proper "Forwarded message" header.
- *
- * @param provider - Connection provider (must be MCP)
- * @param threadId - The thread ID to forward
- * @param toEmail - The email address to forward to
- * @param body - The message body to include before the forwarded content
- * @param send - If true, send immediately; if false, save as draft
- * @returns Result with success status, optional draft ID, and error message if failed
  */
 export async function forwardThread(
   provider: ConnectionProvider,
@@ -75,33 +141,103 @@ export async function forwardThread(
   body: string,
   send: boolean = false
 ): Promise<ReplyResult> {
-  const mcp = requireMcp(provider);
+  if (provider instanceof SuperhumanProvider) {
+    return forwardViaSuperhuman(provider, threadId, toEmail, body, send);
+  }
+
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
+}
+
+/**
+ * Forward via Superhuman backend.
+ * Reads thread via backendFetch, constructs forward body, creates draft / sends.
+ */
+async function forwardViaSuperhuman(
+  provider: SuperhumanProvider,
+  threadId: string,
+  toEmail: string,
+  body: string,
+  send: boolean
+): Promise<ReplyResult> {
+  const token = await provider.getToken();
+  const email = await provider.getCurrentEmail();
+  const userInfo = getUserInfoFromCache(
+    token.superhumanToken?.token || token.accessToken,
+    email,
+    token.accessToken,
+    email.split("@")[0]
+  );
+
+  // Read thread via backend to get subject/snippet for forward header
+  const data = await provider.backendFetch("/v3/userdata.getThreads", {
+    method: "POST",
+    body: JSON.stringify({
+      filter: { threadIds: [threadId] },
+      offset: 0,
+      limit: 1,
+    }),
+  });
+
+  // Extract last message info from the thread
+  let subject = "(no subject)";
+  let snippet = "";
+  if (data?.threadList?.[0]?.thread?.messages) {
+    const msgs = Object.values(data.threadList[0].thread.messages) as any[];
+    // Sort by date to get the last message
+    msgs.sort((a: any, b: any) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    const last = msgs[msgs.length - 1];
+    if (last) {
+      subject = last.subject || "(no subject)";
+      snippet = last.snippet || "";
+    }
+  }
+
+  if (!subject.startsWith("Fwd:")) {
+    subject = `Fwd: ${subject}`;
+  }
 
   const htmlBody = body ? textToHtml(body) : "";
-  // Read thread to build forward body
-  const messages = await mcp.readThread(threadId);
-  const lastMessage = messages[messages.length - 1];
-  const subject = lastMessage?.subject?.startsWith("Fwd:")
-    ? lastMessage.subject
-    : `Fwd: ${lastMessage?.subject || "(no subject)"}`;
-
   const forwardBody = htmlBody
-    ? `${htmlBody}<br><br>---------- Forwarded message ---------<br>${lastMessage?.snippet || ""}`
-    : `---------- Forwarded message ---------<br>${lastMessage?.snippet || ""}`;
+    ? `${htmlBody}<br><br>---------- Forwarded message ---------<br>${snippet}`
+    : `---------- Forwarded message ---------<br>${snippet}`;
 
-  if (send) {
-    return mcp.sendEmail({
-      to: [toEmail],
-      subject,
-      body: forwardBody,
-      isHtml: true,
-    });
-  }
-  return mcp.createDraft({
+  // Create forward draft
+  const draftResult = await createDraftWithUserInfo(userInfo, {
     to: [toEmail],
     subject,
     body: forwardBody,
-    isHtml: true,
+    action: "forward",
+    inReplyToThreadId: threadId,
   });
-}
 
+  if (!draftResult.success || !draftResult.draftId || !draftResult.threadId) {
+    return {
+      success: false,
+      error: draftResult.error || "Failed to create forward draft",
+    };
+  }
+
+  if (!send) {
+    return { success: true, draftId: draftResult.draftId };
+  }
+
+  const sendResult = await sendDraftSuperhuman(userInfo, {
+    draftId: draftResult.draftId,
+    threadId: draftResult.threadId,
+    to: [{ email: toEmail }],
+    subject,
+    htmlBody: forwardBody,
+  });
+
+  if (!sendResult.success) {
+    return { success: false, error: sendResult.error };
+  }
+
+  return {
+    success: true,
+    draftId: draftResult.draftId,
+    messageId: draftResult.draftId,
+  };
+}

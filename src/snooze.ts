@@ -5,13 +5,13 @@
  * Supports both Microsoft/Outlook and Gmail accounts.
  *
  * Uses direct API calls via superhumanFetch (no CDP/browser connection needed).
- * Thread message IDs are resolved via MCP get_email_thread.
+ * Thread message IDs are resolved via portal RPC.
  */
 
 import type { SuperhumanTokenInfo } from "./token-api";
 import { superhumanFetch } from "./token-api";
 import type { ConnectionProvider } from "./connection-provider";
-import { McpConnectionProvider, getMcpText } from "./mcp-provider";
+import { SuperhumanProvider } from "./superhuman-provider";
 
 export interface SnoozeResult {
   success: boolean;
@@ -224,29 +224,28 @@ export async function listSnoozedDirect(
 // ============================================================================
 
 /**
- * Get message IDs for a thread using MCP get_email_thread.
+ * Get message IDs for a thread using SuperhumanProvider portal RPC.
  */
 async function getThreadMessageIds(
   provider: ConnectionProvider,
   threadId: string
 ): Promise<string[]> {
-  if (!(provider instanceof McpConnectionProvider)) {
+  if (!(provider instanceof SuperhumanProvider)) {
     throw new Error(
-      "MCP provider required to resolve thread message IDs. " +
-      "Provider-specific OAuth has been removed. " +
-      "Use 'superhuman account auth --mcp' to set up MCP authentication."
+      "SuperhumanProvider required to resolve thread message IDs. " +
+      "Run 'superhuman account auth' to authenticate."
     );
   }
 
   try {
-    const result = await provider.callTool("get_email_thread", {
-      thread_id: threadId,
-    });
-    const text = getMcpText(result);
-    const json = JSON.parse(text);
+    const result = await provider.portalInvoke("threadInternal", "getAsync", [
+      threadId,
+      { format: "minimal" },
+    ]);
 
-    // MCP get_email_thread returns messages array with id fields
-    const messages = Array.isArray(json) ? json : (json.messages || []);
+    if (!result || !result.messages) return [];
+
+    const messages = Object.values(result.messages) as any[];
     return messages.map((m: any) => m.id || m.message_id).filter(Boolean);
   } catch {
     return [];

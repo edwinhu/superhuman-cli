@@ -8,10 +8,10 @@ process.env.SUPERHUMAN_CLI_CONFIG_DIR = TEST_CONFIG_DIR;
 import {
   CachedTokenProvider,
   CDPConnectionProvider,
-  McpConnectionProvider,
   resolveProvider,
   type ConnectionProvider,
 } from "../connection-provider";
+import { SuperhumanProvider } from "../superhuman-provider";
 import {
   clearTokenCache,
   setTokenCacheForTest,
@@ -148,7 +148,26 @@ describe("resolveProvider", () => {
     clearTokenCache();
   });
 
-  test("returns CachedTokenProvider when --account matches cached token", async () => {
+  test("returns SuperhumanProvider when --account matches cached token with superhumanToken", async () => {
+    const token: TokenInfo = {
+      accessToken: "cached-tok",
+      email: "user@example.com",
+      expires: Date.now() + 3600000,
+      isMicrosoft: false,
+      superhumanToken: {
+        token: "sh-jwt-tok",
+        expires: Date.now() + 3600000,
+      },
+    };
+    setTokenCacheForTest(token.email, token);
+
+    const provider = await resolveProvider({ account: "user@example.com" });
+    expect(provider).toBeInstanceOf(SuperhumanProvider);
+    const tok = await provider!.getToken();
+    expect(tok.superhumanToken?.token).toBe("sh-jwt-tok");
+  });
+
+  test("returns CachedTokenProvider when --account matches cached token without superhumanToken", async () => {
     const token: TokenInfo = {
       accessToken: "cached-tok",
       email: "user@example.com",
@@ -163,7 +182,24 @@ describe("resolveProvider", () => {
     expect(tok.accessToken).toBe("cached-tok");
   });
 
-  test("returns CachedTokenProvider when cached tokens exist (no --account)", async () => {
+  test("returns SuperhumanProvider when cached tokens exist with superhumanToken (no --account)", async () => {
+    const token: TokenInfo = {
+      accessToken: "auto-tok",
+      email: "auto@example.com",
+      expires: Date.now() + 3600000,
+      isMicrosoft: false,
+      superhumanToken: {
+        token: "sh-auto-tok",
+        expires: Date.now() + 3600000,
+      },
+    };
+    setTokenCacheForTest(token.email, token);
+
+    const provider = await resolveProvider({});
+    expect(provider).toBeInstanceOf(SuperhumanProvider);
+  });
+
+  test("returns CachedTokenProvider when cached tokens exist without superhumanToken (no --account)", async () => {
     const token: TokenInfo = {
       accessToken: "auto-tok",
       email: "auto@example.com",
@@ -176,12 +212,9 @@ describe("resolveProvider", () => {
     expect(provider).toBeInstanceOf(CachedTokenProvider);
   });
 
-  test("returns null or McpConnectionProvider when no cached tokens and no CDP", async () => {
+  test("returns null when no cached tokens and no CDP", async () => {
     // No cached tokens, no CDP connection possible
-    // May return McpConnectionProvider if MCP tokens are available on disk
     const provider = await resolveProvider({});
-    if (provider !== null) {
-      expect(provider).toBeInstanceOf(McpConnectionProvider);
-    }
+    expect(provider).toBeNull();
   });
 });

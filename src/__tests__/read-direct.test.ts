@@ -36,25 +36,25 @@ describe("readThread", () => {
     clearTokenCache();
   });
 
-  test("readThread requires MCP provider (CachedTokenProvider throws)", async () => {
+  test("readThread requires SuperhumanProvider (CachedTokenProvider throws)", async () => {
     const token = createTestToken();
     setTokenCacheForTest(token.email, token);
     const provider = new CachedTokenProvider(token.email);
 
     const { readThread } = await import("../read");
     await expect(readThread(provider, "thread123")).rejects.toThrow(
-      "readThread requires an MCP provider"
+      "readThread requires a SuperhumanProvider"
     );
   });
 
-  test("readThread requires MCP provider for MS Graph too", async () => {
+  test("readThread requires SuperhumanProvider for MS Graph too", async () => {
     const token = createTestToken({ isMicrosoft: true });
     setTokenCacheForTest(token.email, token);
     const provider = new CachedTokenProvider(token.email);
 
     const { readThread } = await import("../read");
     await expect(readThread(provider, "convABC")).rejects.toThrow(
-      "readThread requires an MCP provider"
+      "readThread requires a SuperhumanProvider"
     );
   });
 });

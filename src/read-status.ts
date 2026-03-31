@@ -1,11 +1,12 @@
 /**
  * Read Status Module
  *
- * Functions for marking email threads as read or unread via MCP.
+ * Functions for marking email threads as read or unread.
+ * Routes to Superhuman portal RPC (SuperhumanProvider).
  */
 
 import type { ConnectionProvider } from "./connection-provider";
-import { requireMcp } from "./mcp-guard";
+import { SuperhumanProvider } from "./superhuman-provider";
 
 export interface ReadStatusResult {
   success: boolean;
@@ -23,16 +24,24 @@ export async function markAsRead(
   provider: ConnectionProvider,
   threadId: string
 ): Promise<ReadStatusResult> {
-  const mcp = requireMcp(provider);
-  try {
-    await mcp.callTool("update_email", {
-      thread_id: threadId,
-      action: "mark_read",
-    });
-    return { success: true };
-  } catch (e: any) {
-    return { success: false, error: e.message };
+  if (provider instanceof SuperhumanProvider) {
+    if (!provider.hasPortal()) {
+      return { success: false, error: "Requires running Superhuman app with CDP connection for read status" };
+    }
+    try {
+      await provider.portalInvoke("threadInternal", "modifyLabels", [
+        threadId,
+        { addLabelIds: [], removeLabelIds: ["UNREAD"] },
+      ]);
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
   }
+
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
 }
 
 /**
@@ -46,14 +55,22 @@ export async function markAsUnread(
   provider: ConnectionProvider,
   threadId: string
 ): Promise<ReadStatusResult> {
-  const mcp = requireMcp(provider);
-  try {
-    await mcp.callTool("update_email", {
-      thread_id: threadId,
-      action: "mark_unread",
-    });
-    return { success: true };
-  } catch (e: any) {
-    return { success: false, error: e.message };
+  if (provider instanceof SuperhumanProvider) {
+    if (!provider.hasPortal()) {
+      return { success: false, error: "Requires running Superhuman app with CDP connection for read status" };
+    }
+    try {
+      await provider.portalInvoke("threadInternal", "modifyLabels", [
+        threadId,
+        { addLabelIds: ["UNREAD"], removeLabelIds: [] },
+      ]);
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
   }
+
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
 }

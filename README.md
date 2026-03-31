@@ -1,6 +1,6 @@
 # superhuman-cli
 
-CLI and MCP server to control [Superhuman](https://superhuman.com) email client via Chrome DevTools Protocol (CDP).
+CLI to control [Superhuman](https://superhuman.com) email client via Chrome DevTools Protocol (CDP) and Superhuman's backend API.
 
 ## Requirements
 
@@ -93,12 +93,12 @@ superhuman contact search "john" --account user@gmail.com
 superhuman contact search "john" --account user@company.com
 ```
 
-**How it works:** The CLI uses Superhuman's MCP server for all email operations. Run `superhuman account auth` once to set up authentication.
+**How it works:** The CLI uses Superhuman's backend API (JWT auth) and Portal RPC (CDP). Run `superhuman account auth` once to extract and cache credentials.
 
 ### Authentication
 
 ```bash
-# Set up MCP authentication (required once)
+# Extract JWT from running Superhuman app (required once)
 superhuman account auth
 
 # Tokens are cached to ~/.config/superhuman-cli/tokens.json
@@ -282,110 +282,55 @@ superhuman calendar free --date tomorrow --range 7
 | `--stream` / `--ndjson` | Alias for `--json` |
 | `--port <number>` | CDP port (default: 9400) |
 
-## MCP Server
-
-Run as an MCP server for Claude integration:
-
-```bash
-bun src/index.ts --mcp
-```
-
-### MCP Tools
-
-| Tool | Description |
-|------|-------------|
-| `superhuman_inbox` | List recent emails from inbox |
-| `superhuman_search` | Search emails |
-| `superhuman_read` | Read a thread |
-| `superhuman_draft` | Create an email draft |
-| `superhuman_send` | Send an email |
-| `superhuman_reply` | Reply to a thread |
-| `superhuman_reply_all` | Reply-all to a thread |
-| `superhuman_forward` | Forward a thread |
-| `superhuman_archive` | Archive thread(s) |
-| `superhuman_delete` | Delete thread(s) |
-| `superhuman_mark_read` | Mark thread(s) as read |
-| `superhuman_mark_unread` | Mark thread(s) as unread |
-| `superhuman_labels` | List all labels |
-| `superhuman_get_labels` | Get labels on a thread |
-| `superhuman_add_label` | Add label to thread(s) |
-| `superhuman_remove_label` | Remove label from thread(s) |
-| `superhuman_star` | Star thread(s) |
-| `superhuman_unstar` | Unstar thread(s) |
-| `superhuman_starred` | List starred threads |
-| `superhuman_snooze` | Snooze thread(s) |
-| `superhuman_unsnooze` | Unsnooze thread(s) |
-| `superhuman_snoozed` | List snoozed threads |
-| `superhuman_attachments` | List attachments in a thread |
-| `superhuman_download_attachment` | Download an attachment |
-| `superhuman_snippets` | List all snippets |
-| `superhuman_snippet` | Use a snippet to compose or send |
-| `superhuman_accounts` | List linked accounts |
-| `superhuman_switch_account` | Switch to a different account |
-| `superhuman_calendar_list` | List calendar events |
-| `superhuman_calendar_create` | Create calendar event |
-| `superhuman_calendar_update` | Update calendar event |
-| `superhuman_calendar_delete` | Delete calendar event |
-| `superhuman_calendar_free_busy` | Check free/busy availability |
-| `superhuman_ask_ai` | Ask AI to search emails, answer questions, or compose |
-
-### Claude Desktop Configuration
-
-Add to `~/Library/Application Support/Claude/claude_desktop_config.json`:
-
-```json
-{
-  "mcpServers": {
-    "superhuman": {
-      "command": "bun",
-      "args": ["/path/to/superhuman-cli/src/index.ts", "--mcp"]
-    }
-  }
-}
-```
-
 ## How It Works
 
-### MCP Provider (Primary)
+### Two API Layers
 
-All email operations use Superhuman's official MCP server (`https://mcp.mail.superhuman.com/mcp`):
+**Layer 1: Backend HTTP API** (`superhumanFetch` with JWT)
 
-| Operation | MCP Tool |
+Works with cached JWT token — no Superhuman app needed after initial auth.
+
+| Operation | Endpoint |
 |-----------|----------|
-| List inbox | `list_email` |
-| Search | `query_email_and_calendar` |
-| Read thread | `get_email_thread` |
-| Send / Reply / Forward | `send_email` |
-| Create draft | `draft_email` |
-| Archive / Delete | `update_email` (mark_done / trash) |
-| Labels / Star | `update_email` |
-| Read status | `update_email` (mark_read / mark_unread) |
-| Calendar events | `create_or_update_event` |
-| Free/busy | `get_availability_calendar` |
+| List inbox | `POST /v3/userdata.getThreads` |
+| Send email | `POST /messages/send` |
+| Drafts | `POST /v3/userdata.writeMessage` |
+| AI compose/search | `POST /v3/ai.compose`, `POST /v3/ai.askAIProxy` |
+| Snooze | `POST /reminders/create`, `POST /reminders/cancel` |
+| Attachments | `POST /v3/attachments.upload` |
+| Snippets | Superhuman backend API |
 
-### Superhuman Backend
+**Layer 2: Portal RPC** (`portal.invoke` via CDP `Runtime.evaluate`)
 
-Some operations use Superhuman's native backend API directly:
+Requires Superhuman app running. Proxies through the app's own OAuth session.
 
-- **AI queries** — `ai.compose`, `ai.askAIProxy`
-- **Snooze** — `reminders/create`, `reminders/cancel`
-- **Native drafts** — `userdata.writeMessage`
-- **Attachments** — `attachments.upload`
-- **Send with undo** — `messages/send`
-- **Snippets** — Superhuman backend API
+| Operation | Portal Service |
+|-----------|---------------|
+| Search | `threadInternal.listAsync` |
+| Read thread | `threadInternal.getAsync` |
+| Archive / Delete | `threadInternal.modifyLabels` |
+| Labels / Star | `threadInternal.modifyLabels` |
+| Read status | `threadInternal.modifyLabels` |
+| Calendar | `gcal.*` (list, create, update, delete, free/busy) |
 
-### CDP (Setup Only)
+### Graceful Degradation
 
-Chrome DevTools Protocol is only needed for:
+- **Containers / headless**: Inbox, send, AI, drafts, snooze, attachments, snippets via cached JWT
+- **With Superhuman app running**: Full features including search, labels, star, archive, calendar
 
-- `account auth` — One-time token extraction from Superhuman
+### CDP
+
+Chrome DevTools Protocol is used for:
+
+- `account auth` — One-time JWT extraction from Superhuman
 - `status` — Check Superhuman connection
+- Portal RPC — Runtime.evaluate for search, labels, calendar operations
 
 ### Benefits
 
-- **Simple auth**: Single MCP authentication, no provider OAuth management
-- **Reliability**: No token refresh, no OAuth expiry issues
-- **Speed**: No CDP round-trips for email operations
+- **Simple auth**: Single JWT, no OAuth token management
+- **Long-lived tokens**: No 5-minute refresh cycles
+- **No external dependencies**: No MCP server, no Gmail/MS Graph OAuth
 - **Multi-account**: Works with both Gmail and Microsoft/Outlook accounts
 
 ## License

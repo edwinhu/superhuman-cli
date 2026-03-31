@@ -102,10 +102,10 @@ describe("NDJSON output includes threadId", () => {
     }) as unknown as typeof fetch;
 
     // readThread with CachedTokenProvider will throw since direct API path was removed.
-    // This test now validates that the MCP path is required.
+    // This test now validates that SuperhumanProvider is required.
     const provider = new CachedTokenProvider(token.email);
     await expect(readThread(provider, "testThread456")).rejects.toThrow(
-      "readThread requires an MCP provider"
+      "readThread requires a SuperhumanProvider"
     );
   });
 

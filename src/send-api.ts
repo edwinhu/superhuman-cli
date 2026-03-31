@@ -1,12 +1,19 @@
 /**
  * Send API Module
  *
- * Email sending via MCP provider or Superhuman backend.
+ * Email sending via Superhuman backend.
  * Provider-specific OAuth (Gmail/MS Graph) has been removed.
  */
 
 import type { ConnectionProvider } from "./connection-provider";
-import { requireMcp } from "./mcp-guard";
+import { SuperhumanProvider } from "./superhuman-provider";
+import {
+  getUserInfoFromCache,
+  createDraftWithUserInfo,
+  sendDraftSuperhuman,
+  type Recipient,
+} from "./draft-api";
+import { textToHtml } from "./superhuman-api.js";
 
 /**
  * Options for sending an email
@@ -90,77 +97,188 @@ export interface ThreadInfoForReply {
 // ============================================================================
 // ConnectionProvider-based wrappers
 //
-// These functions accept a ConnectionProvider and route through MCP.
-// Provider-specific OAuth paths have been removed.
+// These functions accept a ConnectionProvider and route through
+// SuperhumanProvider (direct backend) or MCP as fallback.
 // ============================================================================
 
 /**
- * Send an email using a ConnectionProvider (MCP only).
+ * Build a UserInfo object from a SuperhumanProvider for use with draft-api functions.
+ */
+async function userInfoFromProvider(provider: SuperhumanProvider) {
+  const token = await provider.getToken();
+  const email = await provider.getCurrentEmail();
+  return getUserInfoFromCache(
+    token.superhumanToken?.token || token.accessToken,
+    email,
+    token.accessToken,
+    email.split("@")[0]
+  );
+}
+
+/**
+ * Convert string[] emails to Recipient[] for draft-api.
+ */
+function toRecipients(emails?: string[]): Recipient[] {
+  return (emails || []).map((e) => ({ email: e }));
+}
+
+/**
+ * Send an email using a ConnectionProvider.
+ * Routes through SuperhumanProvider (direct backend) or MCP.
  */
 export async function sendEmailViaProvider(
   provider: ConnectionProvider,
   options: SendEmailOptions
 ): Promise<SendResult> {
-  const mcp = requireMcp(provider);
-  return mcp.sendEmail(options);
+  if (provider instanceof SuperhumanProvider) {
+    const userInfo = await userInfoFromProvider(provider);
+    const htmlBody = options.isHtml ? options.body : textToHtml(options.body);
+    const draftResult = await createDraftWithUserInfo(userInfo, {
+      to: options.to,
+      cc: options.cc,
+      bcc: options.bcc,
+      subject: options.subject,
+      body: htmlBody,
+      action: options.threadId ? "reply" : "compose",
+      inReplyToThreadId: options.threadId,
+      inReplyToRfc822Id: options.inReplyTo,
+      references: options.references,
+    });
+    if (!draftResult.success || !draftResult.draftId || !draftResult.threadId) {
+      return { success: false, error: draftResult.error || "Failed to create draft for send" };
+    }
+    const sendResult = await sendDraftSuperhuman(userInfo, {
+      draftId: draftResult.draftId,
+      threadId: draftResult.threadId,
+      to: toRecipients(options.to),
+      cc: toRecipients(options.cc),
+      bcc: toRecipients(options.bcc),
+      subject: options.subject,
+      htmlBody,
+      inReplyTo: options.inReplyTo,
+      references: options.references,
+    });
+    if (!sendResult.success) {
+      return { success: false, error: sendResult.error };
+    }
+    return { success: true, messageId: draftResult.draftId, threadId: draftResult.threadId };
+  }
+
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
 }
 
 /**
- * Create a draft using a ConnectionProvider (MCP only).
+ * Create a draft using a ConnectionProvider.
+ * Routes through SuperhumanProvider (direct backend) or MCP.
  */
 export async function createDraftViaProvider(
   provider: ConnectionProvider,
   options: SendEmailOptions
 ): Promise<DraftResult> {
-  const mcp = requireMcp(provider);
-  return mcp.createDraft(options);
+  if (provider instanceof SuperhumanProvider) {
+    const userInfo = await userInfoFromProvider(provider);
+    const htmlBody = options.isHtml ? options.body : textToHtml(options.body);
+    return createDraftWithUserInfo(userInfo, {
+      to: options.to,
+      cc: options.cc,
+      bcc: options.bcc,
+      subject: options.subject,
+      body: htmlBody,
+      action: options.threadId ? "reply" : "compose",
+      inReplyToThreadId: options.threadId,
+      inReplyToRfc822Id: options.inReplyTo,
+      references: options.references,
+    });
+  }
+
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
 }
 
 /**
- * Update a draft using ConnectionProvider (MCP only).
+ * Update a draft using ConnectionProvider.
+ * Routes through SuperhumanProvider (direct backend) or MCP.
  */
 export async function updateDraftViaProvider(
   provider: ConnectionProvider,
   draftId: string,
   options: UpdateDraftOptions
 ): Promise<DraftResult> {
-  const mcp = requireMcp(provider);
-  // MCP draft_email supports revision via draft_id
-  return mcp.createDraft({
-    to: options.to || [],
-    subject: options.subject || "",
-    body: options.body || "",
-    isHtml: options.isHtml,
-  });
+  if (provider instanceof SuperhumanProvider) {
+    const userInfo = await userInfoFromProvider(provider);
+    const htmlBody = options.body
+      ? (options.isHtml ? options.body : textToHtml(options.body))
+      : undefined;
+    // updateDraftWithUserInfo requires threadId — use draftId as fallback
+    const { updateDraftWithUserInfo } = await import("./draft-api");
+    const ok = await updateDraftWithUserInfo(userInfo, draftId, draftId, {
+      to: options.to,
+      cc: options.cc,
+      bcc: options.bcc,
+      subject: options.subject,
+      body: htmlBody,
+    });
+    return { success: ok, draftId };
+  }
+
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
 }
 
 /**
- * Send a draft by ID using a ConnectionProvider (MCP only).
+ * Send a draft by ID using a ConnectionProvider.
+ * Routes through SuperhumanProvider (direct backend) or MCP.
  */
 export async function sendDraftByIdViaProvider(
   provider: ConnectionProvider,
   draftId: string
 ): Promise<SendResult> {
-  const mcp = requireMcp(provider);
-  return mcp.sendDraftById(draftId);
+  if (provider instanceof SuperhumanProvider) {
+    const userInfo = await userInfoFromProvider(provider);
+    // Minimal send — draft already has recipients/subject/body persisted.
+    // We need at least the draftId and threadId; use draftId as threadId.
+    const sendResult = await sendDraftSuperhuman(userInfo, {
+      draftId,
+      threadId: draftId,
+      to: [],
+      subject: "",
+      htmlBody: "",
+    });
+    if (!sendResult.success) {
+      return { success: false, error: sendResult.error };
+    }
+    return { success: true, messageId: draftId };
+  }
+
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
 }
 
 /**
- * Delete a draft using a ConnectionProvider (MCP only).
+ * Delete a draft using a ConnectionProvider.
+ * Routes through SuperhumanProvider (direct backend) or MCP.
  */
 export async function deleteDraftViaProvider(
   provider: ConnectionProvider,
   draftId: string
 ): Promise<{ success: boolean; error?: string }> {
-  const mcp = requireMcp(provider);
-  // MCP has no direct draft deletion tool — trash the draft thread
-  try {
-    await mcp.callTool("update_email", {
-      thread_id: draftId,
-      action: "trash",
-    });
-    return { success: true };
-  } catch (e: any) {
-    return { success: false, error: e.message };
+  if (provider instanceof SuperhumanProvider) {
+    const { deleteDraftWithUserInfo } = await import("./draft-api");
+    const userInfo = await userInfoFromProvider(provider);
+    try {
+      await deleteDraftWithUserInfo(userInfo, draftId, draftId);
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
   }
+
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
 }

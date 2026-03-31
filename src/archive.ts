@@ -1,11 +1,12 @@
 /**
  * Archive Module
  *
- * Functions for archiving and trashing email threads via MCP.
+ * Functions for archiving and trashing email threads.
+ * Routes to Superhuman portal RPC (SuperhumanProvider).
  */
 
 import type { ConnectionProvider } from "./connection-provider";
-import { requireMcp } from "./mcp-guard";
+import { SuperhumanProvider } from "./superhuman-provider";
 
 export interface ArchiveResult {
   success: boolean;
@@ -28,16 +29,24 @@ export async function archiveThread(
   provider: ConnectionProvider,
   threadId: string
 ): Promise<ArchiveResult> {
-  const mcp = requireMcp(provider);
-  try {
-    await mcp.callTool("update_email", {
-      thread_id: threadId,
-      action: "mark_done",
-    });
-    return { success: true };
-  } catch (e: any) {
-    return { success: false, error: e.message };
+  if (provider instanceof SuperhumanProvider) {
+    if (!provider.hasPortal()) {
+      return { success: false, error: "Requires running Superhuman app with CDP connection for archive" };
+    }
+    try {
+      await provider.portalInvoke("threadInternal", "modifyLabels", [
+        threadId,
+        { addLabelIds: [], removeLabelIds: ["INBOX"] },
+      ]);
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
   }
+
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
 }
 
 /**
@@ -51,14 +60,22 @@ export async function deleteThread(
   provider: ConnectionProvider,
   threadId: string
 ): Promise<DeleteResult> {
-  const mcp = requireMcp(provider);
-  try {
-    await mcp.callTool("update_email", {
-      thread_id: threadId,
-      action: "trash",
-    });
-    return { success: true };
-  } catch (e: any) {
-    return { success: false, error: e.message };
+  if (provider instanceof SuperhumanProvider) {
+    if (!provider.hasPortal()) {
+      return { success: false, error: "Requires running Superhuman app with CDP connection for delete" };
+    }
+    try {
+      await provider.portalInvoke("threadInternal", "modifyLabels", [
+        threadId,
+        { addLabelIds: ["TRASH"], removeLabelIds: [] },
+      ]);
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
   }
+
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
 }
