@@ -25,6 +25,8 @@ export interface SuperhumanTokenInfo {
   accountId?: string;
   /** Token expiry as ms timestamp */
   expires?: number;
+  /** 4-char user prefix for event ID generation (e.g., "4sKP") */
+  userPrefix?: string;
 }
 
 /**
@@ -60,6 +62,7 @@ export class SuperhumanProvider implements ConnectionProvider {
       isMicrosoft: false,
       idToken: this.tokenInfo.token,
       idTokenExpires: expires,
+      userPrefix: this.tokenInfo.userPrefix,
       superhumanToken: {
         token: this.tokenInfo.token,
         expires,
@@ -77,6 +80,11 @@ export class SuperhumanProvider implements ConnectionProvider {
       isMicrosoft: false,
       provider: "superhuman" as any,
     };
+  }
+
+  /** Get the underlying token info (for reconstructing with a CDP connection) */
+  getTokenInfo(): SuperhumanTokenInfo {
+    return this.tokenInfo;
   }
 
   async disconnect(): Promise<void> {

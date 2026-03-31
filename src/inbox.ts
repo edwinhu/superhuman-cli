@@ -124,19 +124,99 @@ function buildGetThreadsFilter(options: ListInboxOptions): { listId: string } {
 // ---------------------------------------------------------------------------
 
 /**
- * Parse a portal listAsync result (array of thread objects) into InboxThread[].
+ * Parse a from field that may be a string or an object with {email, name}.
+ * The portal returns from as an object: {email, name, attributes, _domain}.
+ */
+function parseFromField(from: any): { email: string; name: string } {
+  if (!from) return { email: "", name: "" };
+  if (typeof from === "string") return parseFrom(from);
+  // Object form: {email, name, ...}
+  return {
+    email: from.email || from.attributes?.email || "",
+    name: from.name || "",
+  };
+}
+
+/**
+ * Parse a portal listAsync result into InboxThread[].
+ *
+ * The portal returns an object: { threads: [...], query, startAt, ... }
+ * Each thread item has shape: { json: { id, messages: [...] }, listIds, ... }
+ * Messages within json.messages are arrays of message objects with
+ * subject, from (object), date, snippet, labelIds fields.
+ *
+ * Also handles legacy flat array format where items carry fields directly
+ * (used by tests and older response shapes).
  */
 function parsePortalListResult(result: any): InboxThread[] {
-  if (!Array.isArray(result)) return [];
-  return result.map((item: any) => ({
-    id: item.id || item.threadId || "",
-    subject: item.subject || "",
-    from: parseFrom(item.from || ""),
-    date: item.date || "",
-    snippet: item.snippet || "",
-    labelIds: item.labelIds || [],
-    messageCount: item.messageCount || 1,
-  }));
+  // Portal wraps threads in an object: { threads: [...], ... }
+  const rawThreads: any[] = Array.isArray(result)
+    ? result
+    : Array.isArray(result?.threads)
+    ? result.threads
+    : [];
+
+  if (rawThreads.length === 0) return [];
+
+  return rawThreads
+    .map((item: any): InboxThread | null => {
+      // Real portal format: { json: { id, messages: [] }, listIds, ... }
+      if (item.json) {
+        const json = item.json;
+        const threadId: string = json.id || item.id || item.threadId || "";
+        // listIds lives on the thread wrapper, not on individual messages
+        const threadListIds: string[] = item.listIds || [];
+
+        const messages: any[] = Array.isArray(json.messages)
+          ? json.messages
+          : typeof json.messages === "object" && json.messages !== null
+          ? Object.values(json.messages)
+          : [];
+
+        if (messages.length === 0) {
+          // Draft threads or threads with no messages yet — include with thread-level metadata
+          return {
+            id: threadId,
+            subject: "",
+            from: { email: "", name: "" },
+            date: "",
+            snippet: "",
+            labelIds: threadListIds,
+            messageCount: 0,
+          };
+        }
+
+        // Sort by date ascending, pick the latest message
+        messages.sort(
+          (a: any, b: any) =>
+            new Date(a.date || 0).getTime() - new Date(b.date || 0).getTime()
+        );
+        const latest = messages[messages.length - 1];
+
+        return {
+          id: latest.id || threadId,
+          subject: latest.subject || "",
+          from: parseFromField(latest.from),
+          date: latest.date || "",
+          snippet: latest.snippet || "",
+          // Prefer thread-level listIds (more complete); fall back to message labelIds
+          labelIds: threadListIds.length > 0 ? threadListIds : (latest.labelIds || []),
+          messageCount: messages.length,
+        };
+      }
+
+      // Legacy flat format: { id, threadId, subject, from, date, snippet, labelIds, messageCount }
+      return {
+        id: item.id || item.threadId || "",
+        subject: item.subject || "",
+        from: parseFromField(item.from),
+        date: item.date || "",
+        snippet: item.snippet || "",
+        labelIds: item.labelIds || [],
+        messageCount: item.messageCount || 1,
+      };
+    })
+    .filter((t): t is InboxThread => t !== null);
 }
 
 async function listInboxSuperhuman(
@@ -204,61 +284,21 @@ async function listInboxSuperhuman(
 }
 
 async function searchInboxSuperhuman(
-  provider: SuperhumanProvider,
-  options: SearchOptions
+  _provider: SuperhumanProvider,
+  _options: SearchOptions
 ): Promise<InboxThread[]> {
-  const limit = options.limit ?? 10;
-
-  // If portal is available, use portal.invoke for search
-  if (provider.hasPortal()) {
-    try {
-      const result = await provider.portalInvoke(
-        "threadInternal",
-        "listAsync",
-        ["INBOX", { limit, query: options.query }]
-      );
-      // Portal returns an array of thread objects
-      if (Array.isArray(result)) {
-        return result.slice(0, limit).map((item: any) => ({
-          id: item.id || item.threadId || "",
-          subject: item.subject || "",
-          from: parseFrom(item.from || ""),
-          date: item.date || "",
-          snippet: item.snippet || "",
-          labelIds: item.labelIds || [],
-          messageCount: item.messageCount || 1,
-        }));
-      }
-    } catch {
-      // Fall through to AI search
-    }
-  }
-
-  // Fallback: use ai.askAIProxy for search
-  try {
-    const data = await provider.backendFetch("/v3/ai.askAIProxy", {
-      method: "POST",
-      body: JSON.stringify({
-        query: options.query,
-        available_skills: ["search"],
-      }),
-    });
-    // Parse SSE / search results if available
-    if (data?.results && Array.isArray(data.results)) {
-      return data.results.slice(0, limit).map((item: any) => ({
-        id: item.threadId || item.id || "",
-        subject: item.subject || "",
-        from: parseFrom(item.from || ""),
-        date: item.date || "",
-        snippet: item.snippet || "",
-        labelIds: item.labelIds || [],
-        messageCount: item.messageCount || 1,
-      }));
-    }
-  } catch {
-    // Search failed
-  }
-
+  // Superhuman's portal (threadInternal.listAsync) does NOT support text
+  // search. The `query` parameter is silently ignored — it is not forwarded
+  // to the SQL query and the method only filters by list IDs.
+  //
+  // The only text search available is ai.askAIProxy, which returns a
+  // natural-language summary rather than structured thread data.
+  //
+  // `cmdSearch` in cli.ts handles this by calling `askAISearch` directly
+  // for SuperhumanProvider and displaying the AI response as prose.
+  //
+  // This stub exists so that the `searchInbox` public API does not throw
+  // when called with a SuperhumanProvider (e.g. from tests or MCP tools).
   return [];
 }
 

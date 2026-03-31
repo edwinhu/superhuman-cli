@@ -292,10 +292,11 @@ Works with cached JWT token — no Superhuman app needed after initial auth.
 
 | Operation | Endpoint |
 |-----------|----------|
-| List inbox | `POST /v3/userdata.getThreads` |
+| List inbox | Portal RPC `threadInternal.listAsync` |
+| Search | `POST /v3/ai.askAIProxy` (AI-powered) |
 | Send email | `POST /messages/send` |
 | Drafts | `POST /v3/userdata.writeMessage` |
-| AI compose/search | `POST /v3/ai.compose`, `POST /v3/ai.askAIProxy` |
+| AI compose | `POST /v3/ai.compose` |
 | Snooze | `POST /reminders/create`, `POST /reminders/cancel` |
 | Attachments | `POST /v3/attachments.upload` |
 | Snippets | Superhuman backend API |
@@ -306,17 +307,17 @@ Requires Superhuman app running. Proxies through the app's own OAuth session.
 
 | Operation | Portal Service |
 |-----------|---------------|
-| Search | `threadInternal.listAsync` |
+| Inbox listing | `threadInternal.listAsync` |
 | Read thread | `threadInternal.getAsync` |
 | Archive / Delete | `threadInternal.modifyLabels` |
-| Labels / Star | `threadInternal.modifyLabels` |
+| Labels / Star | `threadInternal.listAsync` (STARRED), `runtimeEvaluate` (labels) |
 | Read status | `threadInternal.modifyLabels` |
 | Calendar | `gcal.*` (list, create, update, delete, free/busy) |
 
 ### Graceful Degradation
 
-- **Containers / headless**: Inbox, send, AI, drafts, snooze, attachments, snippets via cached JWT
-- **With Superhuman app running**: Full features including search, labels, star, archive, calendar
+- **Containers / headless**: Send, AI search, AI compose, drafts, snooze, attachments, snippets via cached JWT
+- **With Superhuman app running**: Full features including inbox listing, labels, star, archive, calendar
 
 ### CDP
 

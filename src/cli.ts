@@ -60,10 +60,11 @@ import {
 } from "./token-api";
 import type { ConnectionProvider } from "./connection-provider";
 import { CachedTokenProvider, CDPConnectionProvider, resolveProvider } from "./connection-provider";
+import { SuperhumanProvider } from "./superhuman-provider";
 import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.19.0";
+const VERSION = "0.20.0";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9222", 10);
 
 // ANSI colors
@@ -812,6 +813,17 @@ async function checkConnection(port: number): Promise<SuperhumanConnection | nul
 async function getProvider(options: CliOptions): Promise<ConnectionProvider> {
   const provider = await resolveProvider({ account: options.account, port: options.port });
   if (provider) {
+    // If it's a SuperhumanProvider without a CDP connection, try to attach one
+    if (provider instanceof SuperhumanProvider && !provider.hasPortal()) {
+      try {
+        const conn = await connectToSuperhuman(options.port, false);
+        if (conn) {
+          return new SuperhumanProvider(provider.getTokenInfo(), conn);
+        }
+      } catch {
+        // CDP connection is best-effort; fall back to portal-less provider
+      }
+    }
     return provider;
   }
 
@@ -1662,6 +1674,39 @@ async function cmdSearch(options: CliOptions) {
   }
 
   const provider = await getProvider(options);
+
+  // Superhuman's portal (threadInternal.listAsync) does not support text
+  // search — it only filters by list IDs (INBOX, UNREAD, STARRED, etc.).
+  // The only text search available is ai.askAIProxy, which returns a
+  // natural-language summary. Use that path directly for SuperhumanProvider.
+  if (provider instanceof SuperhumanProvider) {
+    try {
+      const tokenInfo = provider.getTokenInfo();
+      const email = await provider.getCurrentEmail();
+      const aiResult = await askAISearch(
+        tokenInfo.token,
+        options.query,
+        {
+          email,
+          userPrefix: tokenInfo.userPrefix,
+        }
+      );
+
+      if (options.json) {
+        // Emit a single JSON object with the AI response text
+        console.log(JSON.stringify({ type: "ai_search", query: options.query, response: aiResult.response }));
+      } else {
+        info(`Search results for "${options.query}" (AI-powered):\n`);
+        console.log(aiResult.response);
+      }
+    } catch (e) {
+      error(`Search failed: ${(e as Error).message}`);
+      await provider.disconnect();
+      process.exit(1);
+    }
+    await provider.disconnect();
+    return;
+  }
 
   const searchOptions = {
     query: options.query,

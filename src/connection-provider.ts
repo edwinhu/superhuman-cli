@@ -145,6 +145,7 @@ function providerFromToken(token: TokenInfo, email: string): ConnectionProvider 
       token: token.superhumanToken.token,
       email: token.email,
       expires: token.superhumanToken.expires,
+      userPrefix: token.userPrefix,
     };
     return new SuperhumanProvider(shTokenInfo);
   }

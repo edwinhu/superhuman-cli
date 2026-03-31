@@ -183,6 +183,41 @@ describe("inbox with SuperhumanProvider (portal path)", () => {
   });
 });
 
+describe("searchInbox with SuperhumanProvider", () => {
+  // Superhuman's portal (threadInternal.listAsync) does NOT support text
+  // search — the `query` parameter is silently ignored and only inbox items
+  // are returned. Text search is handled at the CLI level via askAISearch,
+  // which calls ai.askAIProxy and displays a natural-language response.
+  // searchInbox() therefore returns [] for SuperhumanProvider.
+
+  test("searchInbox returns empty array for SuperhumanProvider (portal not used)", async () => {
+    const portalResult = makePortalListResult(3);
+    const { provider, portalMock } = createProviderWithPortal(portalResult);
+
+    const results = await searchInbox(provider, { query: "dinner from:alice", limit: 10 });
+
+    // Portal must NOT be called — text search is handled separately via askAISearch
+    expect(portalMock).not.toHaveBeenCalled();
+    // Returns empty array; CLI layer uses askAISearch for actual search
+    expect(results).toEqual([]);
+  });
+
+  test("searchInbox returns empty array regardless of query", async () => {
+    const { provider } = createProviderWithPortal(makePortalListResult(3));
+    const results = await searchInbox(provider, { query: "from:boss@company.com" });
+    expect(results).toEqual([]);
+  });
+
+  test("listInbox still uses portalInvoke with empty query for inbox listing", async () => {
+    const { provider, portalMock } = createProviderWithPortal(makePortalListResult(3));
+
+    await listInbox(provider, { limit: 10 });
+
+    const passedQuery = (portalMock.mock.calls[0] as any[])[2][1].query;
+    expect(passedQuery).toBe("");
+  });
+});
+
 describe("inbox without portal (no CDP connection)", () => {
   test("throws helpful error when no portal is available for inbox listing", async () => {
     const provider = new SuperhumanProvider(sampleToken);
