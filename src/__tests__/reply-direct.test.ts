@@ -40,7 +40,7 @@ describe("reply.ts with ConnectionProvider", () => {
 
     const { replyToThread } = await import("../reply");
     await expect(replyToThread(provider, "thread1", "Thanks!", true)).rejects.toThrow(
-      "MCP provider required"
+      "MCP connection required"
     );
   });
 
@@ -51,7 +51,7 @@ describe("reply.ts with ConnectionProvider", () => {
 
     const { replyAllToThread } = await import("../reply");
     await expect(replyAllToThread(provider, "thread1", "Thanks all!", true)).rejects.toThrow(
-      "MCP provider required"
+      "MCP connection required"
     );
   });
 
@@ -62,7 +62,7 @@ describe("reply.ts with ConnectionProvider", () => {
 
     const { forwardThread } = await import("../reply");
     await expect(forwardThread(provider, "thread1", "bob@example.com", "FYI", true)).rejects.toThrow(
-      "MCP provider required"
+      "MCP connection required"
     );
   });
 });

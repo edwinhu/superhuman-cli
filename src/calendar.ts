@@ -6,7 +6,8 @@
  */
 
 import type { ConnectionProvider } from "./connection-provider";
-import { McpConnectionProvider, getMcpText } from "./mcp-provider";
+import { getMcpText } from "./mcp-provider";
+import { requireMcp } from "./mcp-guard";
 
 /**
  * Represents a calendar event
@@ -85,14 +86,6 @@ export interface ListEventsOptions {
   limit?: number;
 }
 
-function requireMcp(provider: ConnectionProvider): asserts provider is McpConnectionProvider {
-  if (!(provider instanceof McpConnectionProvider)) {
-    throw new Error(
-      "MCP provider required for calendar operations. Provider-specific OAuth has been removed. " +
-      "Use 'superhuman account auth --mcp' to set up MCP authentication."
-    );
-  }
-}
 
 /**
  * List calendar events within a time range
@@ -105,7 +98,7 @@ export async function listEvents(
   provider: ConnectionProvider,
   options?: ListEventsOptions
 ): Promise<CalendarEvent[]> {
-  requireMcp(provider);
+  const mcp = requireMcp(provider);
 
   try {
     const toISOString = (v: Date | string): string =>
@@ -117,7 +110,7 @@ export async function listEvents(
     if (options?.timeMax) parts.push(`until ${toISOString(options.timeMax)}`);
     if (options?.limit) parts.push(`(limit ${options.limit})`);
 
-    const result = await provider.callTool("query_email_and_calendar", {
+    const result = await mcp.callTool("query_email_and_calendar", {
       question: parts.join(" "),
     });
     const text = getMcpText(result);
@@ -157,7 +150,7 @@ export async function createEvent(
   provider: ConnectionProvider,
   event: CreateEventInput
 ): Promise<CalendarResult> {
-  requireMcp(provider);
+  const mcp = requireMcp(provider);
 
   try {
     const args: Record<string, unknown> = {
@@ -169,7 +162,7 @@ export async function createEvent(
     if (event.location) args.location = event.location;
     if (event.attendees?.length) args.attendees = event.attendees;
 
-    const result = await provider.callTool("create_or_update_event", args);
+    const result = await mcp.callTool("create_or_update_event", args);
     const text = getMcpText(result);
     try {
       const json = JSON.parse(text);
@@ -195,7 +188,7 @@ export async function deleteEvent(
   eventId: string,
   calendarId?: string
 ): Promise<CalendarResult> {
-  requireMcp(provider);
+  const mcp = requireMcp(provider);
 
   // The MCP server doesn't expose a direct delete tool.
   // Attempt via create_or_update_event with a cancel status.
@@ -206,7 +199,7 @@ export async function deleteEvent(
     };
     if (calendarId) args.calendar_id = calendarId;
 
-    const result = await provider.callTool("create_or_update_event", args);
+    const result = await mcp.callTool("create_or_update_event", args);
     return { success: !result.isError };
   } catch (e: any) {
     return { success: false, error: e.message };
@@ -228,7 +221,7 @@ export async function updateEvent(
   updates: UpdateEventInput,
   calendarId?: string
 ): Promise<CalendarResult> {
-  requireMcp(provider);
+  const mcp = requireMcp(provider);
 
   try {
     const args: Record<string, unknown> = { event_id: eventId };
@@ -240,7 +233,7 @@ export async function updateEvent(
     if (updates.attendees?.length) args.attendees = updates.attendees;
     if (calendarId) args.calendar_id = calendarId;
 
-    const result = await provider.callTool("create_or_update_event", args);
+    const result = await mcp.callTool("create_or_update_event", args);
     const text = getMcpText(result);
     try {
       const json = JSON.parse(text);
@@ -273,10 +266,10 @@ export async function getFreeBusy(
   provider: ConnectionProvider,
   options: FreeBusyOptions
 ): Promise<FreeBusyResult> {
-  requireMcp(provider);
+  const mcp = requireMcp(provider);
 
   try {
-    const result = await provider.callTool("get_availability_calendar", {
+    const result = await mcp.callTool("get_availability_calendar", {
       participants: options.calendarIds || [],
     });
     const text = getMcpText(result);

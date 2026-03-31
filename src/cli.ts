@@ -50,7 +50,6 @@ import {
   hasValidCachedTokens,
   getTokensFilePath,
   extractSuperhumanToken,
-  askAI,
   askAISearch,
   getCachedToken,
   getCachedAccounts,

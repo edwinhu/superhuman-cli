@@ -5,7 +5,7 @@
  */
 
 import type { ConnectionProvider } from "./connection-provider";
-import { McpConnectionProvider } from "./mcp-provider";
+import { requireMcp } from "./mcp-guard";
 
 export interface InboxThread {
   id: string;
@@ -48,13 +48,6 @@ export interface SearchOptions {
    * Default (false) uses Superhuman's inbox-only search.
    */
   includeDone?: boolean;
-}
-
-function requireMcp(provider: ConnectionProvider): McpConnectionProvider {
-  if (provider instanceof McpConnectionProvider) {
-    return provider;
-  }
-  throw new Error("MCP connection required. Run 'superhuman account auth' to set up MCP.");
 }
 
 /**

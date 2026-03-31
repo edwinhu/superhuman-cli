@@ -5,7 +5,7 @@
  */
 
 import type { ConnectionProvider } from "./connection-provider";
-import { McpConnectionProvider } from "./mcp-provider";
+import { requireMcp } from "./mcp-guard";
 
 export interface Label {
   id: string;
@@ -16,13 +16,6 @@ export interface Label {
 export interface LabelResult {
   success: boolean;
   error?: string;
-}
-
-function requireMcp(provider: ConnectionProvider): McpConnectionProvider {
-  if (provider instanceof McpConnectionProvider) {
-    return provider;
-  }
-  throw new Error("MCP connection required. Run 'superhuman account auth' to set up MCP.");
 }
 
 /**

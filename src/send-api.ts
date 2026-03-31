@@ -6,7 +6,7 @@
  */
 
 import type { ConnectionProvider } from "./connection-provider";
-import { McpConnectionProvider } from "./mcp-provider";
+import { requireMcp } from "./mcp-guard";
 
 /**
  * Options for sending an email
@@ -94,15 +94,6 @@ export interface ThreadInfoForReply {
 // Provider-specific OAuth paths have been removed.
 // ============================================================================
 
-function requireMcp(provider: ConnectionProvider): asserts provider is McpConnectionProvider {
-  if (!(provider instanceof McpConnectionProvider)) {
-    throw new Error(
-      "MCP provider required. Provider-specific OAuth has been removed. " +
-      "Use 'superhuman account auth --mcp' to set up MCP authentication."
-    );
-  }
-}
-
 /**
  * Send an email using a ConnectionProvider (MCP only).
  */
@@ -110,8 +101,8 @@ export async function sendEmailViaProvider(
   provider: ConnectionProvider,
   options: SendEmailOptions
 ): Promise<SendResult> {
-  requireMcp(provider);
-  return provider.sendEmail(options);
+  const mcp = requireMcp(provider);
+  return mcp.sendEmail(options);
 }
 
 /**
@@ -121,8 +112,8 @@ export async function createDraftViaProvider(
   provider: ConnectionProvider,
   options: SendEmailOptions
 ): Promise<DraftResult> {
-  requireMcp(provider);
-  return provider.createDraft(options);
+  const mcp = requireMcp(provider);
+  return mcp.createDraft(options);
 }
 
 /**
@@ -133,9 +124,9 @@ export async function updateDraftViaProvider(
   draftId: string,
   options: UpdateDraftOptions
 ): Promise<DraftResult> {
-  requireMcp(provider);
+  const mcp = requireMcp(provider);
   // MCP draft_email supports revision via draft_id
-  return provider.createDraft({
+  return mcp.createDraft({
     to: options.to || [],
     subject: options.subject || "",
     body: options.body || "",
@@ -150,8 +141,8 @@ export async function sendDraftByIdViaProvider(
   provider: ConnectionProvider,
   draftId: string
 ): Promise<SendResult> {
-  requireMcp(provider);
-  return provider.sendDraftById(draftId);
+  const mcp = requireMcp(provider);
+  return mcp.sendDraftById(draftId);
 }
 
 /**
@@ -161,10 +152,10 @@ export async function deleteDraftViaProvider(
   provider: ConnectionProvider,
   draftId: string
 ): Promise<{ success: boolean; error?: string }> {
-  requireMcp(provider);
+  const mcp = requireMcp(provider);
   // MCP has no direct draft deletion tool — trash the draft thread
   try {
-    await provider.callTool("update_email", {
+    await mcp.callTool("update_email", {
       thread_id: draftId,
       action: "trash",
     });

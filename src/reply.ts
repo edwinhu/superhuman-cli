@@ -6,24 +6,14 @@
  */
 
 import type { ConnectionProvider } from "./connection-provider";
-import { McpConnectionProvider } from "./mcp-provider";
+import { requireMcp } from "./mcp-guard";
 import { textToHtml } from "./superhuman-api.js";
-import { readThread } from "./read";
 
 export interface ReplyResult {
   success: boolean;
   draftId?: string;
   messageId?: string;
   error?: string;
-}
-
-function requireMcp(provider: ConnectionProvider): asserts provider is McpConnectionProvider {
-  if (!(provider instanceof McpConnectionProvider)) {
-    throw new Error(
-      "MCP provider required. Provider-specific OAuth has been removed. " +
-      "Use 'superhuman account auth --mcp' to set up MCP authentication."
-    );
-  }
 }
 
 /**
@@ -60,9 +50,9 @@ async function replyImpl(
   send: boolean,
   replyAll: boolean
 ): Promise<ReplyResult> {
-  requireMcp(provider);
+  const mcp = requireMcp(provider);
   const htmlBody = textToHtml(body);
-  return provider.replyToThread(threadId, htmlBody, { replyAll, send });
+  return mcp.replyToThread(threadId, htmlBody, { replyAll, send });
 }
 
 /**
@@ -85,11 +75,11 @@ export async function forwardThread(
   body: string,
   send: boolean = false
 ): Promise<ReplyResult> {
-  requireMcp(provider);
+  const mcp = requireMcp(provider);
 
   const htmlBody = body ? textToHtml(body) : "";
   // Read thread to build forward body
-  const messages = await provider.readThread(threadId);
+  const messages = await mcp.readThread(threadId);
   const lastMessage = messages[messages.length - 1];
   const subject = lastMessage?.subject?.startsWith("Fwd:")
     ? lastMessage.subject
@@ -100,14 +90,14 @@ export async function forwardThread(
     : `---------- Forwarded message ---------<br>${lastMessage?.snippet || ""}`;
 
   if (send) {
-    return provider.sendEmail({
+    return mcp.sendEmail({
       to: [toEmail],
       subject,
       body: forwardBody,
       isHtml: true,
     });
   }
-  return provider.createDraft({
+  return mcp.createDraft({
     to: [toEmail],
     subject,
     body: forwardBody,
@@ -115,48 +105,3 @@ export async function forwardThread(
   });
 }
 
-/**
- * Build the forwarded message HTML body.
- */
-function buildForwardBody(opts: {
-  userHtml: string;
-  from: string;
-  date: string;
-  subject: string;
-  to: string;
-  originalBody: string;
-}): string {
-  const parts: string[] = [];
-
-  if (opts.userHtml) {
-    parts.push(`<div>${opts.userHtml}</div>`);
-    parts.push("<br>");
-  }
-
-  parts.push("<div>---------- Forwarded message ---------</div>");
-  parts.push(`<div>From: ${escapeHtml(opts.from)}</div>`);
-  parts.push(`<div>Date: ${escapeHtml(opts.date)}</div>`);
-  parts.push(`<div>Subject: ${escapeHtml(opts.subject)}</div>`);
-  parts.push(`<div>To: ${escapeHtml(opts.to)}</div>`);
-  parts.push("<br>");
-
-  // If originalBody already contains HTML, use it as-is; otherwise wrap in div
-  if (opts.originalBody.includes("<")) {
-    parts.push(`<div>${opts.originalBody}</div>`);
-  } else {
-    parts.push(`<div>${textToHtml(opts.originalBody)}</div>`);
-  }
-
-  return parts.join("\n");
-}
-
-/**
- * Escape HTML special characters to prevent injection.
- */
-function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
-}
