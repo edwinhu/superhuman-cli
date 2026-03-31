@@ -63,7 +63,7 @@ import { CachedTokenProvider, CDPConnectionProvider, resolveProvider } from "./c
 import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.18.0";
+const VERSION = "0.19.0";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9222", 10);
 
 // ANSI colors
