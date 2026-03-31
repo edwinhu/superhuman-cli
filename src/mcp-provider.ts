@@ -11,7 +11,7 @@
  * where hash = MD5("https://mcp.mail.superhuman.com/mcp")
  */
 
-import { readdir, readFile } from "node:fs/promises";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
 import type { ConnectionProvider, AccountInfo } from "./connection-provider";
@@ -29,7 +29,18 @@ interface McpTokens {
   refresh_token?: string;
   token_type: string;
   expires_in?: number;
+  /** Unix timestamp (ms) when the access token expires */
+  expires_at?: number;
 }
+
+interface McpClientInfo {
+  client_id: string;
+  redirect_uris?: string[];
+  token_endpoint_auth_method?: string;
+  grant_types?: string[];
+}
+
+const TOKEN_ENDPOINT = "https://mcp.auth.mail.superhuman.com/oauth2/token";
 
 export interface McpToolResult {
   content: Array<{ type: string; text: string }>;
@@ -70,7 +81,75 @@ export async function loadMcpTokens(): Promise<McpTokens | null> {
 }
 
 /**
+ * Parse an SSE response body into JSONRPC result.
+ * MCP server returns `event: message\ndata: {...}\n\n` format.
+ */
+function parseSseResponse(text: string): any {
+  for (const line of text.split("\n")) {
+    if (line.startsWith("data: ")) {
+      return JSON.parse(line.slice(6));
+    }
+  }
+  // If no SSE prefix, try parsing as plain JSON
+  return JSON.parse(text);
+}
+
+/**
+ * Load client_info.json to get client_id for token refresh.
+ */
+async function loadClientInfo(): Promise<McpClientInfo | null> {
+  const dir = await findMcpRemoteDir();
+  if (!dir) return null;
+  try {
+    const content = await readFile(join(dir, `${SERVER_URL_HASH}_client_info.json`), "utf-8");
+    return JSON.parse(content) as McpClientInfo;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Refresh an expired access token using the refresh_token grant.
+ * Returns updated tokens or null if refresh fails.
+ */
+async function refreshMcpTokens(tokens: McpTokens): Promise<McpTokens | null> {
+  if (!tokens.refresh_token) return null;
+  const clientInfo = await loadClientInfo();
+  if (!clientInfo) return null;
+
+  try {
+    const resp = await fetch(TOKEN_ENDPOINT, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        grant_type: "refresh_token",
+        refresh_token: tokens.refresh_token,
+        client_id: clientInfo.client_id,
+      }),
+    });
+    if (!resp.ok) return null;
+    const newTokens = (await resp.json()) as McpTokens;
+    // Compute absolute expiry time
+    if (newTokens.expires_in) {
+      newTokens.expires_at = Date.now() + newTokens.expires_in * 1000;
+    }
+    // Persist refreshed tokens
+    const dir = await findMcpRemoteDir();
+    if (dir) {
+      await writeFile(
+        join(dir, `${SERVER_URL_HASH}_tokens.json`),
+        JSON.stringify(newTokens, null, 2)
+      );
+    }
+    return newTokens;
+  } catch {
+    return null;
+  }
+}
+
+/**
  * Call a tool on the Superhuman MCP server via HTTP Streamable transport.
+ * Handles SSE response format and automatic token refresh on 401.
  */
 async function callMcpTool(
   accessToken: string,
@@ -99,7 +178,8 @@ async function callMcpTool(
     throw new Error(`MCP call failed (${response.status}): ${text}`);
   }
 
-  const result = await response.json();
+  const text = await response.text();
+  const result = parseSseResponse(text);
   if (result.error) {
     throw new Error(`MCP error: ${result.error.message}`);
   }
@@ -374,21 +454,41 @@ export class McpConnectionProvider implements ConnectionProvider {
     }
     if (!this.tokens) {
       throw new Error(
-        "No MCP tokens found. Run 'npx @superhuman/mcp-mail' to authenticate."
+        "No MCP tokens found. Run 'superhuman account auth' to set up MCP."
       );
+    }
+    // Proactively refresh if token is expired or about to expire (30s buffer)
+    const expiresAt = this.tokens.expires_at;
+    if (expiresAt && Date.now() > expiresAt - 30_000) {
+      const refreshed = await refreshMcpTokens(this.tokens);
+      if (refreshed) {
+        this.tokens = refreshed;
+      }
     }
     return this.tokens;
   }
 
   /**
-   * Call an MCP tool with automatic token handling.
+   * Call an MCP tool with automatic token refresh on 401.
    */
   async callTool(
     toolName: McpToolName,
     args: Record<string, unknown> = {}
   ): Promise<McpToolResult> {
     const tokens = await this.ensureTokens();
-    return callMcpTool(tokens.access_token, toolName, args);
+    try {
+      return await callMcpTool(tokens.access_token, toolName, args);
+    } catch (e: any) {
+      // Retry once with refreshed token on 401
+      if (e.message?.includes("(401)") && tokens.refresh_token) {
+        const refreshed = await refreshMcpTokens(tokens);
+        if (refreshed) {
+          this.tokens = refreshed;
+          return callMcpTool(refreshed.access_token, toolName, args);
+        }
+      }
+      throw e;
+    }
   }
 
   // ========================================================================
