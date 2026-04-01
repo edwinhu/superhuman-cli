@@ -16,6 +16,7 @@ import {
   hasValidCachedTokens,
   clearTokenCache,
   setTokenCacheForTest,
+  getCachedTokenRaw,
   type TokenInfo,
   type PersistedTokens,
 } from "../token-api";
@@ -191,6 +192,50 @@ describe("token persistence", () => {
       setTokenCacheForTest(soonToExpireToken.email, soonToExpireToken);
 
       expect(hasValidCachedTokens()).toBe(false);
+    });
+  });
+
+  describe("getCachedTokenRaw", () => {
+    test("returns token without expiry check", () => {
+      const expiredToken: TokenInfo = {
+        accessToken: "expired-token",
+        email: "expired@example.com",
+        expires: Date.now() - 3600000, // Expired 1 hour ago
+        isMicrosoft: false,
+      };
+
+      setTokenCacheForTest(expiredToken.email, expiredToken);
+
+      const result = getCachedTokenRaw("expired@example.com");
+      expect(result).toBeDefined();
+      expect(result!.accessToken).toBe("expired-token");
+    });
+
+    test("returns undefined for unknown email", () => {
+      const result = getCachedTokenRaw("unknown@example.com");
+      expect(result).toBeUndefined();
+    });
+
+    test("returns correct isMicrosoft flag", () => {
+      const googleToken: TokenInfo = {
+        accessToken: "google-token",
+        email: "user@gmail.com",
+        expires: Date.now() + 3600000,
+        isMicrosoft: false,
+      };
+
+      const msToken: TokenInfo = {
+        accessToken: "ms-token",
+        email: "user@outlook.com",
+        expires: Date.now() + 3600000,
+        isMicrosoft: true,
+      };
+
+      setTokenCacheForTest(googleToken.email, googleToken);
+      setTokenCacheForTest(msToken.email, msToken);
+
+      expect(getCachedTokenRaw("user@gmail.com")!.isMicrosoft).toBe(false);
+      expect(getCachedTokenRaw("user@outlook.com")!.isMicrosoft).toBe(true);
     });
   });
 
