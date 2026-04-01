@@ -7,6 +7,7 @@
  */
 
 import type { SuperhumanConnection, ChromeExtConnection } from "./superhuman-api";
+import { connectToSuperhuman, getCDPPort, getCDPHost, disconnect } from "./superhuman-api";
 import { listAccounts, switchAccount } from "./accounts";
 
 /**
@@ -79,18 +80,22 @@ export async function extractToken(
   // Wait for account to fully load
   await new Promise((r) => setTimeout(r, 1000));
 
-  // Extract token from credential._authData
+  // Extract token via getIDTokenAsync() for a guaranteed fresh Firebase token
   const result = await Runtime.evaluate({
     expression: `
-      (() => {
+      (async () => {
         try {
           const ga = window.GoogleAccount;
-          const authData = ga?.credential?._authData;
-          const user = ga?.credential?.user;
+          const cred = ga?.credential;
+          const user = cred?.user;
           const di = ga?.di;
 
-          if (!authData?.accessToken) {
-            return { error: "No access token found" };
+          // Get a fresh ID token via Firebase's internal refresh
+          const idToken = await cred.getIDTokenAsync();
+          const authData = cred?._authData;
+
+          if (!idToken) {
+            return { error: "getIDTokenAsync() returned null" };
           }
 
           // Extract user prefix for event ID generation
@@ -106,16 +111,14 @@ export async function extractToken(
           } catch (_) {}
 
           return {
-            accessToken: authData.accessToken,
+            accessToken: authData?.accessToken || '',
             email: ga?.emailAddress || '',
-            expires: authData.expires || (Date.now() + 3600000),
+            expires: authData?.expires || (Date.now() + 3600000),
             isMicrosoft: !!di?.get?.('isMicrosoft'),
-            // OAuth refresh token for background refresh
-            refreshToken: authData.refreshToken,
             // Superhuman backend API fields
             userId: user?._id,
-            idToken: authData.idToken,
-            idTokenExpires: authData.expires,
+            idToken: idToken,
+            idTokenExpires: authData?.expires || (Date.now() + 3600000),
             userPrefix: userPrefix,
           };
         } catch (e) {
@@ -124,6 +127,7 @@ export async function extractToken(
       })()
     `,
     returnByValue: true,
+    awaitPromise: true,
   });
 
   const value = result.result.value as TokenInfo | { error: string };
@@ -532,9 +536,43 @@ export function hasValidCachedTokens(): boolean {
 }
 
 /**
+ * Refresh a single account's token via CDP by calling Superhuman's
+ * credential.getIDTokenAsync(), which uses Firebase's internal refresh
+ * mechanism. Works for both Google and Microsoft accounts.
+ *
+ * Returns the updated TokenInfo, or undefined if refresh failed.
+ */
+async function refreshTokenViaCDP(email: string): Promise<TokenInfo | undefined> {
+  let conn: SuperhumanConnection | null = null;
+  try {
+    conn = await connectToSuperhuman(getCDPPort(), false);
+    if (!conn) return undefined;
+
+    const token = await extractToken(conn, email);
+    // Populate superhumanToken from idToken (extractToken only sets idToken)
+    if (token.idToken) {
+      token.superhumanToken = {
+        token: token.idToken,
+        expires: token.idTokenExpires ?? token.expires,
+      };
+    }
+    // Update in-memory cache
+    tokenCache.set(email, token);
+    // Persist to disk
+    await saveTokensToDisk();
+    return token;
+  } catch {
+    return undefined;
+  } finally {
+    if (conn) await disconnect(conn);
+  }
+}
+
+/**
  * Get cached token for a specific account.
  *
- * Returns undefined if the token is expired or expiring within 5 minutes.
+ * If the token is expired or expiring soon, attempts on-demand refresh
+ * via CDP before giving up.
  *
  * @param email - Account email
  * @returns Token info if valid, undefined otherwise
@@ -545,8 +583,8 @@ export async function getCachedToken(email: string): Promise<TokenInfo | undefin
 
   const bufferMs = 5 * 60 * 1000; // 5 minutes
   if (token.expires < Date.now() + bufferMs) {
-    // Token expired or expiring soon
-    return undefined;
+    // Token expired or expiring soon — try on-demand refresh
+    return await refreshTokenViaCDP(email);
   }
 
   return token;

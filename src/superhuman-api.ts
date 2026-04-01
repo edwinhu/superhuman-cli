@@ -23,9 +23,17 @@ export function getCDPHost(): string {
 }
 
 /**
+ * Get CDP port from environment or default to 9222
+ */
+export function getCDPPort(): number {
+  const envPort = process.env.CDP_PORT;
+  return envPort ? parseInt(envPort, 10) : 9222;
+}
+
+/**
  * Check if Superhuman is running with CDP enabled
  */
-export async function isSuperhumanRunning(port = 9333): Promise<boolean> {
+export async function isSuperhumanRunning(port = getCDPPort()): Promise<boolean> {
   try {
     const host = getCDPHost();
     const targets = await CDP.List({ host, port });
@@ -39,7 +47,7 @@ export async function isSuperhumanRunning(port = 9333): Promise<boolean> {
  * Launch Superhuman with remote debugging enabled.
  * Skips launch when CDP_HOST is set (remote/container environment).
  */
-export async function launchSuperhuman(port = 9333): Promise<boolean> {
+export async function launchSuperhuman(port = getCDPPort()): Promise<boolean> {
   // Check if already running (works for both local and remote)
   if (await isSuperhumanRunning(port)) {
     return true;
@@ -84,7 +92,7 @@ export async function launchSuperhuman(port = 9333): Promise<boolean> {
 /**
  * Ensure Superhuman is running, launching it if necessary
  */
-export async function ensureSuperhuman(port = 9333): Promise<boolean> {
+export async function ensureSuperhuman(port = getCDPPort()): Promise<boolean> {
   if (await isSuperhumanRunning(port)) {
     return true;
   }
@@ -95,7 +103,7 @@ export async function ensureSuperhuman(port = 9333): Promise<boolean> {
  * Find and connect to the Superhuman main page via CDP
  */
 export async function connectToSuperhuman(
-  port = 9333,
+  port = getCDPPort(),
   autoLaunch = true
 ): Promise<SuperhumanConnection | null> {
   const host = getCDPHost();
