@@ -591,6 +591,14 @@ export async function getCachedToken(email: string): Promise<TokenInfo | undefin
 }
 
 /**
+ * Get raw cached token without expiry check or refresh.
+ * Used for reading metadata (e.g. isMicrosoft) without triggering CDP.
+ */
+export function getCachedTokenRaw(email: string): TokenInfo | undefined {
+  return tokenCache.get(email);
+}
+
+/**
  * Get list of cached account emails.
  */
 export function getCachedAccounts(): string[] {

@@ -6,6 +6,7 @@
 
 import type { ConnectionProvider } from "./connection-provider";
 import { SuperhumanProvider } from "./superhuman-provider";
+import { getCachedTokenRaw } from "./token-api";
 
 /**
  * Represents a calendar event
@@ -127,17 +128,13 @@ async function gcalInvoke(
 }
 
 /**
- * Check if the current account is a Microsoft account via CDP.
+ * Check if the current account is a Microsoft account.
+ * Uses the token cache (reliable per-account) rather than CDP page state.
  */
 async function isMicrosoftAccount(provider: SuperhumanProvider): Promise<boolean> {
-  try {
-    const result = await provider.runtimeEvaluate(
-      `!!window.GoogleAccount?.di?.get?.('isMicrosoft')`
-    );
-    return !!result;
-  } catch {
-    return false;
-  }
+  const email = await provider.getCurrentEmail();
+  const token = await getCachedTokenRaw(email);
+  return !!token?.isMicrosoft;
 }
 
 /**
