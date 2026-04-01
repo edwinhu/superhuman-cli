@@ -14,7 +14,7 @@ CLI to control [Superhuman](https://superhuman.com) email client via Chrome DevT
 bun install
 
 # Start Superhuman with CDP enabled
-/Applications/Superhuman.app/Contents/MacOS/Superhuman --remote-debugging-port=9400
+/Applications/Superhuman.app/Contents/MacOS/Superhuman --remote-debugging-port=9222
 ```
 
 ## CLI Usage
@@ -240,7 +240,7 @@ superhuman calendar create --title "Meeting" --start "2pm" --duration 30
 superhuman calendar create --title "All Day" --date 2026-02-05
 
 # Update/delete event
-superhuman calendar update --event <event-id> --title "New Title"
+superhuman calendar update --event <event-id> --title "New Title" --location "Room 101"
 superhuman calendar delete --event <event-id>
 
 # Check availability
@@ -277,10 +277,11 @@ superhuman calendar free --date tomorrow --range 7
 | `--duration <mins>` | Event duration in minutes (default: 30) |
 | `--title <text>` | Event title (for calendar create/update) |
 | `--event <id>` | Event ID (for calendar update/delete) |
+| `--location <text>` | Event location (for calendar create/update) |
 | `--calendar <name>` | Calendar name or ID (default: primary) |
 | `--json` | Output as NDJSON: arrays print one object per line; single objects are pretty-printed |
 | `--stream` / `--ndjson` | Alias for `--json` |
-| `--port <number>` | CDP port (default: 9400) |
+| `--port <number>` | CDP port (default: 9222) |
 
 ## How It Works
 
@@ -312,7 +313,8 @@ Requires Superhuman app running. Proxies through the app's own OAuth session.
 | Archive / Delete | `threadInternal.modifyLabels` |
 | Labels / Star | `threadInternal.listAsync` (STARRED), `runtimeEvaluate` (labels) |
 | Read status | `threadInternal.modifyLabels` |
-| Calendar | `gcal.*` (list, create, update, delete, free/busy) |
+| Calendar (Google) | `gcal.*` (list, create, update, delete, free/busy) |
+| Calendar (Microsoft) | `backend.requestMicrosoftCalendar` (MS Graph proxy) |
 
 ### Graceful Degradation
 
@@ -329,8 +331,8 @@ Chrome DevTools Protocol is used for:
 
 ### Benefits
 
-- **Simple auth**: Single JWT, no OAuth token management
-- **Long-lived tokens**: No 5-minute refresh cycles
+- **Simple auth**: Single Superhuman JWT, no OAuth token management
+- **On-demand refresh**: Tokens auto-refresh via CDP when expired
 - **No external dependencies**: No MCP server, no Gmail/MS Graph OAuth
 - **Multi-account**: Works with both Gmail and Microsoft/Outlook accounts
 
