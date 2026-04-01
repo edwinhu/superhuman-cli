@@ -112,13 +112,59 @@ async function gcalInvoke(
   method: string,
   args: any[]
 ): Promise<any> {
+  const email = await provider.getCurrentEmail();
+  // Inject calendarAccountEmail into the first arg (gcal methods expect it there)
+  const firstArg = args[0];
+  if (firstArg && typeof firstArg === "object" && !Array.isArray(firstArg)) {
+    firstArg.calendarAccountEmail = email;
+  } else {
+    // First arg is a scalar (e.g. calendarId string) — wrap into object
+    args[0] = { calendarId: firstArg || "primary", calendarAccountEmail: email };
+  }
   const argsLiteral = args.map((a) => JSON.stringify(a)).join(", ");
   const expression = `window.GoogleAccount.di.get('gcal').${method}(${argsLiteral})`;
   return provider.runtimeEvaluate(expression);
 }
 
 /**
- * Normalize a raw event object (from gcal DI) into a CalendarEvent.
+ * Check if the current account is a Microsoft account via CDP.
+ */
+async function isMicrosoftAccount(provider: SuperhumanProvider): Promise<boolean> {
+  try {
+    const result = await provider.runtimeEvaluate(
+      `!!window.GoogleAccount?.di?.get?.('isMicrosoft')`
+    );
+    return !!result;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Call the MS Graph calendar proxy via Superhuman's backend.
+ */
+async function msCalendarRequest(
+  provider: SuperhumanProvider,
+  url: string,
+  method: string = "GET",
+  body?: any,
+  endpoint: string = "microsoftCalendar.proxy"
+): Promise<any> {
+  const email = await provider.getCurrentEmail();
+  const expression = `
+    window.GoogleAccount.backend.requestMicrosoftCalendar({
+      account: ${JSON.stringify(email)},
+      url: ${JSON.stringify(url)},
+      endpoint: ${JSON.stringify(endpoint)},
+      method: ${JSON.stringify(method)},
+      ${body ? `body: ${JSON.stringify(body)},` : ""}
+    })
+  `;
+  return provider.runtimeEvaluate(expression);
+}
+
+/**
+ * Normalize a raw event object (from gcal DI or MS Graph) into a CalendarEvent.
  */
 function normalizeEvent(e: any): CalendarEvent {
   // The gcal service returns Google Calendar API-shaped objects
@@ -129,17 +175,17 @@ function normalizeEvent(e: any): CalendarEvent {
   return {
     id: e.id || e.event_id || "",
     summary: e.summary || e.title || e.subject || "",
-    description: e.description || "",
+    description: e.description || e.bodyPreview || e.body?.content || "",
     start: startRaw,
     end: endRaw,
-    location: e.location || "",
+    location: e.location?.displayName || e.location || "",
     attendees: (e.attendees || []).map(
-      (a: any) => a.email || a.displayName || a
+      (a: any) => a.emailAddress?.address || a.email || a.displayName || a
     ),
     organizer:
-      e.organizer?.email || e.organizer?.displayName || e.organizer || "",
+      e.organizer?.emailAddress?.address || e.organizer?.email || e.organizer?.displayName || e.organizer || "",
     isAllDay,
-    status: e.status || "",
+    status: e.status || e.showAs || "",
     calendarId: e.calendarId || e.calendar_id || "",
   };
 }
@@ -170,6 +216,18 @@ export async function listEvents(
   // --- CDP / SuperhumanProvider path ---
   if (provider instanceof SuperhumanProvider && provider.hasPortal()) {
     try {
+      // MS accounts use the MS Graph calendar proxy
+      if (await isMicrosoftAccount(provider)) {
+        const timeMin = options?.timeMin ? toISOString(options.timeMin) : new Date().toISOString();
+        const timeMax = options?.timeMax ? toISOString(options.timeMax) : new Date(Date.now() + 7 * 86400000).toISOString();
+        const top = options?.limit || 50;
+        const url = `https://graph.microsoft.com/v1.0/me/calendarView?startDateTime=${encodeURIComponent(timeMin)}&endDateTime=${encodeURIComponent(timeMax)}&$top=${top}&$orderby=start/dateTime`;
+        const result = await msCalendarRequest(provider, url, "GET", undefined, "microsoftCalendar.proxy.calendarView");
+        const items = result?.value || result || [];
+        return Array.isArray(items) ? items.map(normalizeEvent) : [];
+      }
+
+      // Google accounts use the gcal DI
       const calendarId = options?.calendarId || "primary";
       const params: Record<string, any> = {
         singleEvents: true,
@@ -189,7 +247,7 @@ export async function listEvents(
         : result?.items || result?.events || [];
       return items.map(normalizeEvent);
     } catch (e: any) {
-      console.error("listEvents (CDP gcal) error:", e.message);
+      console.error("listEvents (CDP) error:", e.message);
       return [];
     }
   }
@@ -209,6 +267,25 @@ export async function createEvent(
   // --- CDP / SuperhumanProvider path ---
   if (provider instanceof SuperhumanProvider && provider.hasPortal()) {
     try {
+      if (await isMicrosoftAccount(provider)) {
+        const data: Record<string, any> = {
+          subject: event.summary,
+          start: { dateTime: event.start, timeZone: "America/New_York" },
+          end: { dateTime: event.end, timeZone: "America/New_York" },
+        };
+        if (event.description) data.body = { contentType: "text", content: event.description };
+        if (event.location) data.location = { displayName: event.location };
+        if (event.attendees?.length) {
+          data.attendees = event.attendees.map((e) => ({
+            emailAddress: { address: e },
+            type: "required",
+          }));
+        }
+        const url = "https://graph.microsoft.com/v1.0/me/events";
+        const result = await msCalendarRequest(provider, url, "POST", data, "microsoftCalendar.proxy.events.create");
+        return { success: true, eventId: result?.id };
+      }
+
       const email = await provider.getCurrentEmail();
       const eventData: Record<string, any> = {
         summary: event.summary,
@@ -251,6 +328,11 @@ export async function deleteEvent(
   // --- CDP / SuperhumanProvider path ---
   if (provider instanceof SuperhumanProvider && provider.hasPortal()) {
     try {
+      if (await isMicrosoftAccount(provider)) {
+        const url = `https://graph.microsoft.com/v1.0/me/events/${eventId}`;
+        await msCalendarRequest(provider, url, "DELETE", undefined, "microsoftCalendar.proxy.events.delete");
+        return { success: true };
+      }
       const cid = calendarId || "primary";
       await gcalInvoke(provider, "deleteEvent", [cid, eventId]);
       return { success: true };
@@ -276,6 +358,24 @@ export async function updateEvent(
   // --- CDP / SuperhumanProvider path ---
   if (provider instanceof SuperhumanProvider && provider.hasPortal()) {
     try {
+      if (await isMicrosoftAccount(provider)) {
+        const data: Record<string, any> = {};
+        if (updates.summary) data.subject = updates.summary;
+        if (updates.start) data.start = { dateTime: updates.start, timeZone: "America/New_York" };
+        if (updates.end) data.end = { dateTime: updates.end, timeZone: "America/New_York" };
+        if (updates.description) data.body = { contentType: "text", content: updates.description };
+        if (updates.location) data.location = { displayName: updates.location };
+        if (updates.attendees?.length) {
+          data.attendees = updates.attendees.map((e) => ({
+            emailAddress: { address: e },
+            type: "required",
+          }));
+        }
+        const url = `https://graph.microsoft.com/v1.0/me/events/${eventId}`;
+        await msCalendarRequest(provider, url, "PATCH", data, "microsoftCalendar.proxy.events.update");
+        return { success: true, eventId };
+      }
+
       const cid = calendarId || "primary";
       const data: Record<string, any> = {};
       if (updates.summary) data.summary = updates.summary;

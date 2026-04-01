@@ -193,6 +193,7 @@ ${colors.bold}OPTIONS${colors.reset}
   --end <time>       Event end time (ISO datetime, optional if --duration)
   --duration <mins>  Event duration in minutes (default: 30)
   --title <text>     Event title (for calendar create/update)
+  --location <text>  Event location (for calendar create/update)
   --event <id>       Event ID (for calendar update/delete)
   --port <number>    CDP port (default: ${CDP_PORT})
 
@@ -373,6 +374,7 @@ interface CliOptions {
   eventEnd: string; // event end time
   eventDuration: number; // event duration in minutes
   eventTitle: string; // event title
+  eventLocation: string; // event location
   eventId: string; // event ID for update/delete
   // contacts options
   contactsQuery: string; // search query for contacts
@@ -441,6 +443,7 @@ function parseArgs(args: string[]): CliOptions {
     eventEnd: "",
     eventDuration: 30,
     eventTitle: "",
+    eventLocation: "",
     eventId: "",
     contactsQuery: "",
     includeDone: false,
@@ -612,6 +615,10 @@ function parseArgs(args: string[]): CliOptions {
           break;
         case "title":
           options.eventTitle = unescapeString(value);
+          i += inc;
+          break;
+        case "location":
+          options.eventLocation = unescapeString(value);
           i += inc;
           break;
         case "event":
@@ -3175,6 +3182,7 @@ async function cmdCalendarCreate(options: CliOptions) {
     calendarId: calendarId || undefined,
     summary: title,
     description: options.body || undefined,
+    location: options.eventLocation || undefined,
     start: isAllDay
       ? { date: startTime.toISOString().split("T")[0] }
       : { dateTime: startTime.toISOString() },
@@ -3236,13 +3244,16 @@ async function cmdCalendarUpdate(options: CliOptions) {
     const endTime = parseEventTime(options.eventEnd);
     updates.end = { dateTime: endTime.toISOString() };
   }
+  if (options.eventLocation) {
+    updates.location = options.eventLocation;
+  }
   if (options.to.length > 0) {
     const resolvedAttendees = await resolveAllRecipientsViaProvider(provider, options.to);
     updates.attendees = resolvedAttendees.map(email => ({ email }));
   }
 
   if (Object.keys(updates).length === 0) {
-    error("No updates specified. Use --title, --start, --end, --body, or --to");
+    error("No updates specified. Use --title, --start, --end, --body, --location, or --to");
     await provider.disconnect();
     process.exit(1);
   }
