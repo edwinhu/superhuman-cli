@@ -22,10 +22,10 @@ const MCP_AUTH_BASE = join(process.env.HOME || "~", ".mcp-auth");
 const SERVER_URL_HASH = createHash("md5").update(MCP_SERVER_URL).digest("hex");
 const TOKEN_ENDPOINT = "https://mcp.auth.mail.superhuman.com/oauth2/token";
 
-// Refresh 60s before expiry to avoid serving nearly-expired tokens
-const REFRESH_BUFFER_MS = 60_000;
-// Proactive refresh interval: check every 60s
-const REFRESH_INTERVAL_MS = 60_000;
+// Refresh 90s before expiry to avoid serving nearly-expired tokens
+const REFRESH_BUFFER_MS = 90_000;
+// Check every 2 min — tokens live 5 min, so this refreshes reliably each cycle
+const REFRESH_INTERVAL_MS = 2 * 60_000;
 
 interface TokenState {
   access_token: string;
@@ -169,11 +169,15 @@ setInterval(async () => {
 
 Bun.serve({
   port,
-  fetch(req) {
+  async fetch(req) {
     const url = new URL(req.url);
 
     if (url.pathname === "/token") {
-      if (!state?.access_token) {
+      // On-demand refresh: if token is expired or about to expire, refresh now
+      if (state && Date.now() > state.expires_at - REFRESH_BUFFER_MS) {
+        await refreshToken();
+      }
+      if (!state?.access_token || Date.now() > state.expires_at) {
         return Response.json({ error: "no_token" }, { status: 503 });
       }
       return Response.json({
@@ -183,10 +187,11 @@ Bun.serve({
     }
 
     if (url.pathname === "/health") {
+      const expiresIn = state ? Math.max(0, Math.floor((state.expires_at - Date.now()) / 1000)) : 0;
       return Response.json({
         ok: true,
-        has_token: !!state?.access_token,
-        expires_in: state ? Math.max(0, Math.floor((state.expires_at - Date.now()) / 1000)) : 0,
+        has_token: !!state?.access_token && Date.now() < state.expires_at,
+        expires_in: expiresIn,
       });
     }
 

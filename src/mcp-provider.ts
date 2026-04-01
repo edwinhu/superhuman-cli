@@ -133,10 +133,12 @@ async function loadClientInfo(): Promise<McpClientInfo | null> {
 async function fetchFromRelay(): Promise<McpTokens | null> {
   if (!TOKEN_RELAY_URL) return null;
   try {
-    const resp = await fetch(`${TOKEN_RELAY_URL}/token`, { signal: AbortSignal.timeout(3000) });
+    const resp = await fetch(`${TOKEN_RELAY_URL}/token`, { signal: AbortSignal.timeout(5000) });
     if (!resp.ok) return null;
     const data = (await resp.json()) as { access_token: string; expires_at: number };
     if (!data.access_token) return null;
+    // Reject expired tokens from the relay — don't cache stale tokens
+    if (data.expires_at && Date.now() > data.expires_at) return null;
     return {
       access_token: data.access_token,
       token_type: "bearer",

@@ -872,14 +872,22 @@ function requireAnyRecipient(options: CliOptions): void {
 }
 
 async function cmdStatus(options: CliOptions) {
-  info(`Checking connection to Superhuman on port ${options.port}...`);
+  // Check all connection methods
+  const provider = await resolveProvider({ account: options.account, port: options.port });
+  if (provider) {
+    const email = await provider.getCurrentEmail().catch(() => "unknown");
+    success(`Connected via ${provider.constructor.name} (${email})`);
+    await provider.disconnect();
+    return;
+  }
 
+  info(`Checking CDP connection to Superhuman on port ${options.port}...`);
   const conn = await checkConnection(options.port);
   if (!conn) {
     process.exit(1);
   }
 
-  success("Connected to Superhuman");
+  success("Connected to Superhuman via CDP");
 
   await disconnect(conn);
 }
@@ -2871,6 +2879,23 @@ async function cmdAuth(options: CliOptions) {
 }
 
 async function cmdAccounts(options: CliOptions) {
+  // Try cached tokens first (works without CDP / in containers)
+  await loadTokensFromDisk();
+  const cachedEmails = getCachedAccounts();
+  if (cachedEmails.length > 0) {
+    const accounts: Account[] = cachedEmails.map((email, i) => ({
+      email,
+      isCurrent: i === 0, // first cached account is "current"
+    }));
+    if (options.json) {
+      printJson(accounts);
+    } else {
+      console.log(formatAccountsList(accounts));
+    }
+    return;
+  }
+
+  // Fall back to CDP
   const conn = await checkConnection(options.port);
   if (!conn) {
     process.exit(1);
@@ -2898,8 +2923,23 @@ async function cmdAccount(options: CliOptions) {
     process.exit(1);
   }
 
+  // Try CDP connection; if unavailable, validate against cached accounts
   const conn = await checkConnection(options.port);
   if (!conn) {
+    // No CDP — check if account exists in cache (container/headless mode)
+    await loadTokensFromDisk();
+    const cachedEmails = getCachedAccounts();
+    if (cachedEmails.length > 0) {
+      const target = options.accountArg.toLowerCase();
+      const found = cachedEmails.find((e) => e.toLowerCase() === target);
+      if (found) {
+        info(`Account ${found} is available. Use --account ${found} with commands.`);
+        info("Account switching requires Superhuman app (CDP). In headless mode, use --account flag.");
+        return;
+      }
+      error(`Account not found: ${options.accountArg}`);
+      info(`Available cached accounts: ${cachedEmails.join(", ")}`);
+    }
     process.exit(1);
   }
 
