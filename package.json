@@ -1,6 +1,6 @@
 {
   "name": "superhuman-cli",
-  "version": "0.17.0",
+  "version": "0.20.0",
   "module": "src/index.ts",
   "type": "module",
   "private": true,
@@ -10,8 +10,7 @@
   "scripts": {
     "start": "bun run src/index.ts",
     "test": "bun test",
-    "build": "bun build --compile src/cli.ts --outfile superhuman",
-    "mcp": "bun run src/index.ts --mcp"
+    "build": "bun build --compile src/cli.ts --outfile superhuman"
   },
   "devDependencies": {
     "@paralleldrive/cuid2": "^3.3.0",
@@ -22,7 +21,6 @@
     "typescript": "^5"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.25.3",
     "chrome-remote-interface": "^0.33.3",
     "zod": "^4.3.6"
   }

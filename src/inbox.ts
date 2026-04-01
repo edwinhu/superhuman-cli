@@ -1,19 +1,12 @@
 /**
  * Inbox Module
  *
- * Functions for listing and searching inbox threads via direct Gmail/MS Graph API.
+ * Functions for listing and searching inbox threads.
+ * Routes to Superhuman backend API (SuperhumanProvider).
  */
 
 import type { ConnectionProvider } from "./connection-provider";
-import { McpConnectionProvider } from "./mcp-provider";
-import {
-  searchGmailDirect,
-  streamSearchGmailDirect,
-  streamListInboxDirect,
-  listInboxDirect,
-  listLabelsDirect,
-  type TokenInfo,
-} from "./token-api";
+import { SuperhumanProvider } from "./superhuman-provider";
 
 export interface InboxThread {
   id: string;
@@ -42,7 +35,6 @@ export interface ListInboxOptions {
    * Filter by split inbox classification.
    * "important" = Gmail category:personal / Outlook inferenceClassification:focused
    * "other" = Gmail -category:personal / Outlook inferenceClassification:other
-   * Applied server-side via provider API query — no CDP needed.
    */
   splitInbox?: "important" | "other";
   /** Filter by Superhuman AI label (e.g., "Respond", "Meeting", "News") */
@@ -53,118 +45,284 @@ export interface SearchOptions {
   query: string;
   limit?: number;
   /**
-   * When true, use direct Gmail/MS Graph API for search.
-   * This searches ALL emails including archived/done items.
+   * When true, search ALL emails including archived/done items.
    * Default (false) uses Superhuman's inbox-only search.
-   *
-   * Note: With direct API migration, both modes now use direct API.
-   * The difference is that includeDone=true removes label:INBOX filter.
    */
   includeDone?: boolean;
 }
 
+// ---------------------------------------------------------------------------
+// getThreads response parsing
+// ---------------------------------------------------------------------------
+
 /**
- * List threads from the current inbox view
+ * Parse a "from" field which may be plain email or "Name <email>" format.
+ */
+function parseFrom(from: string): { email: string; name: string } {
+  if (!from) return { email: "", name: "" };
+  const match = from.match(/^(.+?)\s*<(.+?)>$/);
+  if (match) {
+    return { name: match[1].trim(), email: match[2].trim() };
+  }
+  return { email: from, name: from };
+}
+
+/**
+ * Convert a userdata.getThreads response item into an InboxThread.
+ * Picks the latest message (by date) from the thread's messages map.
+ */
+function threadItemToInboxThread(item: any): InboxThread | null {
+  const thread = item?.thread;
+  if (!thread?.messages) return null;
+
+  const messages = Object.values(thread.messages) as any[];
+  if (messages.length === 0) return null;
+
+  // Sort by date descending, pick the latest
+  messages.sort(
+    (a: any, b: any) =>
+      new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime()
+  );
+  const latest = messages[0];
+
+  return {
+    id: latest.id || Object.keys(thread.messages)[0] || "",
+    subject: latest.subject || "",
+    from: parseFrom(latest.from || ""),
+    date: latest.date || "",
+    snippet: latest.snippet || "",
+    labelIds: latest.labelIds || [],
+    messageCount: messages.length,
+  };
+}
+
+/**
+ * Parse a full getThreads API response into InboxThread[].
+ */
+function parseGetThreadsResponse(data: any): InboxThread[] {
+  if (!data || !data.threadList) return [];
+  return data.threadList
+    .map(threadItemToInboxThread)
+    .filter((t: InboxThread | null): t is InboxThread => t !== null);
+}
+
+/**
+ * Map ListInboxOptions to the getThreads filter object.
+ */
+function buildGetThreadsFilter(options: ListInboxOptions): { listId: string } {
+  if (options.splitInbox === "important" || options.focusedOnly) {
+    return { listId: "SH_IMPORTANT" };
+  }
+  if (options.splitInbox === "other") {
+    return { listId: "SH_OTHER" };
+  }
+  return { listId: "INBOX" };
+}
+
+// ---------------------------------------------------------------------------
+// Superhuman backend path
+// ---------------------------------------------------------------------------
+
+/**
+ * Parse a from field that may be a string or an object with {email, name}.
+ * The portal returns from as an object: {email, name, attributes, _domain}.
+ */
+function parseFromField(from: any): { email: string; name: string } {
+  if (!from) return { email: "", name: "" };
+  if (typeof from === "string") return parseFrom(from);
+  // Object form: {email, name, ...}
+  return {
+    email: from.email || from.attributes?.email || "",
+    name: from.name || "",
+  };
+}
+
+/**
+ * Parse a portal listAsync result into InboxThread[].
+ *
+ * The portal returns an object: { threads: [...], query, startAt, ... }
+ * Each thread item has shape: { json: { id, messages: [...] }, listIds, ... }
+ * Messages within json.messages are arrays of message objects with
+ * subject, from (object), date, snippet, labelIds fields.
+ *
+ * Also handles legacy flat array format where items carry fields directly
+ * (used by tests and older response shapes).
+ */
+function parsePortalListResult(result: any): InboxThread[] {
+  // Portal wraps threads in an object: { threads: [...], ... }
+  const rawThreads: any[] = Array.isArray(result)
+    ? result
+    : Array.isArray(result?.threads)
+    ? result.threads
+    : [];
+
+  if (rawThreads.length === 0) return [];
+
+  return rawThreads
+    .map((item: any): InboxThread | null => {
+      // Real portal format: { json: { id, messages: [] }, listIds, ... }
+      if (item.json) {
+        const json = item.json;
+        const threadId: string = json.id || item.id || item.threadId || "";
+        // listIds lives on the thread wrapper, not on individual messages
+        const threadListIds: string[] = item.listIds || [];
+
+        const messages: any[] = Array.isArray(json.messages)
+          ? json.messages
+          : typeof json.messages === "object" && json.messages !== null
+          ? Object.values(json.messages)
+          : [];
+
+        if (messages.length === 0) {
+          // Draft threads or threads with no messages yet — include with thread-level metadata
+          return {
+            id: threadId,
+            subject: "",
+            from: { email: "", name: "" },
+            date: "",
+            snippet: "",
+            labelIds: threadListIds,
+            messageCount: 0,
+          };
+        }
+
+        // Sort by date ascending, pick the latest message
+        messages.sort(
+          (a: any, b: any) =>
+            new Date(a.date || 0).getTime() - new Date(b.date || 0).getTime()
+        );
+        const latest = messages[messages.length - 1];
+
+        return {
+          id: latest.id || threadId,
+          subject: latest.subject || "",
+          from: parseFromField(latest.from),
+          date: latest.date || "",
+          snippet: latest.snippet || "",
+          // Prefer thread-level listIds (more complete); fall back to message labelIds
+          labelIds: threadListIds.length > 0 ? threadListIds : (latest.labelIds || []),
+          messageCount: messages.length,
+        };
+      }
+
+      // Legacy flat format: { id, threadId, subject, from, date, snippet, labelIds, messageCount }
+      return {
+        id: item.id || item.threadId || "",
+        subject: item.subject || "",
+        from: parseFromField(item.from),
+        date: item.date || "",
+        snippet: item.snippet || "",
+        labelIds: item.labelIds || [],
+        messageCount: item.messageCount || 1,
+      };
+    })
+    .filter((t): t is InboxThread => t !== null);
+}
+
+async function listInboxSuperhuman(
+  provider: SuperhumanProvider,
+  options: ListInboxOptions = {}
+): Promise<InboxThread[]> {
+  const limit = options.limit ?? 10;
+  const filter = buildGetThreadsFilter(options);
+  const isInboxRequest =
+    filter.listId === "INBOX" ||
+    filter.listId === "SH_IMPORTANT" ||
+    filter.listId === "SH_OTHER";
+
+  let threads: InboxThread[];
+
+  if (isInboxRequest) {
+    // Inbox listing requires portal RPC (the backend getThreads API
+    // does not support inbox/listId filters).
+    if (!provider.hasPortal()) {
+      throw new Error(
+        "Inbox listing requires running Superhuman app (portal RPC). " +
+          "Run 'superhuman account auth' with the app open."
+      );
+    }
+    const result = await provider.portalInvoke(
+      "threadInternal",
+      "listAsync",
+      [filter.listId, { limit, query: "" }]
+    );
+    threads = parsePortalListResult(result);
+  } else {
+    // Non-inbox data (reminders, snippets, etc.) use the backend API
+    const data = await provider.backendFetch("/v3/userdata.getThreads", {
+      method: "POST",
+      body: JSON.stringify({ filter, offset: 0, limit }),
+    });
+    threads = parseGetThreadsResponse(data);
+  }
+
+  // Client-side filters
+  if (options.unreadOnly) {
+    threads = threads.filter((t) =>
+      t.labelIds.some((l) => l === "UNREAD")
+    );
+  }
+
+  if (options.needsReply) {
+    // Exclude threads where user was the last sender
+    const userEmail = (await provider.getCurrentEmail()).toLowerCase();
+    threads = threads.filter(
+      (t) =>
+        t.messageCount <= 1 ||
+        t.from.email.toLowerCase() !== userEmail
+    );
+  }
+
+  if (options.labels?.length) {
+    const labelSet = new Set(options.labels.map((l) => l.toLowerCase()));
+    threads = threads.filter((t) =>
+      t.labelIds.some((l) => labelSet.has(l.toLowerCase()))
+    );
+  }
+
+  return threads.slice(0, limit);
+}
+
+async function searchInboxSuperhuman(
+  _provider: SuperhumanProvider,
+  _options: SearchOptions
+): Promise<InboxThread[]> {
+  // Superhuman's portal (threadInternal.listAsync) does NOT support text
+  // search. The `query` parameter is silently ignored — it is not forwarded
+  // to the SQL query and the method only filters by list IDs.
+  //
+  // The only text search available is ai.askAIProxy, which returns a
+  // natural-language summary rather than structured thread data.
+  //
+  // `cmdSearch` in cli.ts handles this by calling `askAISearch` directly
+  // for SuperhumanProvider and displaying the AI response as prose.
+  //
+  // This stub exists so that the `searchInbox` public API does not throw
+  // when called with a SuperhumanProvider (e.g. from tests or MCP tools).
+  return [];
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/**
+ * List threads from the current inbox view.
  */
 export async function listInbox(
   provider: ConnectionProvider,
   options: ListInboxOptions = {}
 ): Promise<InboxThread[]> {
-  // Route through MCP if available
-  if (provider instanceof McpConnectionProvider) {
-    return provider.listInbox(options);
+  if (provider instanceof SuperhumanProvider) {
+    return listInboxSuperhuman(provider, options);
   }
-
-  const limit = options.limit ?? 10;
-  const focusedOnly = options.focusedOnly ?? false;
-  const unreadOnly = options.unreadOnly ?? false;
-  const needsReply = options.needsReply ?? false;
-  const labels = options.labels ?? [];
-  const splitInbox = options.splitInbox;
-  const aiLabel = options.aiLabel;
-  const token = await provider.getToken();
-
-  // --split and --ai-label are applied server-side by listInboxDirect (query/filter parameter).
-  // --needs-reply and --label are client-side filters, so over-fetch to compensate.
-  const hasClientFilters = needsReply || labels.length > 0;
-  const fetchLimit = hasClientFilters ? Math.max(limit * 3, 50) : limit;
-  let threads = await listInboxDirect(token, fetchLimit, focusedOnly, unreadOnly, splitInbox, aiLabel);
-
-  // Apply --label filter
-  if (labels.length > 0) {
-    threads = await filterByLabels(token, threads, labels);
-  }
-
-  // Apply --needs-reply filter
-  if (needsReply) {
-    threads = filterNeedsReply(token, threads);
-  }
-
-  // Trim to requested limit after filtering
-  return threads.slice(0, limit);
-}
-
-/**
- * Filter threads to only those with ANY of the specified label names.
- * Resolves label names to IDs first.
- */
-async function filterByLabels(
-  token: TokenInfo,
-  threads: InboxThread[],
-  labelNames: string[]
-): Promise<InboxThread[]> {
-  // For Gmail, labelIds are already on each thread from the search
-  // For Outlook, we don't have labelIds — skip label filtering (labels don't apply)
-  if (token.isMicrosoft) {
-    // Outlook doesn't have Gmail-style labels
-    return threads;
-  }
-
-  // Resolve label names to IDs
-  const allLabels = await listLabelsDirect(token);
-  const nameToId = new Map<string, string>();
-  for (const label of allLabels) {
-    nameToId.set(label.name.toLowerCase(), label.id);
-  }
-
-  const targetIds = new Set<string>();
-  for (const name of labelNames) {
-    const id = nameToId.get(name.toLowerCase());
-    if (id) {
-      targetIds.add(id);
-    } else {
-      // Try using name as ID directly (user might pass label ID)
-      targetIds.add(name);
-    }
-  }
-
-  return threads.filter((thread) =>
-    thread.labelIds.some((id) => targetIds.has(id))
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
   );
 }
 
 /**
- * Filter out threads where the user was the last sender.
- *
- * Uses from.email on each thread:
- * - Gmail: from shows the last message sender (reliable)
- * - Outlook: from shows the original sender, not last (imperfect but avoids N API calls)
- */
-function filterNeedsReply(
-  token: TokenInfo,
-  threads: InboxThread[]
-): InboxThread[] {
-  const userEmail = token.email.toLowerCase();
-  return threads.filter((thread) => {
-    // Single-message threads always pass (new, unanswered)
-    if (thread.messageCount <= 1) return true;
-    // Exclude if user was the last sender
-    return thread.from.email.toLowerCase() !== userEmail;
-  });
-}
-
-/**
- * Search threads using direct Gmail/MS Graph API.
+ * Search threads.
  *
  * When includeDone is false (default), only searches inbox threads.
  * When includeDone is true, searches ALL emails including archived/done items.
@@ -173,94 +331,12 @@ export async function searchInbox(
   provider: ConnectionProvider,
   options: SearchOptions
 ): Promise<InboxThread[]> {
-  // Route through MCP if available
-  if (provider instanceof McpConnectionProvider) {
-    return provider.searchInbox(options.query, options.limit);
+  if (provider instanceof SuperhumanProvider) {
+    return searchInboxSuperhuman(provider, options);
   }
-
-  const { query, limit = 10, includeDone = false } = options;
-  const token = await provider.getToken();
-
-  if (includeDone) {
-    // Search all emails (no inbox filter)
-    return searchGmailDirect(token, query, limit);
-  } else {
-    // Search only inbox threads
-    // For Gmail, add label:INBOX to query
-    // For MS Graph, listInboxDirect already filters to inbox
-    if (token.isMicrosoft) {
-      // MS Graph: search within inbox folder
-      // Note: MS Graph $search works across all messages, so we use folder filter
-      const path = `/me/mailFolders/Inbox/messages?$search="${encodeURIComponent(query)}"&$top=${limit}&$select=id,conversationId,subject,from,receivedDateTime,bodyPreview,flag`;
-      const response = await fetch(
-        `https://graph.microsoft.com/v1.0${path}`,
-        {
-          headers: { Authorization: `Bearer ${token.accessToken}` },
-        }
-      );
-
-      if (!response.ok) {
-        return [];
-      }
-
-      interface MSGraphMessage {
-        id: string;
-        conversationId: string;
-        subject?: string;
-        from?: { emailAddress?: { address?: string; name?: string } };
-        receivedDateTime: string;
-        bodyPreview?: string;
-        flag?: { flagStatus: string };
-      }
-
-      const result = await response.json() as { value?: MSGraphMessage[] };
-      if (!result.value) {
-        return [];
-      }
-
-      // Group by conversationId
-      const conversationMap = new Map<string, MSGraphMessage[]>();
-      for (const msg of result.value) {
-        const existing = conversationMap.get(msg.conversationId);
-        if (!existing) {
-          conversationMap.set(msg.conversationId, [msg]);
-        } else {
-          existing.push(msg);
-        }
-      }
-
-      const threads: InboxThread[] = [];
-      for (const [convId, messages] of conversationMap) {
-        messages.sort((a, b) =>
-          new Date(b.receivedDateTime).getTime() - new Date(a.receivedDateTime).getTime()
-        );
-        const latest = messages[0];
-
-        threads.push({
-          id: convId,
-          subject: latest.subject || "(no subject)",
-          from: {
-            email: latest.from?.emailAddress?.address || "",
-            name: latest.from?.emailAddress?.name || "",
-          },
-          date: latest.receivedDateTime,
-          snippet: latest.bodyPreview || "",
-          labelIds: [
-            ...(latest.flag?.flagStatus === "flagged" ? ["FLAGGED"] : []),
-          ],
-          messageCount: messages.length,
-        });
-
-        if (threads.length >= limit) break;
-      }
-
-      return threads;
-    } else {
-      // Gmail: Add label:INBOX to the query
-      const inboxQuery = `label:INBOX ${query}`;
-      return searchGmailDirect(token, inboxQuery, limit);
-    }
-  }
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
 }
 
 /**
@@ -271,67 +347,9 @@ export async function* streamListInbox(
   provider: ConnectionProvider,
   options: ListInboxOptions = {}
 ): AsyncGenerator<InboxThread> {
-  // MCP: no streaming support, yield all at once
-  if (provider instanceof McpConnectionProvider) {
-    const threads = await provider.listInbox(options);
-    for (const thread of threads) {
-      yield thread;
-    }
-    return;
-  }
-
-  const limit = options.limit ?? 10;
-  const focusedOnly = options.focusedOnly ?? false;
-  const unreadOnly = options.unreadOnly ?? false;
-  const needsReply = options.needsReply ?? false;
-  const labels = options.labels ?? [];
-  const splitInbox = options.splitInbox;
-  const aiLabel = options.aiLabel;
-  const token = await provider.getToken();
-
-  // Resolve label IDs once if we need label filtering
-  let targetLabelIds: Set<string> | null = null;
-  if (labels.length > 0 && !token.isMicrosoft) {
-    const allLabels = await listLabelsDirect(token);
-    const nameToId = new Map<string, string>();
-    for (const label of allLabels) {
-      nameToId.set(label.name.toLowerCase(), label.id);
-    }
-    targetLabelIds = new Set<string>();
-    for (const name of labels) {
-      const id = nameToId.get(name.toLowerCase());
-      if (id) {
-        targetLabelIds.add(id);
-      } else {
-        targetLabelIds.add(name);
-      }
-    }
-  }
-
-  const hasClientFilters = needsReply || labels.length > 0;
-  const fetchLimit = hasClientFilters ? Math.max(limit * 3, 50) : limit;
-  const userEmail = token.email.toLowerCase();
-
-  let yielded = 0;
-  for await (const thread of streamListInboxDirect(token, fetchLimit, focusedOnly, unreadOnly, splitInbox, aiLabel)) {
-    if (yielded >= limit) break;
-
-    // Apply --label filter
-    if (targetLabelIds !== null) {
-      if (!thread.labelIds.some((id) => targetLabelIds!.has(id))) {
-        continue;
-      }
-    }
-
-    // Apply --needs-reply filter
-    if (needsReply) {
-      if (thread.messageCount > 1 && thread.from.email.toLowerCase() === userEmail) {
-        continue;
-      }
-    }
-
+  const threads = await listInbox(provider, options);
+  for (const thread of threads) {
     yield thread;
-    yielded++;
   }
 }
 
@@ -343,30 +361,8 @@ export async function* streamSearchInbox(
   provider: ConnectionProvider,
   options: SearchOptions
 ): AsyncGenerator<InboxThread> {
-  // MCP: no streaming support, yield all at once
-  if (provider instanceof McpConnectionProvider) {
-    const threads = await provider.searchInbox(options.query, options.limit);
-    for (const thread of threads) {
-      yield thread;
-    }
-    return;
-  }
-
-  const { query, limit = 10, includeDone = false } = options;
-  const token = await provider.getToken();
-
-  if (includeDone) {
-    yield* streamSearchGmailDirect(token, query, limit);
-  } else {
-    if (token.isMicrosoft) {
-      // MS Graph: bulk fetch then yield
-      const threads = await searchInbox(provider, options);
-      for (const thread of threads) {
-        yield thread;
-      }
-    } else {
-      const inboxQuery = `label:INBOX ${query}`;
-      yield* streamSearchGmailDirect(token, inboxQuery, limit);
-    }
+  const threads = await searchInbox(provider, options);
+  for (const thread of threads) {
+    yield thread;
   }
 }

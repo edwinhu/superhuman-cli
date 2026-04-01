@@ -3,7 +3,7 @@
 // Run manually: bun test src/__tests__/cdp-integration.test.ts
 //
 // These tests are SKIPPED in CI and normal `bun test` runs.
-// They exercise CDP-dependent functionality: account listing/switching, MCP handlers.
+// They exercise CDP-dependent functionality: account listing/switching.
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
 import {
   connectToSuperhuman,
@@ -11,7 +11,6 @@ import {
   type SuperhumanConnection,
 } from "../superhuman-api";
 import { listAccounts, switchAccount } from "../accounts";
-import { accountsHandler, switchAccountHandler } from "../mcp/tools";
 
 const CDP_PORT = 9333;
 
@@ -92,81 +91,5 @@ describe("accounts (CDP integration)", () => {
     const result2 = await switchAccount(conn, currentAccount.email);
     expect(result2.success).toBe(true);
     expect(result2.email).toBe(currentAccount.email);
-  });
-});
-
-describe("MCP account handlers (CDP integration)", () => {
-  describe("accountsHandler", () => {
-    test("returns ToolResult with accounts list", async () => {
-      if (skip) return;
-
-      const result = await accountsHandler({});
-
-      expect(result).toHaveProperty("content");
-      expect(Array.isArray(result.content)).toBe(true);
-      expect(result.content.length).toBeGreaterThan(0);
-      expect(result.content[0]).toHaveProperty("type", "text");
-      expect(result.isError).toBeUndefined();
-
-      const text = result.content[0].text;
-      expect(text).toContain("@");
-    });
-
-    test("marks current account in output", async () => {
-      if (skip) return;
-
-      const result = await accountsHandler({});
-      const text = result.content[0].text;
-      expect(text).toContain("(current)");
-    });
-  });
-
-  describe("switchAccountHandler", () => {
-    test("switches account by email address", async () => {
-      if (skip || !conn) return;
-
-      const accounts = await listAccounts(conn);
-      if (accounts.length < 2) return;
-
-      const targetAccount = accounts.find((a) => !a.isCurrent);
-      if (!targetAccount) return;
-
-      const result = await switchAccountHandler({ account: targetAccount.email });
-      expect(result.isError).toBeUndefined();
-      expect(result.content[0].text).toContain("Switched to");
-      expect(result.content[0].text).toContain(targetAccount.email);
-    });
-
-    test("switches account by index (1-based)", async () => {
-      if (skip || !conn) return;
-
-      const accounts = await listAccounts(conn);
-      if (accounts.length < 2) return;
-
-      const currentIndex = accounts.findIndex((a) => a.isCurrent);
-      const targetIndex = currentIndex === 0 ? 2 : 1;
-      const targetEmail = accounts[targetIndex - 1].email;
-
-      const result = await switchAccountHandler({ account: String(targetIndex) });
-      expect(result.isError).toBeUndefined();
-      expect(result.content[0].text).toContain("Switched to");
-      expect(result.content[0].text).toContain(targetEmail);
-    });
-
-    test("returns error for invalid account identifier", async () => {
-      if (skip) return;
-
-      const result = await switchAccountHandler({ account: "nonexistent@example.com" });
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain("not found");
-    });
-
-    test("returns error for out-of-range index", async () => {
-      if (skip) return;
-
-      const result = await switchAccountHandler({ account: "999" });
-      expect(result.isError).toBe(true);
-      expect(result.content[0].text).toContain("not found");
-    });
   });
 });

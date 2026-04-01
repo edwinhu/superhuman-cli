@@ -1,21 +1,18 @@
 /**
  * Reply Module
  *
- * Functions for replying to and forwarding email threads via direct API.
- * Uses token-based API calls (no CDP/browser connection needed).
+ * Functions for replying to and forwarding email threads.
+ * Routes through SuperhumanProvider (direct backend).
  */
 
 import type { ConnectionProvider } from "./connection-provider";
-import { McpConnectionProvider } from "./mcp-provider";
+import { SuperhumanProvider } from "./superhuman-provider";
 import { textToHtml } from "./superhuman-api.js";
 import {
-  sendReplyWithToken,
-  sendEmailWithToken,
-  createReplyDraftWithToken,
-  createDraftWithToken,
-  getThreadInfoForReplyWithToken,
-} from "./send-api.js";
-import { getThreadMessages } from "./token-api";
+  getUserInfoFromCache,
+  createDraftWithUserInfo,
+  sendDraftSuperhuman,
+} from "./draft-api";
 
 export interface ReplyResult {
   success: boolean;
@@ -26,8 +23,6 @@ export interface ReplyResult {
 
 /**
  * Reply to a thread (reply to sender only).
- *
- * Uses direct Gmail/Graph API for both sending and draft creation.
  */
 export async function replyToThread(
   provider: ConnectionProvider,
@@ -40,8 +35,6 @@ export async function replyToThread(
 
 /**
  * Reply-all to a thread (reply to all recipients).
- *
- * Uses direct Gmail/Graph API for both sending and draft creation.
  */
 export async function replyAllToThread(
   provider: ConnectionProvider,
@@ -62,44 +55,84 @@ async function replyImpl(
   send: boolean,
   replyAll: boolean
 ): Promise<ReplyResult> {
-  // Route through MCP if available
-  if (provider instanceof McpConnectionProvider) {
-    const htmlBody = textToHtml(body);
-    return provider.replyToThread(threadId, htmlBody, { replyAll, send });
+  if (provider instanceof SuperhumanProvider) {
+    return replyViaSuperhuman(provider, threadId, body, send, replyAll);
   }
 
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
+}
+
+/**
+ * Reply via Superhuman backend: create a reply draft, optionally send it.
+ */
+async function replyViaSuperhuman(
+  provider: SuperhumanProvider,
+  threadId: string,
+  body: string,
+  send: boolean,
+  _replyAll: boolean
+): Promise<ReplyResult> {
   const token = await provider.getToken();
+  const email = await provider.getCurrentEmail();
+  const userInfo = getUserInfoFromCache(
+    token.superhumanToken?.token || token.accessToken,
+    email,
+    token.accessToken,
+    email.split("@")[0]
+  );
+
   const htmlBody = textToHtml(body);
-  const opts = { replyAll, isHtml: true };
 
-  if (send) {
-    const result = await sendReplyWithToken(token, threadId, htmlBody, opts);
-    if (result.success) {
-      return { success: true, messageId: result.messageId };
-    }
-    return { success: false, error: result.error };
+  // Create a reply draft on the existing thread
+  const draftResult = await createDraftWithUserInfo(userInfo, {
+    body: htmlBody,
+    action: "reply",
+    inReplyToThreadId: threadId,
+  });
+
+  if (!draftResult.success || !draftResult.draftId || !draftResult.threadId) {
+    return {
+      success: false,
+      error: draftResult.error || "Failed to create reply draft",
+    };
   }
 
-  const result = await createReplyDraftWithToken(token, threadId, htmlBody, opts);
-  if (result.success) {
-    return { success: true, draftId: result.draftId };
+  if (!send) {
+    return {
+      success: true,
+      draftId: draftResult.draftId,
+    };
   }
-  return { success: false, error: result.error };
+
+  // Send the reply draft
+  const sendResult = await sendDraftSuperhuman(userInfo, {
+    draftId: draftResult.draftId,
+    threadId: draftResult.threadId,
+    to: [], // recipients are set from thread context
+    subject: "",
+    htmlBody,
+    inReplyTo: undefined,
+    references: [],
+  });
+
+  if (!sendResult.success) {
+    return { success: false, error: sendResult.error };
+  }
+
+  return {
+    success: true,
+    draftId: draftResult.draftId,
+    messageId: draftResult.draftId,
+  };
 }
 
 /**
  * Forward a thread
  *
  * Fetches the original message content and constructs a forwarded email
- * with proper "Forwarded message" header. Uses direct API for both
- * sending and draft creation.
- *
- * @param provider - Connection provider for token resolution
- * @param threadId - The thread ID to forward
- * @param toEmail - The email address to forward to
- * @param body - The message body to include before the forwarded content
- * @param send - If true, send immediately; if false, save as draft
- * @returns Result with success status, optional draft ID, and error message if failed
+ * with proper "Forwarded message" header.
  */
 export async function forwardThread(
   provider: ConnectionProvider,
@@ -108,135 +141,103 @@ export async function forwardThread(
   body: string,
   send: boolean = false
 ): Promise<ReplyResult> {
-  // Route through MCP if available
-  if (provider instanceof McpConnectionProvider) {
-    const htmlBody = body ? textToHtml(body) : "";
-    // Read thread to build forward body
-    const messages = await provider.readThread(threadId);
-    const lastMessage = messages[messages.length - 1];
-    const subject = lastMessage?.subject?.startsWith("Fwd:")
-      ? lastMessage.subject
-      : `Fwd: ${lastMessage?.subject || "(no subject)"}`;
-
-    const forwardBody = htmlBody
-      ? `${htmlBody}<br><br>---------- Forwarded message ---------<br>${lastMessage?.snippet || ""}`
-      : `---------- Forwarded message ---------<br>${lastMessage?.snippet || ""}`;
-
-    if (send) {
-      return provider.sendEmail({
-        to: [toEmail],
-        subject,
-        body: forwardBody,
-        isHtml: true,
-      });
-    }
-    return provider.createDraft({
-      to: [toEmail],
-      subject,
-      body: forwardBody,
-      isHtml: true,
-    });
+  if (provider instanceof SuperhumanProvider) {
+    return forwardViaSuperhuman(provider, threadId, toEmail, body, send);
   }
 
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
+}
+
+/**
+ * Forward via Superhuman backend.
+ * Reads thread via backendFetch, constructs forward body, creates draft / sends.
+ */
+async function forwardViaSuperhuman(
+  provider: SuperhumanProvider,
+  threadId: string,
+  toEmail: string,
+  body: string,
+  send: boolean
+): Promise<ReplyResult> {
   const token = await provider.getToken();
+  const email = await provider.getCurrentEmail();
+  const userInfo = getUserInfoFromCache(
+    token.superhumanToken?.token || token.accessToken,
+    email,
+    token.accessToken,
+    email.split("@")[0]
+  );
 
-  // Get thread info for headers (subject, from, to, date)
-  const threadInfo = await getThreadInfoForReplyWithToken(token, threadId);
-  if (!threadInfo) {
-    return { success: false, error: "Could not get thread information for forward" };
-  }
-
-  // Get thread messages for the original body content
-  const messages = await getThreadMessages(token, threadId);
-  const lastMessage = messages.length > 0 ? messages[messages.length - 1] : null;
-  const originalBody = lastMessage?.body || "";
-
-  // Build subject with Fwd: prefix
-  const subject = threadInfo.subject.startsWith("Fwd:")
-    ? threadInfo.subject
-    : `Fwd: ${threadInfo.subject}`;
-
-  // Build the forwarded message body
-  const userHtml = body ? textToHtml(body) : "";
-  const forwardBody = buildForwardBody({
-    userHtml,
-    from: threadInfo.replyTo || "unknown",
-    date: new Date().toUTCString(), // Best effort; threadInfo doesn't have date
-    subject: threadInfo.subject,
-    to: threadInfo.allTo.join(", ") || "unknown",
-    originalBody,
+  // Read thread via backend to get subject/snippet for forward header
+  const data = await provider.backendFetch("/v3/userdata.getThreads", {
+    method: "POST",
+    body: JSON.stringify({
+      filter: { threadIds: [threadId] },
+      offset: 0,
+      limit: 1,
+    }),
   });
 
-  if (send) {
-    const result = await sendEmailWithToken(token, {
-      to: [toEmail],
-      subject,
-      body: forwardBody,
-      isHtml: true,
-    });
-
-    if (result.success) {
-      return { success: true, messageId: result.messageId };
+  // Extract last message info from the thread
+  let subject = "(no subject)";
+  let snippet = "";
+  if (data?.threadList?.[0]?.thread?.messages) {
+    const msgs = Object.values(data.threadList[0].thread.messages) as any[];
+    // Sort by date to get the last message
+    msgs.sort((a: any, b: any) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    const last = msgs[msgs.length - 1];
+    if (last) {
+      subject = last.subject || "(no subject)";
+      snippet = last.snippet || "";
     }
-    return { success: false, error: result.error };
   }
 
-  // Draft mode
-  const result = await createDraftWithToken(token, {
+  if (!subject.startsWith("Fwd:")) {
+    subject = `Fwd: ${subject}`;
+  }
+
+  const htmlBody = body ? textToHtml(body) : "";
+  const forwardBody = htmlBody
+    ? `${htmlBody}<br><br>---------- Forwarded message ---------<br>${snippet}`
+    : `---------- Forwarded message ---------<br>${snippet}`;
+
+  // Create forward draft
+  const draftResult = await createDraftWithUserInfo(userInfo, {
     to: [toEmail],
     subject,
     body: forwardBody,
-    isHtml: true,
+    action: "forward",
+    inReplyToThreadId: threadId,
   });
 
-  if (result.success) {
-    return { success: true, draftId: result.draftId };
-  }
-  return { success: false, error: result.error };
-}
-
-/**
- * Build the forwarded message HTML body.
- */
-function buildForwardBody(opts: {
-  userHtml: string;
-  from: string;
-  date: string;
-  subject: string;
-  to: string;
-  originalBody: string;
-}): string {
-  const parts: string[] = [];
-
-  if (opts.userHtml) {
-    parts.push(`<div>${opts.userHtml}</div>`);
-    parts.push("<br>");
+  if (!draftResult.success || !draftResult.draftId || !draftResult.threadId) {
+    return {
+      success: false,
+      error: draftResult.error || "Failed to create forward draft",
+    };
   }
 
-  parts.push("<div>---------- Forwarded message ---------</div>");
-  parts.push(`<div>From: ${escapeHtml(opts.from)}</div>`);
-  parts.push(`<div>Date: ${escapeHtml(opts.date)}</div>`);
-  parts.push(`<div>Subject: ${escapeHtml(opts.subject)}</div>`);
-  parts.push(`<div>To: ${escapeHtml(opts.to)}</div>`);
-  parts.push("<br>");
-
-  // If originalBody already contains HTML, use it as-is; otherwise wrap in div
-  if (opts.originalBody.includes("<")) {
-    parts.push(`<div>${opts.originalBody}</div>`);
-  } else {
-    parts.push(`<div>${textToHtml(opts.originalBody)}</div>`);
+  if (!send) {
+    return { success: true, draftId: draftResult.draftId };
   }
 
-  return parts.join("\n");
-}
+  const sendResult = await sendDraftSuperhuman(userInfo, {
+    draftId: draftResult.draftId,
+    threadId: draftResult.threadId,
+    to: [{ email: toEmail }],
+    subject,
+    htmlBody: forwardBody,
+  });
 
-/**
- * Escape HTML special characters to prevent injection.
- */
-function escapeHtml(str: string): string {
-  return str
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;")
-    .replace(/"/g, "&quot;");
+  if (!sendResult.success) {
+    return { success: false, error: sendResult.error };
+  }
+
+  return {
+    success: true,
+    draftId: draftResult.draftId,
+    messageId: draftResult.draftId,
+  };
 }

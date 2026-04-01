@@ -1,19 +1,12 @@
 /**
  * Labels Module
  *
- * Functions for managing email labels/folders via direct Gmail/MS Graph API.
- * Supports both Microsoft/Outlook accounts (via MS Graph folders) and Gmail accounts (via Gmail labels).
+ * Functions for managing email labels/folders.
+ * Routes to Superhuman portal RPC (SuperhumanProvider).
  */
 
 import type { ConnectionProvider } from "./connection-provider";
-import { McpConnectionProvider } from "./mcp-provider";
-import {
-  modifyThreadLabels,
-  updateMessage,
-  listLabelsDirect,
-  searchGmailDirect,
-  getConversationMessageIds,
-} from "./token-api";
+import { SuperhumanProvider } from "./superhuman-provider";
 
 export interface Label {
   id: string;
@@ -33,8 +26,40 @@ export interface LabelResult {
  * @returns Array of labels with id and name
  */
 export async function listLabels(provider: ConnectionProvider): Promise<Label[]> {
-  const token = await provider.getToken();
-  return listLabelsDirect(token);
+  if (provider instanceof SuperhumanProvider) {
+    if (!provider.hasPortal()) {
+      throw new Error(
+        "Label listing requires running Superhuman app (portal RPC). " +
+          "Run 'superhuman account auth' with the app open."
+      );
+    }
+    // Use runtimeEvaluate to read labels from the in-app labels cache.
+    // window.GoogleAccount.labels._labels is a Map<string, LabelObject>.
+    const result = await provider.runtimeEvaluate(`
+      (() => {
+        try {
+          const labels = window.GoogleAccount?.labels?._labels;
+          if (!labels) return null;
+          const entries = typeof labels.entries === 'function'
+            ? Array.from(labels.entries())
+            : Object.entries(labels);
+          return entries.map(([id, label]) => ({
+            id,
+            name: label.name || label.displayName || id,
+            type: label.type || (id === id.toUpperCase() ? "system" : "user"),
+          }));
+        } catch (e) {
+          return null;
+        }
+      })()
+    `);
+    if (!result || !Array.isArray(result)) return [];
+    return result;
+  }
+
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
 }
 
 /**
@@ -45,57 +70,11 @@ export async function listLabels(provider: ConnectionProvider): Promise<Label[]>
  * @returns Array of labels on the thread
  */
 export async function getThreadLabels(
-  provider: ConnectionProvider,
-  threadId: string
+  _provider: ConnectionProvider,
+  _threadId: string
 ): Promise<Label[]> {
-  const token = await provider.getToken();
-
-  // Get all labels to build name mapping
-  const allLabels = await listLabelsDirect(token);
-  const labelMap = new Map(allLabels.map((l) => [l.id, l]));
-
-  if (token.isMicrosoft) {
-    // For MS Graph, we need to get the message and check its folder
-    const messageIds = await getConversationMessageIds(token, threadId);
-    if (messageIds.length === 0) {
-      return [];
-    }
-
-    // MS Graph messages have parentFolderId
-    const response = await fetch(
-      `https://graph.microsoft.com/v1.0/me/messages/${messageIds[0]}?$select=parentFolderId`,
-      {
-        headers: { Authorization: `Bearer ${token.accessToken}` },
-      }
-    );
-
-    if (!response.ok) {
-      return [];
-    }
-
-    const msg = await response.json() as { parentFolderId?: string };
-    const folderId = msg.parentFolderId;
-    const folder = labelMap.get(folderId);
-
-    return folder ? [folder] : [];
-  } else {
-    // Gmail: Get thread to get labelIds
-    const response = await fetch(
-      `https://www.googleapis.com/gmail/v1/users/me/threads/${threadId}?format=minimal`,
-      {
-        headers: { Authorization: `Bearer ${token.accessToken}` },
-      }
-    );
-
-    if (!response.ok) {
-      return [];
-    }
-
-    const thread = await response.json() as { messages?: Array<{ labelIds?: string[] }> };
-    const labelIds = thread.messages?.[0]?.labelIds || [];
-
-    return labelIds.map((id: string) => labelMap.get(id) || { id, name: id });
-  }
+  // TODO: Implement via SuperhumanProvider
+  throw new Error("Not yet implemented. Run 'superhuman account auth' to authenticate.");
 }
 
 /**
@@ -111,39 +90,24 @@ export async function addLabel(
   threadId: string,
   labelId: string
 ): Promise<LabelResult> {
-  // MCP: update_email with add_label action
-  if (provider instanceof McpConnectionProvider) {
+  if (provider instanceof SuperhumanProvider) {
+    if (!provider.hasPortal()) {
+      return { success: false, error: "Requires running Superhuman app with CDP connection for label operations" };
+    }
     try {
-      await provider.callTool("update_email", {
-        thread_id: threadId,
-        action: "add_label",
-        label: labelId,
-      });
+      await provider.portalInvoke("threadInternal", "modifyLabels", [
+        threadId,
+        { addLabelIds: [labelId], removeLabelIds: [] },
+      ]);
       return { success: true };
     } catch (e: any) {
       return { success: false, error: e.message };
     }
   }
 
-  try {
-    const token = await provider.getToken();
-
-    if (token.isMicrosoft) {
-      // Microsoft: Move messages to the folder (label = folder in MS)
-      // This is complex because MS Graph doesn't have a direct "add label" concept
-      // For folders, adding a label means moving to that folder
-      return {
-        success: false,
-        error: "Adding labels to Microsoft accounts not yet supported via direct API. Use folders instead.",
-      };
-    } else {
-      // Gmail: Add label via threads.modify
-      const success = await modifyThreadLabels(token, threadId, [labelId], []);
-      return { success };
-    }
-  } catch (e: any) {
-    return { success: false, error: e.message || "Unknown error" };
-  }
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
 }
 
 /**
@@ -159,36 +123,24 @@ export async function removeLabel(
   threadId: string,
   labelId: string
 ): Promise<LabelResult> {
-  // MCP: update_email with remove_label action
-  if (provider instanceof McpConnectionProvider) {
+  if (provider instanceof SuperhumanProvider) {
+    if (!provider.hasPortal()) {
+      return { success: false, error: "Requires running Superhuman app with CDP connection for label operations" };
+    }
     try {
-      await provider.callTool("update_email", {
-        thread_id: threadId,
-        action: "remove_label",
-        label: labelId,
-      });
+      await provider.portalInvoke("threadInternal", "modifyLabels", [
+        threadId,
+        { addLabelIds: [], removeLabelIds: [labelId] },
+      ]);
       return { success: true };
     } catch (e: any) {
       return { success: false, error: e.message };
     }
   }
 
-  try {
-    const token = await provider.getToken();
-
-    if (token.isMicrosoft) {
-      return {
-        success: false,
-        error: "Removing labels from Microsoft accounts not yet supported via direct API.",
-      };
-    } else {
-      // Gmail: Remove label via threads.modify
-      const success = await modifyThreadLabels(token, threadId, [], [labelId]);
-      return { success };
-    }
-  } catch (e: any) {
-    return { success: false, error: e.message || "Unknown error" };
-  }
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
 }
 
 /**
@@ -202,46 +154,24 @@ export async function starThread(
   provider: ConnectionProvider,
   threadId: string
 ): Promise<LabelResult> {
-  // MCP: update_email with Star action
-  if (provider instanceof McpConnectionProvider) {
+  if (provider instanceof SuperhumanProvider) {
+    if (!provider.hasPortal()) {
+      return { success: false, error: "Requires running Superhuman app with CDP connection for star operations" };
+    }
     try {
-      await provider.callTool("update_email", {
-        thread_id: threadId,
-        action: "star",
-      });
+      await provider.portalInvoke("threadInternal", "modifyLabels", [
+        threadId,
+        { addLabelIds: ["STARRED"], removeLabelIds: [] },
+      ]);
       return { success: true };
     } catch (e: any) {
       return { success: false, error: e.message };
     }
   }
 
-  try {
-    const token = await provider.getToken();
-
-    if (token.isMicrosoft) {
-      // Microsoft: Flag all messages in the conversation
-      const messageIds = await getConversationMessageIds(token, threadId);
-
-      if (messageIds.length === 0) {
-        return { success: false, error: "No messages found in conversation" };
-      }
-
-      // Flag each message
-      for (const msgId of messageIds) {
-        await updateMessage(token, msgId, {
-          flag: { flagStatus: "flagged" },
-        });
-      }
-
-      return { success: true };
-    } else {
-      // Gmail: Add STARRED label
-      const success = await modifyThreadLabels(token, threadId, ["STARRED"], []);
-      return { success };
-    }
-  } catch (e: any) {
-    return { success: false, error: e.message || "Unknown error" };
-  }
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
 }
 
 /**
@@ -255,46 +185,24 @@ export async function unstarThread(
   provider: ConnectionProvider,
   threadId: string
 ): Promise<LabelResult> {
-  // MCP: update_email with Unstar action
-  if (provider instanceof McpConnectionProvider) {
+  if (provider instanceof SuperhumanProvider) {
+    if (!provider.hasPortal()) {
+      return { success: false, error: "Requires running Superhuman app with CDP connection for star operations" };
+    }
     try {
-      await provider.callTool("update_email", {
-        thread_id: threadId,
-        action: "unstar",
-      });
+      await provider.portalInvoke("threadInternal", "modifyLabels", [
+        threadId,
+        { addLabelIds: [], removeLabelIds: ["STARRED"] },
+      ]);
       return { success: true };
     } catch (e: any) {
       return { success: false, error: e.message };
     }
   }
 
-  try {
-    const token = await provider.getToken();
-
-    if (token.isMicrosoft) {
-      // Microsoft: Unflag all messages in the conversation
-      const messageIds = await getConversationMessageIds(token, threadId);
-
-      if (messageIds.length === 0) {
-        return { success: false, error: "No messages found in conversation" };
-      }
-
-      // Unflag each message
-      for (const msgId of messageIds) {
-        await updateMessage(token, msgId, {
-          flag: { flagStatus: "notFlagged" },
-        });
-      }
-
-      return { success: true };
-    } else {
-      // Gmail: Remove STARRED label
-      const success = await modifyThreadLabels(token, threadId, [], ["STARRED"]);
-      return { success };
-    }
-  } catch (e: any) {
-    return { success: false, error: e.message || "Unknown error" };
-  }
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
 }
 
 /**
@@ -308,42 +216,24 @@ export async function listStarred(
   provider: ConnectionProvider,
   limit: number = 50
 ): Promise<Array<{ id: string }>> {
-  try {
-    const token = await provider.getToken();
-
-    if (token.isMicrosoft) {
-      // MS Graph: Search for flagged messages
-      const response = await fetch(
-        `https://graph.microsoft.com/v1.0/me/messages?$filter=flag/flagStatus eq 'flagged'&$top=${limit}&$select=conversationId`,
-        {
-          headers: { Authorization: `Bearer ${token.accessToken}` },
-        }
+  if (provider instanceof SuperhumanProvider) {
+    if (!provider.hasPortal()) {
+      throw new Error(
+        "Starred listing requires running Superhuman app (portal RPC). " +
+          "Run 'superhuman account auth' with the app open."
       );
-
-      if (!response.ok) {
-        return [];
-      }
-
-      const result = await response.json() as { value?: Array<{ conversationId?: string }> };
-      if (!result.value) {
-        return [];
-      }
-
-      // Get unique conversation IDs
-      const conversationIds = new Set<string>();
-      for (const msg of result.value) {
-        if (msg.conversationId) {
-          conversationIds.add(msg.conversationId);
-        }
-      }
-
-      return Array.from(conversationIds).map((id) => ({ id }));
-    } else {
-      // Gmail: Search for starred messages
-      const threads = await searchGmailDirect(token, "is:starred", limit);
-      return threads.map((t) => ({ id: t.id }));
     }
-  } catch (e) {
-    return [];
+    const result = await provider.portalInvoke("threadInternal", "listAsync", [
+      "STARRED",
+      { limit, query: "" },
+    ]);
+    if (!Array.isArray(result)) return [];
+    return result.map((item: any) => ({
+      id: item.id || item.threadId || "",
+    }));
   }
+
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
 }

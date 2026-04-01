@@ -1,7 +1,7 @@
 /**
  * Unified Draft Service
  *
- * Aggregates drafts from multiple providers (Gmail, Outlook) with a unified interface.
+ * Aggregates drafts from multiple providers with a unified interface.
  */
 
 /**
@@ -14,7 +14,7 @@ export interface Draft {
   to: string[];
   preview: string;
   timestamp: string;
-  source: "gmail" | "outlook" | "native";
+  source: "native";
   threadId?: string; // Optional: used by native Superhuman drafts for update/delete
 }
 

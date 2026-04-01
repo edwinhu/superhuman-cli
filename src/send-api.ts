@@ -1,26 +1,19 @@
 /**
  * Send API Module
  *
- * Direct email sending via Gmail API and Microsoft Graph API.
- * Uses token-based API calls through token-api.ts (no CDP needed).
- *
- * Gmail: Uses POST /gmail/v1/users/me/messages/send
- * Microsoft Graph: Uses POST /me/sendMail
+ * Email sending via Superhuman backend.
+ * Provider-specific OAuth (Gmail/MS Graph) has been removed.
  */
 
 import type { ConnectionProvider } from "./connection-provider";
-import { McpConnectionProvider } from "./mcp-provider";
-import type { TokenInfo } from "./token-api";
+import { SuperhumanProvider } from "./superhuman-provider";
 import {
-  sendEmailDirect,
-  createDraftDirect,
-  sendReplyDirect,
-  createReplyDraftDirect,
-  deleteDraftDirect,
-  sendDraftDirect,
-  getThreadInfoDirect,
-  updateDraftDirect,
-} from "./token-api";
+  getUserInfoFromCache,
+  createDraftWithUserInfo,
+  sendDraftSuperhuman,
+  type Recipient,
+} from "./draft-api";
+import { textToHtml } from "./superhuman-api.js";
 
 /**
  * Options for sending an email
@@ -102,340 +95,190 @@ export interface ThreadInfoForReply {
 }
 
 // ============================================================================
-// Token-based Functions (direct API, no CDP needed)
-//
-// Use these when you have a TokenInfo object (e.g., from --account flag).
-// ============================================================================
-
-/**
- * Send email using direct API (no CDP).
- *
- * @param token - Token info from token-api.ts
- * @param options - Email options
- * @returns Result with success status and message ID
- */
-export async function sendEmailWithToken(
-  token: TokenInfo,
-  options: SendEmailOptions
-): Promise<SendResult> {
-  const result = await sendEmailDirect(token, {
-    to: options.to,
-    cc: options.cc,
-    bcc: options.bcc,
-    subject: options.subject,
-    body: options.body,
-    isHtml: options.isHtml ?? true,
-    threadId: options.threadId,
-    inReplyTo: options.inReplyTo,
-    references: options.references,
-  });
-
-  if (!result) {
-    return { success: false, error: "Failed to send email via direct API" };
-  }
-
-  return {
-    success: true,
-    messageId: result.messageId,
-    threadId: result.threadId,
-  };
-}
-
-/**
- * Create a draft using direct API (no CDP).
- *
- * @param token - Token info from token-api.ts
- * @param options - Email options
- * @returns Result with success status and draft ID
- */
-export async function createDraftWithToken(
-  token: TokenInfo,
-  options: SendEmailOptions
-): Promise<DraftResult> {
-  const result = await createDraftDirect(token, {
-    to: options.to,
-    cc: options.cc,
-    bcc: options.bcc,
-    subject: options.subject,
-    body: options.body,
-    isHtml: options.isHtml ?? true,
-    threadId: options.threadId,
-    inReplyTo: options.inReplyTo,
-    references: options.references,
-  });
-
-  if (!result) {
-    return { success: false, error: "Failed to create draft via direct API" };
-  }
-
-  return {
-    success: true,
-    draftId: result.draftId,
-    messageId: result.messageId,
-  };
-}
-
-/**
- * Send a reply using direct API (no CDP).
- *
- * @param token - Token info from token-api.ts
- * @param threadId - Thread ID to reply to
- * @param body - Reply body
- * @param options - Additional options
- * @returns Result with success status and message ID
- */
-export async function sendReplyWithToken(
-  token: TokenInfo,
-  threadId: string,
-  body: string,
-  options?: {
-    replyAll?: boolean;
-    cc?: string[];
-    bcc?: string[];
-    isHtml?: boolean;
-  }
-): Promise<SendResult> {
-  const result = await sendReplyDirect(token, threadId, body, options);
-
-  if (!result) {
-    return { success: false, error: "Failed to send reply via direct API" };
-  }
-
-  return {
-    success: true,
-    messageId: result.messageId,
-    threadId: result.threadId,
-  };
-}
-
-/**
- * Create a reply draft using direct API (no CDP).
- *
- * @param token - Token info from token-api.ts
- * @param threadId - Thread ID to reply to
- * @param body - Reply body
- * @param options - Additional options
- * @returns Result with success status and draft ID
- */
-export async function createReplyDraftWithToken(
-  token: TokenInfo,
-  threadId: string,
-  body: string,
-  options?: {
-    replyAll?: boolean;
-    cc?: string[];
-    bcc?: string[];
-    isHtml?: boolean;
-  }
-): Promise<DraftResult> {
-  const result = await createReplyDraftDirect(token, threadId, body, options);
-
-  if (!result) {
-    return { success: false, error: "Failed to create reply draft via direct API" };
-  }
-
-  return {
-    success: true,
-    draftId: result.draftId,
-    messageId: result.messageId,
-  };
-}
-
-/**
- * Update a draft using direct API (no CDP).
- *
- * @param token - Token info from token-api.ts
- * @param draftId - Draft ID to update
- * @param options - Fields to update
- * @returns Result with draftId on success
- */
-export async function updateDraftWithToken(
-  token: TokenInfo,
-  draftId: string,
-  options: UpdateDraftOptions
-): Promise<DraftResult> {
-  const result = await updateDraftDirect(token, draftId, {
-    to: options.to,
-    cc: options.cc,
-    bcc: options.bcc,
-    subject: options.subject,
-    body: options.body,
-    isHtml: options.isHtml,
-  });
-
-  if (!result) {
-    return { success: false, error: "Failed to update draft via direct API" };
-  }
-
-  return {
-    success: true,
-    draftId: result.draftId,
-    messageId: result.messageId,
-  };
-}
-
-/**
- * Delete a draft using direct API (no CDP).
- *
- * @param token - Token info from token-api.ts
- * @param draftId - Draft ID to delete
- * @returns Result with success status
- */
-export async function deleteDraftWithToken(
-  token: TokenInfo,
-  draftId: string
-): Promise<{ success: boolean; error?: string }> {
-  const success = await deleteDraftDirect(token, draftId);
-
-  if (!success) {
-    return { success: false, error: "Failed to delete draft via direct API" };
-  }
-
-  return { success: true };
-}
-
-/**
- * Send a draft by ID using direct API (no CDP).
- *
- * @param token - Token info from token-api.ts
- * @param draftId - Draft ID to send
- * @returns Result with success status and message ID
- */
-export async function sendDraftByIdWithToken(
-  token: TokenInfo,
-  draftId: string
-): Promise<SendResult> {
-  const result = await sendDraftDirect(token, draftId);
-
-  if (!result) {
-    return { success: false, error: "Failed to send draft via direct API" };
-  }
-
-  return {
-    success: true,
-    messageId: result.messageId,
-    threadId: result.threadId,
-  };
-}
-
-/**
- * Get thread info for reply using direct API (no CDP).
- *
- * @param token - Token info from token-api.ts
- * @param threadId - Thread ID to get info for
- * @returns Thread info or null
- */
-export async function getThreadInfoForReplyWithToken(
-  token: TokenInfo,
-  threadId: string
-): Promise<ThreadInfoForReply | null> {
-  const info = await getThreadInfoDirect(token, threadId);
-
-  if (!info) {
-    return null;
-  }
-
-  return {
-    threadId,
-    subject: info.subject,
-    lastMessageId: info.messageId,
-    references: info.references,
-    replyTo: info.from,
-    allTo: info.to,
-    allCc: info.cc,
-    myEmail: token.email,
-  };
-}
-
-// ============================================================================
 // ConnectionProvider-based wrappers
 //
-// These functions accept a ConnectionProvider instead of a SuperhumanConnection,
-// resolving tokens internally and delegating to the *WithToken implementations.
+// These functions accept a ConnectionProvider and route through
+// SuperhumanProvider (direct backend) or MCP as fallback.
 // ============================================================================
 
 /**
- * Send an email using a ConnectionProvider (no CDP needed).
+ * Build a UserInfo object from a SuperhumanProvider for use with draft-api functions.
+ */
+async function userInfoFromProvider(provider: SuperhumanProvider) {
+  const token = await provider.getToken();
+  const email = await provider.getCurrentEmail();
+  return getUserInfoFromCache(
+    token.superhumanToken?.token || token.accessToken,
+    email,
+    token.accessToken,
+    email.split("@")[0]
+  );
+}
+
+/**
+ * Convert string[] emails to Recipient[] for draft-api.
+ */
+function toRecipients(emails?: string[]): Recipient[] {
+  return (emails || []).map((e) => ({ email: e }));
+}
+
+/**
+ * Send an email using a ConnectionProvider.
+ * Routes through SuperhumanProvider (direct backend) or MCP.
  */
 export async function sendEmailViaProvider(
   provider: ConnectionProvider,
   options: SendEmailOptions
 ): Promise<SendResult> {
-  if (provider instanceof McpConnectionProvider) {
-    return provider.sendEmail(options);
+  if (provider instanceof SuperhumanProvider) {
+    const userInfo = await userInfoFromProvider(provider);
+    const htmlBody = options.isHtml ? options.body : textToHtml(options.body);
+    const draftResult = await createDraftWithUserInfo(userInfo, {
+      to: options.to,
+      cc: options.cc,
+      bcc: options.bcc,
+      subject: options.subject,
+      body: htmlBody,
+      action: options.threadId ? "reply" : "compose",
+      inReplyToThreadId: options.threadId,
+      inReplyToRfc822Id: options.inReplyTo,
+      references: options.references,
+    });
+    if (!draftResult.success || !draftResult.draftId || !draftResult.threadId) {
+      return { success: false, error: draftResult.error || "Failed to create draft for send" };
+    }
+    const sendResult = await sendDraftSuperhuman(userInfo, {
+      draftId: draftResult.draftId,
+      threadId: draftResult.threadId,
+      to: toRecipients(options.to),
+      cc: toRecipients(options.cc),
+      bcc: toRecipients(options.bcc),
+      subject: options.subject,
+      htmlBody,
+      inReplyTo: options.inReplyTo,
+      references: options.references,
+    });
+    if (!sendResult.success) {
+      return { success: false, error: sendResult.error };
+    }
+    return { success: true, messageId: draftResult.draftId, threadId: draftResult.threadId };
   }
-  const token = await provider.getToken();
-  return sendEmailWithToken(token, options);
+
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
 }
 
 /**
- * Create a draft using a ConnectionProvider (no CDP needed).
+ * Create a draft using a ConnectionProvider.
+ * Routes through SuperhumanProvider (direct backend) or MCP.
  */
 export async function createDraftViaProvider(
   provider: ConnectionProvider,
   options: SendEmailOptions
 ): Promise<DraftResult> {
-  if (provider instanceof McpConnectionProvider) {
-    return provider.createDraft(options);
+  if (provider instanceof SuperhumanProvider) {
+    const userInfo = await userInfoFromProvider(provider);
+    const htmlBody = options.isHtml ? options.body : textToHtml(options.body);
+    return createDraftWithUserInfo(userInfo, {
+      to: options.to,
+      cc: options.cc,
+      bcc: options.bcc,
+      subject: options.subject,
+      body: htmlBody,
+      action: options.threadId ? "reply" : "compose",
+      inReplyToThreadId: options.threadId,
+      inReplyToRfc822Id: options.inReplyTo,
+      references: options.references,
+    });
   }
-  const token = await provider.getToken();
-  return createDraftWithToken(token, options);
+
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
 }
 
 /**
- * Update a draft using ConnectionProvider (no CDP).
+ * Update a draft using ConnectionProvider.
+ * Routes through SuperhumanProvider (direct backend) or MCP.
  */
 export async function updateDraftViaProvider(
   provider: ConnectionProvider,
   draftId: string,
   options: UpdateDraftOptions
 ): Promise<DraftResult> {
-  if (provider instanceof McpConnectionProvider) {
-    // MCP draft_email supports revision via draft_id
-    return provider.createDraft({
-      to: options.to || [],
-      subject: options.subject || "",
-      body: options.body || "",
-      isHtml: options.isHtml,
+  if (provider instanceof SuperhumanProvider) {
+    const userInfo = await userInfoFromProvider(provider);
+    const htmlBody = options.body
+      ? (options.isHtml ? options.body : textToHtml(options.body))
+      : undefined;
+    // updateDraftWithUserInfo requires threadId — use draftId as fallback
+    const { updateDraftWithUserInfo } = await import("./draft-api");
+    const ok = await updateDraftWithUserInfo(userInfo, draftId, draftId, {
+      to: options.to,
+      cc: options.cc,
+      bcc: options.bcc,
+      subject: options.subject,
+      body: htmlBody,
     });
+    return { success: ok, draftId };
   }
-  const token = await provider.getToken();
-  return updateDraftWithToken(token, draftId, options);
+
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
 }
 
 /**
- * Send a draft by ID using a ConnectionProvider (no CDP needed).
+ * Send a draft by ID using a ConnectionProvider.
+ * Routes through SuperhumanProvider (direct backend) or MCP.
  */
 export async function sendDraftByIdViaProvider(
   provider: ConnectionProvider,
   draftId: string
 ): Promise<SendResult> {
-  if (provider instanceof McpConnectionProvider) {
-    return provider.sendDraftById(draftId);
+  if (provider instanceof SuperhumanProvider) {
+    const userInfo = await userInfoFromProvider(provider);
+    // Minimal send — draft already has recipients/subject/body persisted.
+    // We need at least the draftId and threadId; use draftId as threadId.
+    const sendResult = await sendDraftSuperhuman(userInfo, {
+      draftId,
+      threadId: draftId,
+      to: [],
+      subject: "",
+      htmlBody: "",
+    });
+    if (!sendResult.success) {
+      return { success: false, error: sendResult.error };
+    }
+    return { success: true, messageId: draftId };
   }
-  const token = await provider.getToken();
-  return sendDraftByIdWithToken(token, draftId);
+
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
 }
 
 /**
- * Delete a draft using a ConnectionProvider (no CDP needed).
+ * Delete a draft using a ConnectionProvider.
+ * Routes through SuperhumanProvider (direct backend) or MCP.
  */
 export async function deleteDraftViaProvider(
   provider: ConnectionProvider,
   draftId: string
 ): Promise<{ success: boolean; error?: string }> {
-  if (provider instanceof McpConnectionProvider) {
-    // MCP has no direct draft deletion tool — trash the draft thread
+  if (provider instanceof SuperhumanProvider) {
+    const { deleteDraftWithUserInfo } = await import("./draft-api");
+    const userInfo = await userInfoFromProvider(provider);
     try {
-      await provider.callTool("update_email", {
-        thread_id: draftId,
-        action: "trash",
-      });
+      await deleteDraftWithUserInfo(userInfo, draftId, draftId);
       return { success: true };
     } catch (e: any) {
       return { success: false, error: e.message };
     }
   }
-  const token = await provider.getToken();
-  return deleteDraftWithToken(token, draftId);
+
+  throw new Error(
+    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+  );
 }

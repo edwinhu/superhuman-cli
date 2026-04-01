@@ -1,26 +1,61 @@
 /**
  * Calendar Module
  *
- * Functions for calendar operations via direct Google Calendar/MS Graph API.
- * Supports both Google Calendar and Microsoft Graph accounts.
+ * Functions for calendar operations via Superhuman's gcal DI service (CDP).
  */
 
 import type { ConnectionProvider } from "./connection-provider";
-import { McpConnectionProvider, getMcpText } from "./mcp-provider";
-import {
-  type CalendarEventDirect as CalendarEvent,
-  type CreateCalendarEventInput as CreateEventInput,
-  type UpdateCalendarEventInput as UpdateEventInput,
-  type FreeBusySlot,
-  listCalendarEventsDirect,
-  createCalendarEventDirect,
-  updateCalendarEventDirect,
-  deleteCalendarEventDirect,
-  getFreeBusyDirect,
-} from "./token-api";
+import { SuperhumanProvider } from "./superhuman-provider";
 
-// Re-export the calendar event type for external use
-export type { CalendarEvent };
+/**
+ * Represents a calendar event
+ */
+export interface CalendarEvent {
+  id: string;
+  summary: string;
+  description: string;
+  start: string;
+  end: string;
+  location: string;
+  attendees: string[];
+  organizer: string;
+  isAllDay: boolean;
+  status: string;
+  calendarId: string;
+}
+
+/**
+ * Input for creating a calendar event
+ */
+export interface CreateEventInput {
+  summary: string;
+  start: string;
+  end: string;
+  description?: string;
+  location?: string;
+  attendees?: string[];
+  calendarId?: string;
+}
+
+/**
+ * Input for updating a calendar event
+ */
+export interface UpdateEventInput {
+  summary?: string;
+  start?: string;
+  end?: string;
+  description?: string;
+  location?: string;
+  attendees?: string[];
+}
+
+/**
+ * A free/busy time slot
+ */
+export interface FreeBusySlot {
+  start: string;
+  end: string;
+}
 
 /**
  * Result of a calendar operation (create, update, delete)
@@ -30,9 +65,6 @@ export interface CalendarResult {
   eventId?: string;
   error?: string;
 }
-
-// Re-export types for external use
-export type { FreeBusySlot, CreateEventInput, UpdateEventInput };
 
 /**
  * Result of a free/busy query
@@ -53,214 +85,6 @@ export interface ListEventsOptions {
 }
 
 /**
- * List calendar events within a time range
- *
- * @param provider - The connection provider
- * @param options - Optional filters for time range and limit
- * @returns Array of calendar events
- */
-export async function listEvents(
-  provider: ConnectionProvider,
-  options?: ListEventsOptions
-): Promise<CalendarEvent[]> {
-  // MCP: use query_email_and_calendar for calendar listing
-  if (provider instanceof McpConnectionProvider) {
-    try {
-      const toISOString = (v: Date | string): string =>
-        typeof v === "string" ? v : v.toISOString();
-
-      // Build a natural language question for the MCP tool
-      const parts = ["List my calendar events"];
-      if (options?.timeMin) parts.push(`from ${toISOString(options.timeMin)}`);
-      if (options?.timeMax) parts.push(`until ${toISOString(options.timeMax)}`);
-      if (options?.limit) parts.push(`(limit ${options.limit})`);
-
-      const result = await provider.callTool("query_email_and_calendar", {
-        question: parts.join(" "),
-      });
-      const text = getMcpText(result);
-      // Parse MCP response into CalendarEvent format
-      try {
-        const json = JSON.parse(text);
-        const events = Array.isArray(json) ? json : (json.events || []);
-        return events.map((e: any) => ({
-          id: e.id || e.event_id || "",
-          summary: e.summary || e.title || e.subject || "",
-          description: e.description || "",
-          start: e.start || e.start_time || "",
-          end: e.end || e.end_time || "",
-          location: e.location || "",
-          attendees: e.attendees || [],
-          organizer: e.organizer || "",
-          isAllDay: e.is_all_day || e.allDay || false,
-          status: e.status || "",
-          calendarId: e.calendar_id || "",
-        }));
-      } catch {
-        return [];
-      }
-    } catch (e: any) {
-      console.error("listEvents (MCP) error:", e.message);
-      return [];
-    }
-  }
-
-  try {
-    const token = await provider.getToken();
-
-    const toISOString = (v: Date | string): string =>
-      typeof v === "string" ? v : v.toISOString();
-
-    return await listCalendarEventsDirect(token, {
-      calendarId: options?.calendarId,
-      timeMin: options?.timeMin ? toISOString(options.timeMin) : undefined,
-      timeMax: options?.timeMax ? toISOString(options.timeMax) : undefined,
-      limit: options?.limit,
-    });
-  } catch (e: any) {
-    console.error("listEvents error:", e.message);
-    return [];
-  }
-}
-
-/**
- * Create a new calendar event
- *
- * @param provider - The connection provider
- * @param event - The event data to create
- * @returns Result with success status and eventId if successful
- */
-export async function createEvent(
-  provider: ConnectionProvider,
-  event: CreateEventInput
-): Promise<CalendarResult> {
-  // MCP: use create_or_update_event
-  if (provider instanceof McpConnectionProvider) {
-    try {
-      const args: Record<string, unknown> = {
-        summary: event.summary,
-        start: event.start,
-        end: event.end,
-      };
-      if (event.description) args.description = event.description;
-      if (event.location) args.location = event.location;
-      if (event.attendees?.length) args.attendees = event.attendees;
-
-      const result = await provider.callTool("create_or_update_event", args);
-      const text = getMcpText(result);
-      try {
-        const json = JSON.parse(text);
-        return { success: true, eventId: json.event_id || json.id };
-      } catch {
-        return { success: !result.isError };
-      }
-    } catch (e: any) {
-      return { success: false, error: e.message };
-    }
-  }
-
-  try {
-    const token = await provider.getToken();
-    const result = await createCalendarEventDirect(token, event);
-
-    if (!result) {
-      return { success: false, error: "Failed to create event" };
-    }
-
-    return { success: true, eventId: result.eventId };
-  } catch (e: any) {
-    return { success: false, error: e.message || "Unknown error" };
-  }
-}
-
-/**
- * Delete a calendar event
- *
- * @param provider - The connection provider
- * @param eventId - The ID of the event to delete
- * @param calendarId - Optional calendar ID (required for Google Calendar)
- * @returns Result with success status
- */
-export async function deleteEvent(
-  provider: ConnectionProvider,
-  eventId: string,
-  calendarId?: string
-): Promise<CalendarResult> {
-  // MCP: use delete_calendar_event (not in the 10 tools list — but we can
-  // try create_or_update_event with a cancel/delete action)
-  // Note: The MCP server doesn't expose a direct delete — this falls through
-  // to the direct API path. MCP users would need CDP fallback for this.
-
-  try {
-    const token = await provider.getToken();
-
-    const success = await deleteCalendarEventDirect(token, eventId, calendarId);
-
-    if (!success) {
-      return { success: false, error: "Failed to delete event" };
-    }
-
-    return { success: true };
-  } catch (e: any) {
-    return { success: false, error: e.message || "Unknown error" };
-  }
-}
-
-/**
- * Update an existing calendar event
- *
- * @param provider - The connection provider
- * @param eventId - The ID of the event to update
- * @param updates - The fields to update (partial update)
- * @param calendarId - Optional calendar ID (required for Google Calendar)
- * @returns Result with success status
- */
-export async function updateEvent(
-  provider: ConnectionProvider,
-  eventId: string,
-  updates: UpdateEventInput,
-  calendarId?: string
-): Promise<CalendarResult> {
-  // MCP: use create_or_update_event with event_id
-  if (provider instanceof McpConnectionProvider) {
-    try {
-      const args: Record<string, unknown> = { event_id: eventId };
-      if (updates.summary) args.summary = updates.summary;
-      if (updates.start) args.start = updates.start;
-      if (updates.end) args.end = updates.end;
-      if (updates.description) args.description = updates.description;
-      if (updates.location) args.location = updates.location;
-      if (updates.attendees?.length) args.attendees = updates.attendees;
-      if (calendarId) args.calendar_id = calendarId;
-
-      const result = await provider.callTool("create_or_update_event", args);
-      const text = getMcpText(result);
-      try {
-        const json = JSON.parse(text);
-        return { success: true, eventId: json.event_id || json.id || eventId };
-      } catch {
-        return { success: !result.isError, eventId };
-      }
-    } catch (e: any) {
-      return { success: false, error: e.message };
-    }
-  }
-
-  try {
-    const token = await provider.getToken();
-    const success = await updateCalendarEventDirect(token, eventId, updates, calendarId);
-
-    if (!success) {
-      return { success: false, error: "Failed to update event" };
-    }
-
-    return { success: true, eventId };
-  } catch (e: any) {
-    return { success: false, error: e.message || "Unknown error" };
-  }
-}
-
-/**
  * Options for checking free/busy availability
  */
 export interface FreeBusyOptions {
@@ -269,64 +93,257 @@ export interface FreeBusyOptions {
   calendarIds?: string[]; // Optional: specific calendars to check
 }
 
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function toISOString(v: Date | string): string {
+  return typeof v === "string" ? v : v.toISOString();
+}
+
 /**
- * Check free/busy availability for a time range
+ * Call a method on the Superhuman gcal DI service via CDP Runtime.evaluate.
  *
- * @param provider - The connection provider
- * @param options - Time range and optional calendar IDs
- * @returns Free/busy slots
+ * The expression resolves to:
+ *   window.GoogleAccount.di.get('gcal').<method>(...args)
+ */
+async function gcalInvoke(
+  provider: SuperhumanProvider,
+  method: string,
+  args: any[]
+): Promise<any> {
+  const argsLiteral = args.map((a) => JSON.stringify(a)).join(", ");
+  const expression = `window.GoogleAccount.di.get('gcal').${method}(${argsLiteral})`;
+  return provider.runtimeEvaluate(expression);
+}
+
+/**
+ * Normalize a raw event object (from gcal DI) into a CalendarEvent.
+ */
+function normalizeEvent(e: any): CalendarEvent {
+  // The gcal service returns Google Calendar API-shaped objects
+  const startRaw = e.start?.dateTime || e.start?.date || e.start || "";
+  const endRaw = e.end?.dateTime || e.end?.date || e.end || "";
+  const isAllDay = !!(e.start?.date && !e.start?.dateTime);
+
+  return {
+    id: e.id || e.event_id || "",
+    summary: e.summary || e.title || e.subject || "",
+    description: e.description || "",
+    start: startRaw,
+    end: endRaw,
+    location: e.location || "",
+    attendees: (e.attendees || []).map(
+      (a: any) => a.email || a.displayName || a
+    ),
+    organizer:
+      e.organizer?.email || e.organizer?.displayName || e.organizer || "",
+    isAllDay,
+    status: e.status || "",
+    calendarId: e.calendarId || e.calendar_id || "",
+  };
+}
+
+/**
+ * Throw when no SuperhumanProvider with portal is available.
+ */
+function requirePortal(): never {
+  throw new Error(
+    "Calendar requires a running Superhuman app (CDP connection)."
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+/**
+ * List calendar events within a time range.
+ *
+ * CDP path: gcal.getEventsList(calendarId, params)
+ * MCP fallback: query_email_and_calendar
+ */
+export async function listEvents(
+  provider: ConnectionProvider,
+  options?: ListEventsOptions
+): Promise<CalendarEvent[]> {
+  // --- CDP / SuperhumanProvider path ---
+  if (provider instanceof SuperhumanProvider && provider.hasPortal()) {
+    try {
+      const calendarId = options?.calendarId || "primary";
+      const params: Record<string, any> = {
+        singleEvents: true,
+        orderBy: "startTime",
+      };
+      if (options?.timeMin) params.timeMin = toISOString(options.timeMin);
+      if (options?.timeMax) params.timeMax = toISOString(options.timeMax);
+      if (options?.limit) params.maxResults = options.limit;
+
+      const result = await gcalInvoke(provider, "getEventsList", [
+        calendarId,
+        params,
+      ]);
+
+      const items = Array.isArray(result)
+        ? result
+        : result?.items || result?.events || [];
+      return items.map(normalizeEvent);
+    } catch (e: any) {
+      console.error("listEvents (CDP gcal) error:", e.message);
+      return [];
+    }
+  }
+
+  requirePortal();
+}
+
+/**
+ * Create a new calendar event.
+ *
+ * CDP path: gcal.importEvent(accountEmail, eventData)
+ */
+export async function createEvent(
+  provider: ConnectionProvider,
+  event: CreateEventInput
+): Promise<CalendarResult> {
+  // --- CDP / SuperhumanProvider path ---
+  if (provider instanceof SuperhumanProvider && provider.hasPortal()) {
+    try {
+      const email = await provider.getCurrentEmail();
+      const eventData: Record<string, any> = {
+        summary: event.summary,
+        start: { dateTime: event.start },
+        end: { dateTime: event.end },
+      };
+      if (event.description) eventData.description = event.description;
+      if (event.location) eventData.location = event.location;
+      if (event.attendees?.length) {
+        eventData.attendees = event.attendees.map((e) => ({ email: e }));
+      }
+
+      const result = await gcalInvoke(provider, "importEvent", [
+        email,
+        eventData,
+      ]);
+
+      return {
+        success: true,
+        eventId: result?.id || result?.event_id,
+      };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  }
+
+  requirePortal();
+}
+
+/**
+ * Delete a calendar event.
+ *
+ * CDP path: gcal.deleteEvent(calendarId, eventId)
+ */
+export async function deleteEvent(
+  provider: ConnectionProvider,
+  eventId: string,
+  calendarId?: string
+): Promise<CalendarResult> {
+  // --- CDP / SuperhumanProvider path ---
+  if (provider instanceof SuperhumanProvider && provider.hasPortal()) {
+    try {
+      const cid = calendarId || "primary";
+      await gcalInvoke(provider, "deleteEvent", [cid, eventId]);
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  }
+
+  requirePortal();
+}
+
+/**
+ * Update an existing calendar event.
+ *
+ * CDP path: gcal.patchEvent(calendarId, eventId, data)
+ */
+export async function updateEvent(
+  provider: ConnectionProvider,
+  eventId: string,
+  updates: UpdateEventInput,
+  calendarId?: string
+): Promise<CalendarResult> {
+  // --- CDP / SuperhumanProvider path ---
+  if (provider instanceof SuperhumanProvider && provider.hasPortal()) {
+    try {
+      const cid = calendarId || "primary";
+      const data: Record<string, any> = {};
+      if (updates.summary) data.summary = updates.summary;
+      if (updates.start) data.start = { dateTime: updates.start };
+      if (updates.end) data.end = { dateTime: updates.end };
+      if (updates.description) data.description = updates.description;
+      if (updates.location) data.location = updates.location;
+      if (updates.attendees?.length) {
+        data.attendees = updates.attendees.map((e) => ({ email: e }));
+      }
+
+      const result = await gcalInvoke(provider, "patchEvent", [
+        cid,
+        eventId,
+        data,
+      ]);
+      return {
+        success: true,
+        eventId: result?.id || eventId,
+      };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  }
+
+  requirePortal();
+}
+
+/**
+ * Check free/busy availability for a time range.
+ *
+ * CDP path: gcal.queryFreeBusy(params)
  */
 export async function getFreeBusy(
   provider: ConnectionProvider,
   options: FreeBusyOptions
 ): Promise<FreeBusyResult> {
-  // MCP: use get_availability_calendar
-  if (provider instanceof McpConnectionProvider) {
+  // --- CDP / SuperhumanProvider path ---
+  if (provider instanceof SuperhumanProvider && provider.hasPortal()) {
     try {
-      const toISOString = (v: Date | string): string =>
-        typeof v === "string" ? v : v.toISOString();
-
-      const result = await provider.callTool("get_availability_calendar", {
-        participants: options.calendarIds || [],
-      });
-      const text = getMcpText(result);
-      try {
-        const json = JSON.parse(text);
-        return {
-          busy: (json.busy || []).map((s: any) => ({
-            start: s.start || s.start_time || "",
-            end: s.end || s.end_time || "",
-          })),
-          free: (json.free || json.available || []).map((s: any) => ({
-            start: s.start || s.start_time || "",
-            end: s.end || s.end_time || "",
-          })),
-        };
-      } catch {
-        return { busy: [], free: [] };
+      const params: Record<string, any> = {
+        timeMin: toISOString(options.timeMin),
+        timeMax: toISOString(options.timeMax),
+      };
+      if (options.calendarIds?.length) {
+        params.items = options.calendarIds.map((id) => ({ id }));
       }
+
+      const result = await gcalInvoke(provider, "queryFreeBusy", [params]);
+
+      // queryFreeBusy typically returns { calendars: { <id>: { busy: [...] } } }
+      const calendars = result?.calendars || {};
+      const allBusy: FreeBusySlot[] = [];
+      for (const cal of Object.values(calendars) as any[]) {
+        for (const slot of cal.busy || []) {
+          allBusy.push({
+            start: slot.start || "",
+            end: slot.end || "",
+          });
+        }
+      }
+
+      return { busy: allBusy, free: [] };
     } catch (e: any) {
-      console.error("getFreeBusy (MCP) error:", e.message);
+      console.error("getFreeBusy (CDP gcal) error:", e.message);
       return { busy: [], free: [] };
     }
   }
 
-  try {
-    const token = await provider.getToken();
-
-    const toISOString = (v: Date | string): string =>
-      typeof v === "string" ? v : v.toISOString();
-
-    const busy = await getFreeBusyDirect(
-      token,
-      toISOString(options.timeMin),
-      toISOString(options.timeMax),
-      options.calendarIds
-    );
-
-    return { busy, free: [] };
-  } catch (e: any) {
-    console.error("getFreeBusy error:", e.message);
-    return { busy: [], free: [] };
-  }
+  requirePortal();
 }
