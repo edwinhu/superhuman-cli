@@ -547,7 +547,6 @@ export function hasValidCachedTokens(): boolean {
  *
  * Returns the updated TokenInfo, or undefined if refresh failed.
  */
-// Shared helper: extract token via an existing connection, cache it, and persist to disk.
 async function extractAndCache(conn: SuperhumanConnection, email: string): Promise<TokenInfo> {
   const token = await extractToken(conn, email);
   if (token.idToken) {

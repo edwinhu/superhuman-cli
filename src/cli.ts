@@ -910,13 +910,6 @@ async function resolveBackendUserInfo(
   process.exit(1);
 }
 
-/**
- * Resolve a Superhuman token for backend API calls.
- * Delegates to resolveToken() which handles cache, auto-refresh, and cold-start CDP bootstrap.
- */
-async function resolveSuperhumanToken(account?: string): Promise<TokenInfo | null> {
-  return resolveToken(account);
-}
 
 async function cmdSnippets(options: CliOptions) {
   const { userInfo } = await resolveBackendUserInfo(options);
@@ -1069,7 +1062,7 @@ async function cmdDraft(options: CliOptions) {
 
     // Native draft update path
     if (options.native || isNativeDraft) {
-      const token = await resolveSuperhumanToken(options.account);
+      const token = await resolveToken(options.account);
       if (!token) {
         error("No cached Superhuman credentials found");
         error("Run 'superhuman account auth' first");
@@ -1148,7 +1141,7 @@ async function cmdDraft(options: CliOptions) {
 
   // Fast path: use cached Superhuman credentials (no CDP needed)
   if (options.provider === "superhuman") {
-    const token = await resolveSuperhumanToken(options.account);
+    const token = await resolveToken(options.account);
     if (token) {
       info("Creating draft via Superhuman API...");
 
@@ -1262,7 +1255,7 @@ async function cmdDeleteDraft(options: CliOptions) {
 
   // Handle native drafts
   if (nativeDraftIds.length > 0) {
-    const token = await resolveSuperhumanToken(options.account);
+    const token = await resolveToken(options.account);
     if (!token) {
       error("No cached Superhuman credentials found for native draft deletion");
       error("Run 'superhuman account auth' first");
@@ -1752,7 +1745,7 @@ async function cmdReply(options: CliOptions) {
 
   // Fast path: use cached Superhuman credentials (no CDP needed)
   {
-    const token = await resolveSuperhumanToken(options.account);
+    const token = await resolveToken(options.account);
     if (token) {
       const body = options.body || "";
 
@@ -1859,7 +1852,7 @@ async function cmdReplyAll(options: CliOptions) {
 
   // Fast path: use cached Superhuman credentials (no CDP needed)
   {
-    const token = await resolveSuperhumanToken(options.account);
+    const token = await resolveToken(options.account);
     if (token) {
       const body = options.body || "";
       const hasAttachments = options.attachFiles && options.attachFiles.length > 0;
@@ -1979,7 +1972,7 @@ async function cmdForward(options: CliOptions) {
 
   // Fast path: use cached Superhuman credentials (no CDP needed)
   {
-    const token = await resolveSuperhumanToken(options.account);
+    const token = await resolveToken(options.account);
     if (token) {
       const body = options.body || "";
       const hasAttachments = options.attachFiles && options.attachFiles.length > 0;
