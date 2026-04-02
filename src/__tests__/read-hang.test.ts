@@ -12,6 +12,7 @@ process.env.SUPERHUMAN_CLI_CONFIG_DIR = TEST_CONFIG_DIR;
 import {
   clearTokenCache,
   setTokenCacheForTest,
+  saveTokensToDisk,
   type TokenInfo,
 } from "../token-api";
 
@@ -43,9 +44,10 @@ describe("read command hang regression", () => {
   });
 
   test("cmdRead does NOT fall through to CDP when cached token exists", async () => {
-    // Set up a valid token in cache
+    // Set up a valid token in cache and persist to disk so the subprocess can find it
     const token = createTestToken({ email: "user@example.com" });
     setTokenCacheForTest(token.email, token);
+    await saveTokensToDisk();
 
     // Mock Gmail thread fetch
     globalThis.fetch = mock(() =>
@@ -138,6 +140,7 @@ describe("read command hang regression", () => {
     });
     setTokenCacheForTest(expiredToken.email, expiredToken);
     setTokenCacheForTest(validToken.email, validToken);
+    await saveTokensToDisk();
 
     // Run the CLI targeting the valid account
     const proc = Bun.spawn(

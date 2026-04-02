@@ -383,6 +383,7 @@ export async function getToken(
  */
 export function clearTokenCache(): void {
   tokenCache.clear();
+  tokensLoaded = false;
 }
 
 /**
@@ -396,6 +397,8 @@ export function setTokenCacheForTest(email: string, token: TokenInfo): void {
 // ============================================================================
 // Token Persistence
 // ============================================================================
+
+let tokensLoaded = false;
 
 /**
  * Persisted token format for disk storage.
@@ -478,6 +481,7 @@ export async function saveTokensToDisk(): Promise<void> {
  * @returns true if tokens were loaded successfully, false otherwise
  */
 export async function loadTokensFromDisk(): Promise<boolean> {
+  if (tokensLoaded) return true;
   try {
     const tokensFile = getTokensFile();
     const file = Bun.file(tokensFile);
@@ -508,6 +512,7 @@ export async function loadTokensFromDisk(): Promise<boolean> {
       });
     }
 
+    tokensLoaded = true;
     return true;
   } catch {
     return false;
@@ -542,25 +547,23 @@ export function hasValidCachedTokens(): boolean {
  *
  * Returns the updated TokenInfo, or undefined if refresh failed.
  */
+// Shared helper: extract token via an existing connection, cache it, and persist to disk.
+async function extractAndCache(conn: SuperhumanConnection, email: string): Promise<TokenInfo> {
+  const token = await extractToken(conn, email);
+  if (token.idToken) {
+    token.superhumanToken = { token: token.idToken, expires: token.idTokenExpires ?? token.expires };
+  }
+  tokenCache.set(token.email, token);
+  await saveTokensToDisk();
+  return token;
+}
+
 async function refreshTokenViaCDP(email: string): Promise<TokenInfo | undefined> {
   let conn: SuperhumanConnection | null = null;
   try {
     conn = await connectToSuperhuman(getCDPPort(), false);
     if (!conn) return undefined;
-
-    const token = await extractToken(conn, email);
-    // Populate superhumanToken from idToken (extractToken only sets idToken)
-    if (token.idToken) {
-      token.superhumanToken = {
-        token: token.idToken,
-        expires: token.idTokenExpires ?? token.expires,
-      };
-    }
-    // Update in-memory cache
-    tokenCache.set(email, token);
-    // Persist to disk
-    await saveTokensToDisk();
-    return token;
+    return await extractAndCache(conn, email);
   } catch {
     return undefined;
   } finally {
@@ -620,6 +623,59 @@ export async function hasCachedSuperhumanCredentials(email: string): Promise<boo
  */
 export function getTokensFilePath(): string {
   return getTokensFile();
+}
+
+/**
+ * Resolve a Superhuman token for any CLI operation.
+ *
+ * Resolution order:
+ *  1. Cached token for the requested email (auto-refreshes via CDP if expired)
+ *  2. Any cached account with valid Superhuman credentials
+ *  3. Cold-start: connect to CDP, extract token for the currently active account
+ *
+ * Works for both Google and Microsoft accounts — Superhuman always authenticates
+ * to its backend via Firebase JWT regardless of the underlying OAuth provider.
+ */
+export async function resolveToken(email?: string): Promise<TokenInfo | null> {
+  await loadTokensFromDisk();
+
+  // 1. Try requested account (getCachedToken auto-refreshes if expired)
+  if (email) {
+    const token = await getCachedToken(email);
+    if (token?.idToken && token?.userId) return token;
+    // Explicit account requested but not found — don't fall through to other accounts
+  } else {
+    // 2. Try any cached account
+    for (const cachedEmail of tokenCache.keys()) {
+      const token = await getCachedToken(cachedEmail);
+      if (token?.idToken && token?.userId) return token;
+    }
+  }
+
+  // 3. Cold-start: bootstrap from the currently active Superhuman session
+  let conn: SuperhumanConnection | null = null;
+  try {
+    conn = await connectToSuperhuman(getCDPPort(), false);
+    if (!conn) return null;
+
+    if (email) {
+      // Specific account requested — extractToken handles switching to it
+      return await extractAndCache(conn, email);
+    }
+
+    // No account specified — use whatever is currently active
+    const emailResult = await conn.Runtime.evaluate({
+      expression: `window.GoogleAccount?.emailAddress || null`,
+      returnByValue: true,
+    });
+    const activeEmail: string | null = emailResult.result.value;
+    if (!activeEmail) return null;
+    return await extractAndCache(conn, activeEmail);
+  } catch {
+    return null;
+  } finally {
+    if (conn) await disconnect(conn);
+  }
 }
 
 // ============================================================================

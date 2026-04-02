@@ -46,16 +46,14 @@ import { listSnippets, findSnippet, applyVars, parseVars } from "./snippets";
 import {
   getToken,
   saveTokensToDisk,
-  loadTokensFromDisk,
   hasValidCachedTokens,
   getTokensFilePath,
   extractSuperhumanToken,
   askAISearch,
   getCachedToken,
-  getCachedAccounts,
-  hasCachedSuperhumanCredentials,
   getThreadInfoSuperhuman,
   extractTokenChrome,
+  resolveToken,
   type TokenInfo,
 } from "./token-api";
 import type { ConnectionProvider } from "./connection-provider";
@@ -896,72 +894,28 @@ async function cmdStatus(options: CliOptions) {
 
 /**
  * Resolve UserInfo for Superhuman backend API calls.
- * Tries cached credentials first (by --account, then any cached account), falls back to CDP.
+ * Delegates to resolveToken() which handles cache, auto-refresh, and cold-start CDP bootstrap.
  */
 async function resolveBackendUserInfo(
   options: CliOptions
 ): Promise<{ userInfo: UserInfo; email: string }> {
-  await loadTokensFromDisk();
-
-  if (options.account && (await hasCachedSuperhumanCredentials(options.account))) {
-    const token = await getCachedToken(options.account);
-    if (token?.idToken && token?.userId) {
-      return {
-        userInfo: getUserInfoFromCache(token.userId, token.email, token.idToken),
-        email: token.email,
-      };
-    }
+  const token = await resolveToken(options.account);
+  if (token?.idToken && token?.userId) {
+    return {
+      userInfo: getUserInfoFromCache(token.userId, token.email, token.idToken),
+      email: token.email,
+    };
   }
-
-  const accounts = getCachedAccounts();
-  for (const email of accounts) {
-    if (await hasCachedSuperhumanCredentials(email)) {
-      const token = await getCachedToken(email);
-      if (token?.idToken && token?.userId) {
-        return {
-          userInfo: getUserInfoFromCache(token.userId, token.email, token.idToken),
-          email: token.email,
-        };
-      }
-    }
-  }
-
-  // Fall back to CDP
-  const conn = await checkConnection(options.port);
-  if (!conn) process.exit(1);
-  const userInfo = await getUserInfo(conn);
-  await disconnect(conn);
-  return { userInfo, email: userInfo.email };
+  error("Could not resolve Superhuman credentials");
+  process.exit(1);
 }
 
 /**
- * Resolve a cached Superhuman token with idToken + userId.
- * Tries --account first, then any cached account with Superhuman credentials.
- * Returns null if no valid cached credentials found.
+ * Resolve a Superhuman token for backend API calls.
+ * Delegates to resolveToken() which handles cache, auto-refresh, and cold-start CDP bootstrap.
  */
 async function resolveSuperhumanToken(account?: string): Promise<TokenInfo | null> {
-  await loadTokensFromDisk();
-
-  if (account && await hasCachedSuperhumanCredentials(account)) {
-    const token = await getCachedToken(account);
-    if (token?.idToken && token?.userId) return token;
-  }
-
-  // If --account was explicitly specified but not found, don't fall through
-  // to other accounts — respect the user's explicit choice
-  if (account) {
-    return null;
-  }
-
-  const accounts = getCachedAccounts();
-  for (const email of accounts) {
-    if (await hasCachedSuperhumanCredentials(email)) {
-      const token = await getCachedToken(email);
-      if (token?.idToken && token?.userId) return token;
-    }
-  }
-
-  return null;
+  return resolveToken(account);
 }
 
 async function cmdSnippets(options: CliOptions) {
@@ -1375,12 +1329,6 @@ async function cmdSendDraft(options: CliOptions) {
     process.exit(1);
   }
 
-  // Require --account flag (no CDP path for now)
-  if (!options.account) {
-    error("--account flag is required for send-draft");
-    process.exit(1);
-  }
-
   // Require --to flag
   if (options.to.length === 0) {
     error("--to flag is required (at least one recipient)");
@@ -1399,11 +1347,9 @@ async function cmdSendDraft(options: CliOptions) {
     process.exit(1);
   }
 
-  // Load cached credentials
-  await loadTokensFromDisk();
-  const token = await getCachedToken(options.account);
+  const token = await resolveToken(options.account);
   if (!token?.idToken || !token?.userId) {
-    error(`No cached credentials for ${options.account}. Run 'superhuman auth' first.`);
+    error("Could not resolve Superhuman credentials");
     process.exit(1);
   }
 
@@ -1455,38 +1401,20 @@ async function cmdSendDraft(options: CliOptions) {
 }
 
 async function cmdListDrafts(options: CliOptions) {
-  const account = options.account;
   const limit = options.limit || 50;
   const offset = options.offset || 0;
   const filterTo = options.to.length > 0 ? options.to[0].toLowerCase() : "";
   const filterSubject = options.subject ? options.subject.toLowerCase() : "";
 
-  // Load cached tokens from disk
-  await loadTokensFromDisk();
-
-  // Determine which account to use
-  let email = account;
-  if (!email) {
-    const accounts = getCachedAccounts();
-    if (accounts.length > 0) {
-      email = accounts[0];
-      info(`Using account: ${email}`);
-    } else {
-      error("No account specified. Use --account <email>");
-      process.exit(1);
-    }
+  const token = await resolveToken(options.account);
+  if (!token) {
+    error("Could not resolve Superhuman credentials");
+    process.exit(1);
   }
 
-  info(`Fetching drafts from ${email}...`);
+  info(`Fetching drafts from ${token.email}...`);
 
   try {
-    // Get token for the account
-    const token = await getCachedToken(email);
-    if (!token) {
-      error(`No cached token for ${email}. Run 'superhuman account auth' to authenticate.`);
-      process.exit(1);
-    }
-
     // Use Superhuman native draft provider only
     const nativeProvider = new SuperhumanDraftProvider(token);
 

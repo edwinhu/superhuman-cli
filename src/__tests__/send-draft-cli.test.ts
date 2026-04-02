@@ -58,14 +58,19 @@ describe("draft send CLI command", () => {
       expect(exitCode).not.toBe(0);
     });
 
-    test("draft send requires --account flag", async () => {
-      // Run draft send without --account flag
+    test("draft send fails gracefully without credentials", async () => {
+      // Run draft send without --account flag and no cached credentials
       const proc = Bun.spawn(
         [process.execPath, "run", "src/cli.ts", "draft", "send", "draft00abcdef123456", "--to=recipient@example.com", "--subject=Test", "--body=Test body"],
         {
           cwd: import.meta.dir + "/../..",
           stdout: "pipe",
           stderr: "pipe",
+          env: {
+            ...process.env,
+            SUPERHUMAN_CLI_CONFIG_DIR: "/tmp/nonexistent-send-draft-test-dir",
+            CDP_PORT: "19999", // unreachable — prevents cold-start CDP fallback
+          },
         }
       );
       const stderr = await new Response(proc.stderr).text();
@@ -73,8 +78,8 @@ describe("draft send CLI command", () => {
       const exitCode = await proc.exited;
       const output = stdout + stderr;
 
-      // Should error about missing --account flag
-      expect(output).toMatch(/--account.*required|account.*required/i);
+      // Should fail with a credential error (no cached credentials, Superhuman not running)
+      expect(output).toMatch(/credentials|authenticate|account auth/i);
       expect(exitCode).not.toBe(0);
     });
 

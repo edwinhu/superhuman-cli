@@ -151,6 +151,7 @@ describe("CLI fallback path rejects provider API when provider is superhuman", (
         env: {
           ...process.env,
           SUPERHUMAN_CLI_CONFIG_DIR: tmpDir,
+          CDP_PORT: "19999", // unreachable — prevents cold-start CDP fallback
         },
       }
     );
