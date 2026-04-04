@@ -9,8 +9,10 @@ import type { ConnectionProvider, AccountInfo } from "./connection-provider";
 import type { TokenInfo } from "./token-api";
 import type { SuperhumanConnection } from "./superhuman-api";
 import { portalInvoke as _portalInvoke } from "./portal-rpc";
+import { refreshTokenViaCDP } from "./token-api";
 
 const SUPERHUMAN_BACKEND_BASE = "https://mail.superhuman.com/~backend";
+const _AUTH_FAILED = Symbol("auth_failed");
 
 /**
  * Token info for direct Superhuman backend access.
@@ -147,8 +149,24 @@ export class SuperhumanProvider implements ConnectionProvider {
 
   /**
    * Make an authenticated request to the Superhuman backend API.
+   * On 401/403, attempts one CDP token refresh and retries.
    */
   async backendFetch(path: string, options?: RequestInit): Promise<any> {
+    const result = await this._doFetch(path, options);
+    if (result !== _AUTH_FAILED) return result;
+
+    // 401/403 — try refreshing token via CDP and retry once
+    const refreshed = await refreshTokenViaCDP(this.tokenInfo.email);
+    if (!refreshed?.superhumanToken) return null;
+
+    this.tokenInfo.token = refreshed.superhumanToken.token;
+    this.tokenInfo.expires = refreshed.superhumanToken.expires;
+
+    const retry = await this._doFetch(path, options);
+    return retry === _AUTH_FAILED ? null : retry;
+  }
+
+  private async _doFetch(path: string, options?: RequestInit): Promise<any> {
     const url = `${SUPERHUMAN_BACKEND_BASE}${path}`;
 
     const response = await fetch(url, {
@@ -161,7 +179,7 @@ export class SuperhumanProvider implements ConnectionProvider {
     });
 
     if (response.status === 401 || response.status === 403) {
-      return null;
+      return _AUTH_FAILED;
     }
 
     if (!response.ok) {

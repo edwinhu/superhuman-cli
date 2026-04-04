@@ -832,13 +832,12 @@ async function getProvider(options: CliOptions): Promise<ConnectionProvider> {
     return provider;
   }
 
-  // No cached tokens — check if Superhuman is already running on CDP port
-  // (don't auto-launch; that's too slow and inappropriate for scripted/test use)
+  // No cached tokens — try CDP auth automatically before giving up
   const running = await isSuperhumanRunning(options.port);
   if (!running) {
-    error("No cached tokens and Superhuman is not running");
-    info("Run 'superhuman account auth' to authenticate, or start Superhuman with:");
-    info(`  /Applications/Superhuman.app/Contents/MacOS/Superhuman --remote-debugging-port=${options.port}`);
+    error("No cached tokens and Chrome CDP is not reachable");
+    info("Run 'superhuman account auth' to authenticate, or ensure Chrome is running with:");
+    info(`  --remote-debugging-port=${options.port}`);
     process.exit(1);
   }
   const conn = await connectToSuperhuman(options.port, false);

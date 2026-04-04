@@ -557,7 +557,7 @@ async function extractAndCache(conn: SuperhumanConnection, email: string): Promi
   return token;
 }
 
-async function refreshTokenViaCDP(email: string): Promise<TokenInfo | undefined> {
+export async function refreshTokenViaCDP(email: string): Promise<TokenInfo | undefined> {
   let conn: SuperhumanConnection | null = null;
   try {
     conn = await connectToSuperhuman(getCDPPort(), false);
@@ -830,18 +830,30 @@ export function clearSuperhumanTokenCache(): void {
 export async function superhumanFetch(
   token: string,
   path: string,
-  options?: RequestInit
+  options?: RequestInit,
+  /** Email for CDP refresh on 401. If provided, retries once after refresh. */
+  email?: string,
 ): Promise<any | null> {
-  const url = `${SUPERHUMAN_BACKEND_BASE}${path}`;
+  const doFetch = async (t: string) => {
+    const url = `${SUPERHUMAN_BACKEND_BASE}${path}`;
+    return fetch(url, {
+      ...options,
+      headers: {
+        ...options?.headers,
+        Authorization: `Bearer ${t}`,
+        "Content-Type": "text/plain;charset=UTF-8",
+      },
+    });
+  };
 
-  const response = await fetch(url, {
-    ...options,
-    headers: {
-      ...options?.headers,
-      Authorization: `Bearer ${token}`,
-      "Content-Type": "text/plain;charset=UTF-8",
-    },
-  });
+  let response = await doFetch(token);
+
+  if ((response.status === 401 || response.status === 403) && email) {
+    const refreshed = await refreshTokenViaCDP(email);
+    if (refreshed?.superhumanToken) {
+      response = await doFetch(refreshed.superhumanToken.token);
+    }
+  }
 
   if (response.status === 401 || response.status === 403) {
     return null;
