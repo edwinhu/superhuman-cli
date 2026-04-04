@@ -14,7 +14,7 @@ CLI to control [Superhuman](https://superhuman.com) email client via Chrome DevT
 bun install
 
 # Start Superhuman with CDP enabled
-/Applications/Superhuman.app/Contents/MacOS/Superhuman --remote-debugging-port=9222
+/Applications/Superhuman.app/Contents/MacOS/Superhuman --remote-debugging-port=9250
 ```
 
 ## CLI Usage
@@ -281,7 +281,7 @@ superhuman calendar free --date tomorrow --range 7
 | `--calendar <name>` | Calendar name or ID (default: primary) |
 | `--json` | Output as NDJSON: arrays print one object per line; single objects are pretty-printed |
 | `--stream` / `--ndjson` | Alias for `--json` |
-| `--port <number>` | CDP port (default: 9222) |
+| `--port <number>` | CDP port (default: 9250) |
 
 ## How It Works
 

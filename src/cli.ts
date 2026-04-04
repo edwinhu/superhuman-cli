@@ -63,7 +63,7 @@ import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
 const VERSION = "0.22.0";
-const CDP_PORT = parseInt(process.env.CDP_PORT || "9222", 10);
+const CDP_PORT = parseInt(process.env.CDP_PORT || "9250", 10);
 
 // ANSI colors
 const colors = {

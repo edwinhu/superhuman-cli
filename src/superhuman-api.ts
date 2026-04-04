@@ -23,11 +23,13 @@ export function getCDPHost(): string {
 }
 
 /**
- * Get CDP port from environment or default to 9222
+ * Get CDP port from environment or default to 9250.
+ * Note: 9250 is used as the default — Chrome is launched with --remote-debugging-port=9250
+ * to avoid conflicts with VS Code / Cursor which bind 9222 for their Electron CDP.
  */
 export function getCDPPort(): number {
   const envPort = process.env.CDP_PORT;
-  return envPort ? parseInt(envPort, 10) : 9222;
+  return envPort ? parseInt(envPort, 10) : 9250;
 }
 
 /**
@@ -44,59 +46,19 @@ export async function isSuperhumanRunning(port = getCDPPort()): Promise<boolean>
 }
 
 /**
- * Launch Superhuman with remote debugging enabled.
- * Skips launch when CDP_HOST is set (remote/container environment).
- */
-export async function launchSuperhuman(port = getCDPPort()): Promise<boolean> {
-  // Check if already running (works for both local and remote)
-  if (await isSuperhumanRunning(port)) {
-    return true;
-  }
-
-  // If CDP_HOST is set, we're connecting to a remote instance — don't try to launch locally
-  const host = getCDPHost();
-  if (host !== "localhost") {
-    console.error(`Superhuman not reachable at ${host}:${port}. Ensure it is running on the host with --remote-debugging-port=${port}`);
-    return false;
-  }
-
-  const appPath = "/Applications/Superhuman.app/Contents/MacOS/Superhuman";
-
-  // Launch in background with CDP enabled
-  console.log("Launching Superhuman with remote debugging...");
-  try {
-    // Use Bun's shell to launch in background
-    Bun.spawn([appPath, `--remote-debugging-port=${port}`], {
-      stdout: "ignore",
-      stderr: "ignore",
-    });
-
-    // Wait for Superhuman to be ready (up to 30 seconds)
-    for (let i = 0; i < 30; i++) {
-      await new Promise(r => setTimeout(r, 1000));
-      if (await isSuperhumanRunning(port)) {
-        console.log("Superhuman is ready");
-        // Give it a bit more time to fully initialize
-        await new Promise(r => setTimeout(r, 2000));
-        return true;
-      }
-    }
-    console.error("Timeout waiting for Superhuman to start");
-    return false;
-  } catch (e) {
-    console.error("Failed to launch Superhuman:", (e as Error).message);
-    return false;
-  }
-}
-
-/**
- * Ensure Superhuman is running, launching it if necessary
+ * Check that Chrome is reachable with a Superhuman tab.
+ * No longer launches Electron — Superhuman runs as a Chrome tab.
  */
 export async function ensureSuperhuman(port = getCDPPort()): Promise<boolean> {
   if (await isSuperhumanRunning(port)) {
     return true;
   }
-  return launchSuperhuman(port);
+  const host = getCDPHost();
+  console.error(
+    `Superhuman not reachable at ${host}:${port}.\n` +
+    `Ensure Chrome is running with --remote-debugging-port=${port} and mail.superhuman.com is open.`
+  );
+  return false;
 }
 
 /**
@@ -108,12 +70,9 @@ export async function connectToSuperhuman(
 ): Promise<SuperhumanConnection | null> {
   const host = getCDPHost();
 
-  // Auto-launch if not running
-  if (autoLaunch && !(await isSuperhumanRunning(port))) {
-    const launched = await launchSuperhuman(port);
-    if (!launched) {
-      return null;
-    }
+  // Check Chrome is reachable with Superhuman tab
+  if (autoLaunch && !(await ensureSuperhuman(port))) {
+    return null;
   }
 
   const targets = await CDP.List({ host, port });
