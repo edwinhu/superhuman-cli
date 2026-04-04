@@ -17,6 +17,7 @@ import {
   disconnectChrome,
   connectToSuperhumanChrome,
   textToHtml,
+  htmlToText,
   unescapeString,
   type SuperhumanConnection,
 } from "./superhuman-api";
@@ -62,7 +63,7 @@ import { SuperhumanProvider } from "./superhuman-provider";
 import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.22.0";
+const VERSION = "0.24.2";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9250", 10);
 
 // ANSI colors
@@ -1726,7 +1727,7 @@ async function cmdRead(options: CliOptions) {
     // Otherwise, show full body only for the last N messages.
     const isWithinContext = contextCount === 0 || (messages.length - i) <= contextCount;
     if (isWithinContext && (msg.body || msg.snippet)) {
-      console.log(msg.body || msg.snippet);
+      console.log(htmlToText(msg.body || msg.snippet));
     } else {
       console.log(msg.snippet);
     }

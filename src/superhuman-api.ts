@@ -221,3 +221,46 @@ export function textToHtml(text: string): string {
 
   return `<p>${unescaped.replace(/\n/g, "</p><p>")}</p>`;
 }
+
+/**
+ * Convert HTML to readable plain text for terminal display.
+ */
+export function htmlToText(html: string): string {
+  if (!html) return "";
+
+  let text = html;
+
+  // Block-level elements → newlines
+  text = text.replace(/<br\s*\/?>/gi, "\n");
+  text = text.replace(/<\/p>/gi, "\n\n");
+  text = text.replace(/<\/div>/gi, "\n");
+  text = text.replace(/<\/li>/gi, "\n");
+  text = text.replace(/<\/tr>/gi, "\n");
+  text = text.replace(/<\/h[1-6]>/gi, "\n\n");
+  text = text.replace(/<\/blockquote>/gi, "\n");
+  text = text.replace(/<hr\s*\/?>/gi, "\n---\n");
+
+  // List items: add bullet
+  text = text.replace(/<li[^>]*>/gi, "  • ");
+
+  // Strip all remaining tags
+  text = text.replace(/<[^>]+>/g, "");
+
+  // Decode common HTML entities
+  text = text.replace(/&nbsp;/gi, " ");
+  text = text.replace(/&amp;/g, "&");
+  text = text.replace(/&lt;/g, "<");
+  text = text.replace(/&gt;/g, ">");
+  text = text.replace(/&quot;/g, '"');
+  text = text.replace(/&#39;/g, "'");
+  text = text.replace(/&#x27;/g, "'");
+  text = text.replace(/&#(\d+);/g, (_, n) => String.fromCharCode(parseInt(n)));
+  text = text.replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)));
+
+  // Collapse excessive whitespace
+  text = text.replace(/[ \t]+/g, " ");
+  text = text.replace(/\n{3,}/g, "\n\n");
+  text = text.trim();
+
+  return text;
+}
