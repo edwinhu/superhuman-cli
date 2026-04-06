@@ -12,7 +12,6 @@ import {
   getCachedAccounts,
   getToken,
   loadTokensFromDisk,
-  hasValidCachedTokens,
 } from "./token-api";
 import { listAccounts } from "./accounts";
 import { SuperhumanProvider, type SuperhumanTokenInfo } from "./superhuman-provider";
@@ -156,10 +155,9 @@ function providerFromToken(token: TokenInfo, email: string): ConnectionProvider 
  * Resolve the best available ConnectionProvider.
  *
  * Priority:
- * 1. If --account specified and token is cached -> SuperhumanProvider (if superhumanToken present) or CachedTokenProvider
- * 2. If any cached tokens exist -> SuperhumanProvider or CachedTokenProvider (first account)
- * 3. If CDP available -> CDPConnectionProvider
- * 4. null (caller must handle)
+ * 1. If --account specified and token is cached (or refreshable via CDP) -> SuperhumanProvider or CachedTokenProvider
+ * 2. If any cached accounts exist -> try getCachedToken() which auto-refreshes via CDP if expired
+ * 3. null if no cached accounts at all (caller must handle)
  *
  * @param options - Object with optional `account` and `port` fields
  * @returns ConnectionProvider or null if no tokens and no CDP
@@ -179,19 +177,18 @@ export async function resolveProvider(
     // Fall through if explicit account not in cached tokens
   }
 
-  // If any cached tokens are valid, use the first one
-  if (hasValidCachedTokens()) {
-    const accounts = getCachedAccounts();
-    if (accounts.length > 0) {
-      const token = await getCachedToken(accounts[0]);
-      if (token) {
-        return providerFromToken(token, accounts[0]);
-      }
-      return new CachedTokenProvider(accounts[0]);
+  // Try cached accounts — getCachedToken() will attempt CDP refresh if expired
+  const accounts = getCachedAccounts();
+  if (accounts.length > 0) {
+    const token = await getCachedToken(accounts[0]);
+    if (token) {
+      return providerFromToken(token, accounts[0]);
     }
+    // Token expired and CDP refresh failed — return CachedTokenProvider so
+    // caller gets a meaningful error rather than falling through to CDP auth
+    return new CachedTokenProvider(accounts[0]);
   }
 
-  // No cached tokens — would need CDP, but we don't connect here
-  // (caller can fall back to CDP themselves if needed)
+  // No cached accounts at all — caller must handle
   return null;
 }
