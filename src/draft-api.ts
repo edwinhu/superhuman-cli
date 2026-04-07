@@ -124,7 +124,10 @@ export async function createDraftWithUserInfo(
 ): Promise<DraftResult> {
   try {
     const draftId = generateDraftId();
-    const threadId = options.inReplyToThreadId || generateDraftId();
+    // For new threads (compose/forward), reuse draftId as threadId so
+    // messages/send receives thread_id === message_id. For replies, use the
+    // original thread's ID to keep the email in the same thread.
+    const threadId = options.inReplyToThreadId || draftId;
     const now = new Date().toISOString();
 
     // Format recipients

@@ -23,6 +23,7 @@ import {
 } from "./superhuman-api";
 import { listInbox, searchInbox, streamListInbox, streamSearchInbox } from "./inbox";
 import { searchDirect, listLocalAccounts, lookupThreadInfoById } from "./sqlite-search";
+import { saveDraftMeta, loadDraftMeta, deleteDraftMeta } from "./draft-cache";
 import { listAccounts, listAccountsChrome, switchAccount, type Account } from "./accounts";
 import { replyToThread, replyAllToThread, forwardThread } from "./reply";
 import { archiveThread, deleteThread } from "./archive";
@@ -1332,21 +1333,25 @@ async function cmdSendDraft(options: CliOptions) {
     process.exit(1);
   }
 
-  // Require --to flag
-  if (options.to.length === 0) {
-    error("--to flag is required (at least one recipient)");
+  // Try to load cached metadata (saved by forward/reply/reply-all draft creation)
+  const cachedMeta = loadDraftMeta(draftId);
+
+  // Fill in missing flags from cache; error only if still missing
+  const resolvedTo = options.to.length > 0 ? options.to : (cachedMeta?.to ?? []);
+  const resolvedSubject = options.subject || cachedMeta?.subject || "";
+  const resolvedHtmlBody = options.html || (options.body ? textToHtml(options.body) : cachedMeta?.htmlBody || "");
+  const resolvedThreadId = options.sendDraftThreadId || cachedMeta?.threadId || draftId;
+
+  if (resolvedTo.length === 0) {
+    error("--to flag is required (no cached metadata found for this draft)");
     process.exit(1);
   }
-
-  // Require --subject flag
-  if (!options.subject) {
-    error("--subject flag is required");
+  if (!resolvedSubject) {
+    error("--subject flag is required (no cached metadata found for this draft)");
     process.exit(1);
   }
-
-  // Require --body flag
-  if (!options.body && !options.html) {
-    error("--body flag is required");
+  if (!resolvedHtmlBody) {
+    error("--body flag is required (no cached metadata found for this draft)");
     process.exit(1);
   }
 
@@ -1360,25 +1365,28 @@ async function cmdSendDraft(options: CliOptions) {
   const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
 
   // Build recipients
-  const toRecipients: Recipient[] = options.to.map((email) => ({ email }));
+  const toRecipients: Recipient[] = resolvedTo.map((email) => ({ email }));
   const ccRecipients: Recipient[] | undefined =
     options.cc.length > 0 ? options.cc.map((email) => ({ email })) : undefined;
   const bccRecipients: Recipient[] | undefined =
     options.bcc.length > 0 ? options.bcc.map((email) => ({ email })) : undefined;
 
-  // Get body content (HTML or convert plain text)
-  const htmlBody = options.html || textToHtml(options.body);
-
-  info(`Sending draft ${draftId.slice(-15)}...`);
+  if (cachedMeta) {
+    info(`Sending draft ${draftId.slice(-15)} to ${resolvedTo.join(", ")}...`);
+  } else {
+    info(`Sending draft ${draftId.slice(-15)}...`);
+  }
 
   const result = await sendDraftSuperhuman(userInfo, {
     draftId,
-    threadId: options.sendDraftThreadId || draftId, // Use --thread if provided (for reply/forward), otherwise draftId
+    threadId: resolvedThreadId,
     to: toRecipients,
     cc: ccRecipients,
     bcc: bccRecipients,
-    subject: options.subject,
-    htmlBody,
+    subject: resolvedSubject,
+    htmlBody: resolvedHtmlBody,
+    inReplyTo: cachedMeta?.inReplyTo,
+    references: cachedMeta?.references,
     delay: options.sendDraftDelay,
   });
 
@@ -1388,12 +1396,14 @@ async function cmdSendDraft(options: CliOptions) {
       const sendTime = new Date(result.sendAt);
       log(`  ${colors.dim}Scheduled for: ${sendTime.toLocaleString()}${colors.reset}`);
     }
-    log(`  ${colors.dim}Account: ${options.account}${colors.reset}`);
+    log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
+
+    // Clean up local cache entry
+    deleteDraftMeta(draftId);
 
     // Auto-delete the native draft after successful send (matches Superhuman app behavior)
     try {
-      const threadId = options.sendDraftThreadId || draftId;
-      await deleteDraftWithUserInfo(userInfo, threadId, draftId);
+      await deleteDraftWithUserInfo(userInfo, resolvedThreadId, draftId);
     } catch {
       // Non-fatal: draft was sent successfully, cleanup failure is just cosmetic
     }
@@ -1889,6 +1899,18 @@ async function cmdReply(options: CliOptions) {
         return;
       }
 
+      // Cache metadata so `draft send <id>` works without --to/--subject/--body
+      saveDraftMeta({
+        draftId: result.draftId!,
+        threadId: result.threadId!,
+        to: [threadInfo.from],
+        subject,
+        htmlBody,
+        inReplyTo: threadInfo.messageId || undefined,
+        references: threadInfo.references,
+        createdAt: new Date().toISOString(),
+      });
+
       // Attach files if any
       if (hasAttachments) {
         for (const filePath of options.attachFiles!) {
@@ -2012,6 +2034,18 @@ async function cmdReplyAll(options: CliOptions) {
         return;
       }
 
+      // Cache metadata so `draft send <id>` works without --to/--subject/--body
+      saveDraftMeta({
+        draftId: result.draftId!,
+        threadId: result.threadId!,
+        to: uniqueRecipients,
+        subject,
+        htmlBody,
+        inReplyTo: threadInfo.messageId || undefined,
+        references: threadInfo.references,
+        createdAt: new Date().toISOString(),
+      });
+
       // Attach files if any
       if (hasAttachments) {
         for (const filePath of options.attachFiles!) {
@@ -2131,6 +2165,16 @@ async function cmdForward(options: CliOptions) {
         error(`Failed to create forward draft: ${result.error}`);
         return;
       }
+
+      // Cache metadata so `draft send <id>` works without --to/--subject/--body
+      saveDraftMeta({
+        draftId: result.draftId!,
+        threadId: result.threadId!,
+        to: options.to,
+        subject,
+        htmlBody,
+        createdAt: new Date().toISOString(),
+      });
 
       // Attach files if any
       if (hasAttachments) {
