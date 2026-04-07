@@ -825,10 +825,13 @@ async function checkConnection(port: number): Promise<SuperhumanConnection | nul
 async function getProvider(options: CliOptions): Promise<ConnectionProvider> {
   const provider = await resolveProvider({ account: options.account, port: options.port });
   if (provider) {
-    // If it's a SuperhumanProvider without a CDP connection, try to attach one
+    // If it's a SuperhumanProvider without a CDP connection, try to attach one.
+    // Pass the token's email so connectToSuperhuman picks the right tab when
+    // multiple Superhuman accounts are open simultaneously.
     if (provider instanceof SuperhumanProvider && !provider.hasPortal()) {
       try {
-        const conn = await connectToSuperhuman(options.port, false);
+        const accountEmail = provider.getTokenInfo().email || options.account;
+        const conn = await connectToSuperhuman(options.port, false, accountEmail);
         if (conn) {
           return new SuperhumanProvider(provider.getTokenInfo(), conn);
         }
@@ -847,7 +850,7 @@ async function getProvider(options: CliOptions): Promise<ConnectionProvider> {
     info(`  --remote-debugging-port=${options.port}`);
     process.exit(1);
   }
-  const conn = await connectToSuperhuman(options.port, false);
+  const conn = await connectToSuperhuman(options.port, false, options.account);
   if (!conn) {
     error("Could not connect to Superhuman");
     info("Superhuman may not be installed or failed to launch");

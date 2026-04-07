@@ -62,11 +62,19 @@ export async function ensureSuperhuman(port = getCDPPort()): Promise<boolean> {
 }
 
 /**
- * Find and connect to the Superhuman main page via CDP
+ * Find and connect to the Superhuman main page via CDP.
+ *
+ * @param port - CDP port
+ * @param autoLaunch - Check that Chrome/Superhuman is reachable
+ * @param accountEmail - Prefer the page belonging to this account (e.g. "user@gmail.com").
+ *   When multiple Superhuman tabs are open (one per linked account), this ensures we
+ *   connect to the right account's local SQLite / portal rather than whichever tab
+ *   happens to have the longest URL.
  */
 export async function connectToSuperhuman(
   port = getCDPPort(),
-  autoLaunch = true
+  autoLaunch = true,
+  accountEmail?: string
 ): Promise<SuperhumanConnection | null> {
   const host = getCDPHost();
 
@@ -85,9 +93,19 @@ export async function connectToSuperhuman(
       !t.url.includes("serviceworker") &&
       t.type === "page"
   );
-  // Sort by URL length descending — pages with account paths are longer
-  superhumanPages.sort((a: any, b: any) => b.url.length - a.url.length);
-  const mainPage = superhumanPages[0];
+
+  // If an account email is provided, prefer the page whose URL contains that email.
+  // Fall back to longest-URL heuristic if no match (e.g. tab not open for that account).
+  let mainPage: any;
+  if (accountEmail) {
+    mainPage =
+      superhumanPages.find((t: any) =>
+        t.url.toLowerCase().includes(accountEmail.toLowerCase())
+      ) ?? superhumanPages.sort((a: any, b: any) => b.url.length - a.url.length)[0];
+  } else {
+    superhumanPages.sort((a: any, b: any) => b.url.length - a.url.length);
+    mainPage = superhumanPages[0];
+  }
 
   if (!mainPage) {
     console.error("Could not find Superhuman main page");
