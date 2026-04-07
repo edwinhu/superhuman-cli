@@ -131,6 +131,10 @@ export interface SQLiteThreadInfo {
   cc: string[];
   messageId: string | null;
   references: string[];
+  /** Gmail API message ID (hex, e.g. "19d3fa80bff87ca3") of the latest message */
+  gmailMessageId: string | null;
+  /** ISO date string of the latest message */
+  date: string | null;
 }
 
 /**
@@ -197,6 +201,8 @@ export function lookupThreadInfoById(
         cc: ccList,
         messageId: latest.rfc822Id || latest.messageId || null,
         references: Array.isArray(latest.references) ? latest.references : [],
+        gmailMessageId: latest.id || null,
+        date: latest.date || null,
       };
     } finally {
       db.close();

@@ -43,7 +43,7 @@ import {
   type UpdateEventInput,
 } from "./calendar";
 import { sendEmailViaProvider, createDraftViaProvider, updateDraftViaProvider, sendDraftByIdViaProvider, deleteDraftViaProvider } from "./send-api";
-import { createDraftWithUserInfo, getUserInfo, getUserInfoFromCache, sendDraftSuperhuman, sendViaGmailApi, updateDraftWithUserInfo, deleteDraftWithUserInfo, uploadAttachmentSuperhuman, type Recipient, type UserInfo, type SuperhumanAttachment } from "./draft-api";
+import { createDraftWithUserInfo, getUserInfo, getUserInfoFromCache, sendDraftSuperhuman, sendViaGmailApi, fetchGmailMessageHtml, buildForwardBody, updateDraftWithUserInfo, deleteDraftWithUserInfo, uploadAttachmentSuperhuman, type Recipient, type UserInfo, type SuperhumanAttachment } from "./draft-api";
 import { searchContacts, resolveRecipient, type Contact } from "./contacts";
 import { listSnippets, findSnippet, applyVars, parseVars } from "./snippets";
 import {
@@ -2184,10 +2184,21 @@ async function cmdForward(options: CliOptions) {
         : `Fwd: ${threadInfo.subject}`;
 
       const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
-      const htmlBody = textToHtml(body);
+
+      // Fetch original message body to include in the forward
+      let originalHtml = "";
+      if (threadInfo.gmailMessageId && !token.isMicrosoft) {
+        const fetched = await fetchGmailMessageHtml(token.accessToken, threadInfo.gmailMessageId);
+        if (fetched) originalHtml = fetched;
+      }
+      const htmlBody = buildForwardBody(
+        body ? textToHtml(body) : "",
+        originalHtml,
+        { from: threadInfo.from, date: threadInfo.date, subject: threadInfo.subject, to: threadInfo.to }
+      );
 
       if (options.send) {
-        info(`Sending forward${attachLabel} via Superhuman API...`);
+        info(`Sending forward${attachLabel} via Gmail API...`);
       } else {
         info(`Creating draft for forward${attachLabel} via Superhuman API...`);
       }

@@ -762,3 +762,76 @@ export async function sendViaGmailApi(options: GmailSendOptions): Promise<GmailS
     };
   }
 }
+
+/**
+ * Fetch the HTML body of a Gmail message by its hex message ID.
+ * Returns null if the message can't be fetched or has no HTML part.
+ */
+export async function fetchGmailMessageHtml(
+  accessToken: string,
+  gmailMessageId: string
+): Promise<string | null> {
+  try {
+    const resp = await fetch(
+      `https://gmail.googleapis.com/gmail/v1/users/me/messages/${gmailMessageId}?format=full`,
+      { headers: { Authorization: `Bearer ${accessToken}` } }
+    );
+    if (!resp.ok) return null;
+    const msg = await resp.json() as any;
+    return extractHtmlFromPayload(msg.payload) ?? extractTextFromPayload(msg.payload);
+  } catch {
+    return null;
+  }
+}
+
+function extractHtmlFromPayload(payload: any): string | null {
+  if (!payload) return null;
+  if (payload.mimeType === "text/html" && payload.body?.data) {
+    return Buffer.from(payload.body.data, "base64url").toString("utf8");
+  }
+  for (const part of payload.parts ?? []) {
+    const result = extractHtmlFromPayload(part);
+    if (result) return result;
+  }
+  return null;
+}
+
+function extractTextFromPayload(payload: any): string | null {
+  if (!payload) return null;
+  if (payload.mimeType === "text/plain" && payload.body?.data) {
+    const text = Buffer.from(payload.body.data, "base64url").toString("utf8");
+    return `<pre style="font-family:sans-serif;white-space:pre-wrap">${text.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</pre>`;
+  }
+  for (const part of payload.parts ?? []) {
+    const result = extractTextFromPayload(part);
+    if (result) return result;
+  }
+  return null;
+}
+
+/**
+ * Build a forwarded email HTML body with the standard forwarded message header.
+ */
+export function buildForwardBody(
+  userText: string,
+  originalHtml: string,
+  meta: { from: string; date: string | null; subject: string; to: string[] }
+): string {
+  const dateStr = meta.date
+    ? new Date(meta.date).toLocaleString("en-US", {
+        weekday: "short", year: "numeric", month: "short", day: "numeric",
+        hour: "numeric", minute: "2-digit", timeZoneName: "short",
+      })
+    : "";
+
+  const header = [
+    `<div>---------- Forwarded message ---------</div>`,
+    `<div>From: ${meta.from}</div>`,
+    dateStr ? `<div>Date: ${dateStr}</div>` : "",
+    `<div>Subject: ${meta.subject}</div>`,
+    meta.to.length ? `<div>To: ${meta.to.join(", ")}</div>` : "",
+  ].filter(Boolean).join("\n");
+
+  const prefix = userText ? `${userText}<br><br>` : "";
+  return `${prefix}${header}<br>${originalHtml}`;
+}
