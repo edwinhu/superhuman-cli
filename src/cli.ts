@@ -1862,6 +1862,11 @@ async function cmdReply(options: CliOptions) {
 
       const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
       const subject = threadInfo.subject.startsWith("Re:") ? threadInfo.subject : `Re: ${threadInfo.subject}`;
+      const htmlBody = textToHtml(body);
+      const parseAddr = (s: string) => {
+        const m = s.match(/^(.+?)\s*<(.+?)>$/);
+        return m ? { name: m[1].trim(), email: m[2].trim() } : { name: "", email: s };
+      };
 
       if (options.send) {
         info(`Sending reply${attachLabel} via Superhuman API...`);
@@ -1872,7 +1877,7 @@ async function cmdReply(options: CliOptions) {
       const result = await createDraftWithUserInfo(userInfo, {
         to: [threadInfo.from],
         subject,
-        body: textToHtml(body),
+        body: htmlBody,
         action: "reply",
         inReplyToThreadId: options.threadId,
         inReplyToRfc822Id: threadInfo.messageId || undefined,
@@ -1900,7 +1905,15 @@ async function cmdReply(options: CliOptions) {
 
       // Send if requested
       if (options.send) {
-        const sent = await sendDraftSuperhuman(userInfo, result.draftId!, result.threadId!);
+        const sent = await sendDraftSuperhuman(userInfo, {
+          draftId: result.draftId!,
+          threadId: result.threadId!,
+          to: [parseAddr(threadInfo.from)],
+          subject,
+          htmlBody,
+          inReplyTo: threadInfo.messageId || undefined,
+          references: threadInfo.references,
+        });
         if (sent.success) {
           success(`Reply${attachLabel} sent!`);
           log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
@@ -1978,6 +1991,7 @@ async function cmdReplyAll(options: CliOptions) {
       const uniqueRecipients = [...new Set(allRecipients.map(e => e.toLowerCase()))];
 
       const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
+      const htmlBody = textToHtml(body);
 
       if (options.send) {
         info(`Sending reply-all${attachLabel} via Superhuman API...`);
@@ -1986,7 +2000,7 @@ async function cmdReplyAll(options: CliOptions) {
       }
 
       const result = await createDraftWithUserInfo(userInfo, {
-        to: uniqueRecipients, subject, body: textToHtml(body),
+        to: uniqueRecipients, subject, body: htmlBody,
         action: "reply" as const,
         inReplyToThreadId: options.threadId,
         inReplyToRfc822Id: threadInfo.messageId || undefined,
@@ -2014,7 +2028,15 @@ async function cmdReplyAll(options: CliOptions) {
 
       // Send if requested
       if (options.send) {
-        const sent = await sendDraftSuperhuman(userInfo, result.draftId!, result.threadId!);
+        const sent = await sendDraftSuperhuman(userInfo, {
+          draftId: result.draftId!,
+          threadId: result.threadId!,
+          to: uniqueRecipients.map(e => ({ email: e, name: "" })),
+          subject,
+          htmlBody,
+          inReplyTo: threadInfo.messageId || undefined,
+          references: threadInfo.references,
+        });
         if (sent.success) {
           success(`Reply-all${attachLabel} sent!`);
           log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
@@ -2090,6 +2112,7 @@ async function cmdForward(options: CliOptions) {
         : `Fwd: ${threadInfo.subject}`;
 
       const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
+      const htmlBody = textToHtml(body);
 
       if (options.send) {
         info(`Sending forward${attachLabel} via Superhuman API...`);
@@ -2098,7 +2121,7 @@ async function cmdForward(options: CliOptions) {
       }
 
       const result = await createDraftWithUserInfo(userInfo, {
-        to: options.to, subject, body: textToHtml(body),
+        to: options.to, subject, body: htmlBody,
         action: "forward", inReplyToThreadId: options.threadId,
       });
 
@@ -2123,7 +2146,15 @@ async function cmdForward(options: CliOptions) {
 
       // Send if requested
       if (options.send) {
-        const sent = await sendDraftSuperhuman(userInfo, result.draftId!, result.threadId!);
+        const sent = await sendDraftSuperhuman(userInfo, {
+          draftId: result.draftId!,
+          threadId: result.threadId!,
+          to: options.to.map((e: string) => ({ email: e, name: "" })),
+          subject,
+          htmlBody,
+          inReplyTo: threadInfo.messageId || undefined,
+          references: threadInfo.references,
+        });
         if (sent.success) {
           success(`Forward${attachLabel} sent!`);
           log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
