@@ -67,9 +67,8 @@ describe("no provider APIs remain in src/", () => {
     // Allow: securetoken.googleapis.com (Firebase JWT issuer check)
     // Allow: googleapis.com/calendar (Google Calendar API)
     // Allow: CDP fetch patterns like "*googleapis.com*" (token extraction)
-    // Allow: draft-api.ts uses gmail.googleapis.com/gmail/v1/users/me/messages/send
-    //   directly because Superhuman's messages/send requires browser session cookies
-    //   and returns 520 from CLI contexts.
+    // Allow: draft-api.ts still contains legacy sendViaGmailApi and fetchGmailMessageHtml
+    //   (fetchGmailMessageHtml is used for forward body fetching)
     // Disallow: gmail.googleapis.com, people.googleapis.com, etc. everywhere else
     const allowlist = new Set(["draft-api.ts"]);
     const hits: string[] = [];
