@@ -43,7 +43,7 @@ import {
   type UpdateEventInput,
 } from "./calendar";
 import { sendEmailViaProvider, createDraftViaProvider, updateDraftViaProvider, sendDraftByIdViaProvider, deleteDraftViaProvider } from "./send-api";
-import { createDraftWithUserInfo, getUserInfo, getUserInfoFromCache, sendDraftSuperhuman, updateDraftWithUserInfo, deleteDraftWithUserInfo, uploadAttachmentSuperhuman, type Recipient, type UserInfo, type SuperhumanAttachment } from "./draft-api";
+import { createDraftWithUserInfo, getUserInfo, getUserInfoFromCache, sendDraftSuperhuman, sendViaGmailApi, updateDraftWithUserInfo, deleteDraftWithUserInfo, uploadAttachmentSuperhuman, type Recipient, type UserInfo, type SuperhumanAttachment } from "./draft-api";
 import { searchContacts, resolveRecipient, type Contact } from "./contacts";
 import { listSnippets, findSnippet, applyVars, parseVars } from "./snippets";
 import {
@@ -1377,18 +1377,31 @@ async function cmdSendDraft(options: CliOptions) {
     info(`Sending draft ${draftId.slice(-15)}...`);
   }
 
-  const result = await sendDraftSuperhuman(userInfo, {
-    draftId,
-    threadId: resolvedThreadId,
-    to: toRecipients,
-    cc: ccRecipients,
-    bcc: bccRecipients,
-    subject: resolvedSubject,
-    htmlBody: resolvedHtmlBody,
-    inReplyTo: cachedMeta?.inReplyTo,
-    references: cachedMeta?.references,
-    delay: options.sendDraftDelay,
-  });
+  const result = token.isMicrosoft
+    ? await sendDraftSuperhuman(userInfo, {
+        draftId,
+        threadId: resolvedThreadId,
+        to: toRecipients,
+        cc: ccRecipients,
+        bcc: bccRecipients,
+        subject: resolvedSubject,
+        htmlBody: resolvedHtmlBody,
+        inReplyTo: cachedMeta?.inReplyTo,
+        references: cachedMeta?.references,
+        delay: options.sendDraftDelay,
+      })
+    : await sendViaGmailApi({
+        accessToken: token.accessToken,
+        from: token.email,
+        to: toRecipients,
+        cc: ccRecipients,
+        bcc: bccRecipients,
+        subject: resolvedSubject,
+        htmlBody: resolvedHtmlBody,
+        threadId: cachedMeta?.threadId !== draftId ? cachedMeta?.threadId : undefined, // only for replies
+        inReplyTo: cachedMeta?.inReplyTo,
+        references: cachedMeta?.references,
+      });
 
   if (result.success) {
     success("Draft sent!");
@@ -1927,16 +1940,28 @@ async function cmdReply(options: CliOptions) {
 
       // Send if requested
       if (options.send) {
-        const sent = await sendDraftSuperhuman(userInfo, {
-          draftId: result.draftId!,
-          threadId: result.threadId!,
-          to: [parseAddr(threadInfo.from)],
-          subject,
-          htmlBody,
-          inReplyTo: threadInfo.messageId || undefined,
-          references: threadInfo.references,
-        });
+        const sent = token.isMicrosoft
+          ? await sendDraftSuperhuman(userInfo, {
+              draftId: result.draftId!,
+              threadId: result.threadId!,
+              to: [parseAddr(threadInfo.from)],
+              subject,
+              htmlBody,
+              inReplyTo: threadInfo.messageId || undefined,
+              references: threadInfo.references,
+            })
+          : await sendViaGmailApi({
+              accessToken: token.accessToken,
+              from: token.email,
+              to: [parseAddr(threadInfo.from)],
+              subject,
+              htmlBody,
+              threadId: options.threadId, // Gmail hex thread ID keeps reply in same thread
+              inReplyTo: threadInfo.messageId || undefined,
+              references: threadInfo.references,
+            });
         if (sent.success) {
+          deleteDraftMeta(result.draftId!);
           success(`Reply${attachLabel} sent!`);
           log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
         } else {
@@ -2062,16 +2087,29 @@ async function cmdReplyAll(options: CliOptions) {
 
       // Send if requested
       if (options.send) {
-        const sent = await sendDraftSuperhuman(userInfo, {
-          draftId: result.draftId!,
-          threadId: result.threadId!,
-          to: uniqueRecipients.map(e => ({ email: e, name: "" })),
-          subject,
-          htmlBody,
-          inReplyTo: threadInfo.messageId || undefined,
-          references: threadInfo.references,
-        });
+        const toRecipients = uniqueRecipients.map(e => ({ email: e, name: "" }));
+        const sent = token.isMicrosoft
+          ? await sendDraftSuperhuman(userInfo, {
+              draftId: result.draftId!,
+              threadId: result.threadId!,
+              to: toRecipients,
+              subject,
+              htmlBody,
+              inReplyTo: threadInfo.messageId || undefined,
+              references: threadInfo.references,
+            })
+          : await sendViaGmailApi({
+              accessToken: token.accessToken,
+              from: token.email,
+              to: toRecipients,
+              subject,
+              htmlBody,
+              threadId: options.threadId,
+              inReplyTo: threadInfo.messageId || undefined,
+              references: threadInfo.references,
+            });
         if (sent.success) {
+          deleteDraftMeta(result.draftId!);
           success(`Reply-all${attachLabel} sent!`);
           log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
         } else {
@@ -2192,15 +2230,27 @@ async function cmdForward(options: CliOptions) {
 
       // Send if requested
       if (options.send) {
-        const sent = await sendDraftSuperhuman(userInfo, {
-          draftId: result.draftId!,
-          threadId: result.threadId!,
-          to: options.to.map((e: string) => ({ email: e, name: "" })),
-          subject,
-          htmlBody,
-          // No inReplyTo/references: forward is a new email thread, not a reply
-        });
+        // Use Gmail API directly — Superhuman's messages/send requires browser
+        // session cookies and returns 520 from CLI contexts.
+        const toRecipients = options.to.map((e: string) => ({ email: e, name: "" }));
+        const sent = token.isMicrosoft
+          ? await sendDraftSuperhuman(userInfo, {
+              draftId: result.draftId!,
+              threadId: result.threadId!,
+              to: toRecipients,
+              subject,
+              htmlBody,
+            })
+          : await sendViaGmailApi({
+              accessToken: token.accessToken,
+              from: token.email,
+              to: toRecipients,
+              subject,
+              htmlBody,
+              // No threadId/inReplyTo: forward creates a new thread
+            });
         if (sent.success) {
+          deleteDraftMeta(result.draftId!);
           success(`Forward${attachLabel} sent!`);
           log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
         } else {

@@ -668,3 +668,97 @@ export async function sendDraftSuperhuman(
     };
   }
 }
+
+export interface GmailSendOptions {
+  accessToken: string;
+  from: string;
+  to: Recipient[];
+  cc?: Recipient[];
+  bcc?: Recipient[];
+  subject: string;
+  htmlBody: string;
+  /** For replies: the Gmail hex thread ID to keep the email in the same thread */
+  threadId?: string;
+  inReplyTo?: string;
+  references?: string[];
+}
+
+export interface GmailSendResult {
+  success: boolean;
+  messageId?: string;
+  threadId?: string;
+  error?: string;
+}
+
+/**
+ * Send an email directly via Gmail REST API (no Superhuman backend needed).
+ *
+ * Uses the OAuth access token, so it works from the CLI without browser
+ * cookies. Bypasses Superhuman's messages/send endpoint which requires
+ * browser session cookies and returns 520 from CLI contexts.
+ */
+export async function sendViaGmailApi(options: GmailSendOptions): Promise<GmailSendResult> {
+  try {
+    const formatAddr = (r: Recipient) =>
+      r.name ? `${r.name} <${r.email}>` : r.email;
+
+    const lines: string[] = [
+      "MIME-Version: 1.0",
+      `From: ${options.from}`,
+      `To: ${options.to.map(formatAddr).join(", ")}`,
+    ];
+    if (options.cc && options.cc.length > 0) {
+      lines.push(`Cc: ${options.cc.map(formatAddr).join(", ")}`);
+    }
+    if (options.bcc && options.bcc.length > 0) {
+      lines.push(`Bcc: ${options.bcc.map(formatAddr).join(", ")}`);
+    }
+    lines.push(`Subject: ${options.subject}`);
+    if (options.inReplyTo) {
+      lines.push(`In-Reply-To: ${options.inReplyTo}`);
+    }
+    if (options.references && options.references.length > 0) {
+      lines.push(`References: ${options.references.join(" ")}`);
+    }
+    lines.push("Content-Type: text/html; charset=utf-8");
+    lines.push("");
+    lines.push(options.htmlBody);
+
+    const raw = lines.join("\r\n");
+    const base64url = Buffer.from(raw)
+      .toString("base64")
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
+
+    const payload: Record<string, string> = { raw: base64url };
+    if (options.threadId) {
+      payload.threadId = options.threadId;
+    }
+
+    const response = await fetch(
+      "https://gmail.googleapis.com/gmail/v1/users/me/messages/send",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${options.accessToken}`,
+        },
+        body: JSON.stringify(payload),
+      }
+    );
+
+    if (!response.ok) {
+      const text = await response.text();
+      return { success: false, error: `Gmail API error ${response.status}: ${text}` };
+    }
+
+    const data = await response.json() as { id: string; threadId: string };
+    return { success: true, messageId: data.id, threadId: data.threadId };
+  } catch (error) {
+    return {
+      success: false,
+      error: error instanceof Error ? error.message : String(error),
+    };
+  }
+}
