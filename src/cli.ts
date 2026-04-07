@@ -22,7 +22,7 @@ import {
   type SuperhumanConnection,
 } from "./superhuman-api";
 import { listInbox, searchInbox, streamListInbox, streamSearchInbox } from "./inbox";
-import { searchDirect, listLocalAccounts } from "./sqlite-search";
+import { searchDirect, listLocalAccounts, lookupThreadInfoById } from "./sqlite-search";
 import { listAccounts, listAccountsChrome, switchAccount, type Account } from "./accounts";
 import { replyToThread, replyAllToThread, forwardThread } from "./reply";
 import { archiveThread, deleteThread } from "./archive";
@@ -1826,6 +1826,17 @@ async function cmdRead(options: CliOptions) {
   await provider.disconnect();
 }
 
+/**
+ * Get thread info for reply/forward: tries local SQLite first (no network),
+ * then falls back to the Superhuman REST API.
+ */
+async function resolveThreadInfo(token: any, accountEmail: string, threadId: string) {
+  // SQLite path works offline; REST API requires browser session (returns 400 otherwise)
+  const sqliteInfo = lookupThreadInfoById(accountEmail, threadId);
+  if (sqliteInfo) return sqliteInfo;
+  return getThreadInfoSuperhuman(token, threadId);
+}
+
 async function cmdReply(options: CliOptions) {
   if (!options.threadId) {
     error("Thread ID is required");
@@ -1843,7 +1854,7 @@ async function cmdReply(options: CliOptions) {
       const attachLabel = hasAttachments ? ` with ${options.attachFiles!.length} attachment(s)` : "";
 
       // Get thread info via Superhuman backend
-      const threadInfo = await getThreadInfoSuperhuman(token, options.threadId);
+      const threadInfo = await resolveThreadInfo(token, token.email || options.account || "", options.threadId);
       if (!threadInfo) {
         error("Could not get thread information");
         process.exit(1);
@@ -1948,7 +1959,7 @@ async function cmdReplyAll(options: CliOptions) {
       const hasAttachments = options.attachFiles && options.attachFiles.length > 0;
       const attachLabel = hasAttachments ? ` with ${options.attachFiles!.length} attachment(s)` : "";
 
-      const threadInfo = await getThreadInfoSuperhuman(token, options.threadId);
+      const threadInfo = await resolveThreadInfo(token, token.email || options.account || "", options.threadId);
       if (!threadInfo) {
         error("Could not get thread information");
         process.exit(1);
@@ -2068,7 +2079,7 @@ async function cmdForward(options: CliOptions) {
       const hasAttachments = options.attachFiles && options.attachFiles.length > 0;
       const attachLabel = hasAttachments ? ` with ${options.attachFiles!.length} attachment(s)` : "";
 
-      const threadInfo = await getThreadInfoSuperhuman(token, options.threadId);
+      const threadInfo = await resolveThreadInfo(token, token.email || options.account || "", options.threadId);
       if (!threadInfo) {
         error("Could not get thread information");
         process.exit(1);

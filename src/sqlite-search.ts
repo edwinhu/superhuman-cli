@@ -120,6 +120,92 @@ function extractSQLite(blobPath: string): string {
   return tmpPath;
 }
 
+/**
+ * Thread metadata returned by lookupThreadInfoById.
+ * Matches the shape of ThreadInfoDirect from token-api.ts.
+ */
+export interface SQLiteThreadInfo {
+  subject: string;
+  from: string;
+  to: string[];
+  cc: string[];
+  messageId: string | null;
+  references: string[];
+}
+
+/**
+ * Look up a single thread by its hex ID directly from the local SQLite blob.
+ * Returns null if the OPFS blob or thread cannot be found.
+ *
+ * This is the primary way to get thread metadata for reply/forward when the
+ * Superhuman REST API is unavailable (userdata.getThreads requires browser auth).
+ */
+export function lookupThreadInfoById(
+  accountEmail: string,
+  threadId: string
+): SQLiteThreadInfo | null {
+  const blobPath = findOPFSBlob(accountEmail);
+  if (!blobPath) return null;
+
+  const tmpPath = extractSQLite(blobPath);
+  try {
+    const db = new Database(tmpPath, { readonly: true });
+    try {
+      const row = db.query<{ json: string }>(
+        "SELECT json FROM threads WHERE thread_id = ?"
+      ).get(threadId);
+
+      if (!row) return null;
+
+      let json: any;
+      try {
+        json = JSON.parse(row.json);
+      } catch {
+        return null;
+      }
+
+      const messages: any[] = Array.isArray(json.messages)
+        ? json.messages
+        : typeof json.messages === "object" && json.messages !== null
+        ? Object.values(json.messages)
+        : [];
+
+      if (messages.length === 0) return null;
+
+      messages.sort(
+        (a, b) => new Date(a.date || 0).getTime() - new Date(b.date || 0).getTime()
+      );
+      const latest = messages[messages.length - 1];
+
+      const formatAddr = (a: any): string => {
+        if (!a) return "";
+        if (typeof a === "string") return a;
+        const name = (a.name || "").trim();
+        const email = a.email || "";
+        return name ? `${name} <${email}>` : email;
+      };
+
+      const toList = Array.isArray(latest.to) ? latest.to.map(formatAddr).filter(Boolean)
+        : latest.to ? [formatAddr(latest.to)] : [];
+      const ccList = Array.isArray(latest.cc) ? latest.cc.map(formatAddr).filter(Boolean)
+        : latest.cc ? [formatAddr(latest.cc)] : [];
+
+      return {
+        subject: latest.subject || json.subject || "",
+        from: formatAddr(latest.from),
+        to: toList,
+        cc: ccList,
+        messageId: latest.rfc822Id || latest.messageId || null,
+        references: Array.isArray(latest.references) ? latest.references : [],
+      };
+    } finally {
+      db.close();
+    }
+  } finally {
+    try { rmSync(tmpPath); } catch {}
+  }
+}
+
 export interface DirectSearchOptions {
   query: string;
   limit?: number;
