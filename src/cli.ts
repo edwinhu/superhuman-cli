@@ -22,6 +22,7 @@ import {
   type SuperhumanConnection,
 } from "./superhuman-api";
 import { listInbox, searchInbox, streamListInbox, streamSearchInbox } from "./inbox";
+import { searchDirect, listLocalAccounts } from "./sqlite-search";
 import { listAccounts, listAccountsChrome, switchAccount, type Account } from "./accounts";
 import { replyToThread, replyAllToThread, forwardThread } from "./reply";
 import { archiveThread, deleteThread } from "./archive";
@@ -1610,12 +1611,14 @@ async function cmdSearch(options: CliOptions) {
     process.exit(1);
   }
 
-  // When --ai is requested, resolve provider without attaching a CDP connection.
-  // The AI path only needs the cached Superhuman token; a live CDP connection
-  // causes Bun's fetch to mail.superhuman.com to hang (Chrome intercepts it).
-  const provider = options.ai
-    ? await resolveProvider({ account: options.account, port: options.port }) ?? await getProvider(options)
-    : await getProvider(options);
+  // AI search (--ai or --include-done) needs a token but NOT a CDP connection.
+  // A live CDP connection causes Bun's fetch to mail.superhuman.com to hang
+  // (Chrome intercepts it). Direct SQLite search also doesn't need CDP.
+  // Only attach CDP when we'll definitely need the portal RPC fallback.
+  const needsCDP = !options.ai && !options.includeDone;
+  const provider = needsCDP
+    ? await getProvider(options)
+    : await resolveProvider({ account: options.account, port: options.port }) ?? await getProvider(options);
 
   const searchOptions = {
     query: options.query,
@@ -1623,17 +1626,35 @@ async function cmdSearch(options: CliOptions) {
     includeDone: options.includeDone,
   };
 
-  // For SuperhumanProvider: try FTS keyword search via portal first.
-  // --ai flag or --include-done both route to AI/server-side search (ai.askAIProxy),
-  // which searches the full mailbox including archived emails.
-  // No CDP portal = fall back to AI too.
+  // For SuperhumanProvider: try direct SQLite FTS first (no CDP needed),
+  // then fall back to portal RPC FTS, then to AI/server-side search.
+  // --ai flag or --include-done route directly to AI (ai.askAIProxy) which
+  // searches the full mailbox including archived emails.
   if (provider instanceof SuperhumanProvider) {
-    const useAI = options.ai || options.includeDone || !provider.hasPortal();
+    const tokenInfo = provider.getTokenInfo();
+    const accountEmail = tokenInfo.email || options.account || "";
+    const useAI = options.ai || options.includeDone;
 
     if (!useAI) {
-      // FTS keyword search via local SQLite index (requires CDP)
-      try {
-        const threads = await searchInbox(provider, searchOptions);
+      // 1. Try direct SQLite FTS (reads OPFS blob from disk — no browser needed)
+      let threads = await searchDirect({
+        query: options.query,
+        limit: searchOptions.limit,
+        accountEmail,
+      });
+
+      // 2. Fall back to portal RPC FTS (requires CDP connection)
+      if (threads === null && provider.hasPortal()) {
+        try {
+          threads = await searchInbox(provider, searchOptions);
+        } catch (e) {
+          error(`Search failed: ${(e as Error).message}`);
+          await provider.disconnect();
+          process.exit(1);
+        }
+      }
+
+      if (threads !== null) {
         if (options.json) {
           for (const t of threads) console.log(JSON.stringify(t));
         } else {
@@ -1657,11 +1678,8 @@ async function cmdSearch(options: CliOptions) {
         }
         await provider.disconnect();
         return;
-      } catch (e) {
-        error(`Search failed: ${(e as Error).message}`);
-        await provider.disconnect();
-        process.exit(1);
       }
+      // Fall through to AI search if no local SQLite blob found
     }
 
     // AI search path (--ai flag or no CDP portal)
