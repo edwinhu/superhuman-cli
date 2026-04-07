@@ -98,21 +98,15 @@ export async function connectToSuperhuman(
   superhumanPages.sort((a: any, b: any) => b.url.length - a.url.length);
 
   // If an account email is provided, prefer the page whose URL contains that email.
-  // If no matching tab is open, navigate the best available tab to that account URL.
-  let mainPage: any = superhumanPages[0];
-  let needsNavigation = false;
-
+  // Returns null if no matching tab is open — caller should fall back to token-only path.
+  let mainPage: any;
   if (accountEmail) {
-    const matchingPage = superhumanPages.find((t: any) =>
+    mainPage = superhumanPages.find((t: any) =>
       t.url.toLowerCase().includes(accountEmail.toLowerCase())
-    );
-    if (matchingPage) {
-      mainPage = matchingPage;
-    } else {
-      // No tab open for this account — navigate the first available tab.
-      // Superhuman supports multi-account via URL: mail.superhuman.com/{email}
-      needsNavigation = true;
-    }
+    ) ?? null;
+    if (!mainPage) return null;
+  } else {
+    mainPage = superhumanPages[0];
   }
 
   if (!mainPage) {
@@ -121,32 +115,6 @@ export async function connectToSuperhuman(
   }
 
   const client = await CDP({ target: mainPage.id, host, port });
-
-  if (needsNavigation && accountEmail) {
-    // Navigate to the target account and wait for it to load
-    await client.Page.enable();
-    await client.Page.navigate({ url: `https://mail.superhuman.com/${accountEmail}` });
-    // Wait for GoogleAccount to reflect the new account
-    const deadline = Date.now() + 8000;
-    while (Date.now() < deadline) {
-      await new Promise((r) => setTimeout(r, 300));
-      try {
-        const check = await client.Runtime.evaluate({
-          expression: `window.GoogleAccount?.emailAddress || ""`,
-          returnByValue: true,
-        });
-        if (
-          (check.result?.value as string)
-            ?.toLowerCase()
-            .includes(accountEmail.toLowerCase())
-        ) {
-          break;
-        }
-      } catch {
-        // Page still loading
-      }
-    }
-  }
 
   return {
     client,
