@@ -2120,9 +2120,11 @@ async function cmdForward(options: CliOptions) {
         info(`Creating draft for forward${attachLabel} via Superhuman API...`);
       }
 
+      // Forward = new thread; do NOT pass inReplyToThreadId (which would reuse
+      // the Gmail hex thread ID and cause the send API to return 520).
       const result = await createDraftWithUserInfo(userInfo, {
         to: options.to, subject, body: htmlBody,
-        action: "forward", inReplyToThreadId: options.threadId,
+        action: "forward",
       });
 
       if (!result.success) {
@@ -2152,8 +2154,7 @@ async function cmdForward(options: CliOptions) {
           to: options.to.map((e: string) => ({ email: e, name: "" })),
           subject,
           htmlBody,
-          inReplyTo: threadInfo.messageId || undefined,
-          references: threadInfo.references,
+          // No inReplyTo/references: forward is a new email thread, not a reply
         });
         if (sent.success) {
           success(`Forward${attachLabel} sent!`);

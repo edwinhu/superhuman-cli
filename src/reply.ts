@@ -203,13 +203,13 @@ async function forwardViaSuperhuman(
     ? `${htmlBody}<br><br>---------- Forwarded message ---------<br>${snippet}`
     : `---------- Forwarded message ---------<br>${snippet}`;
 
-  // Create forward draft
+  // Create forward draft — do NOT pass inReplyToThreadId; a forward is a new
+  // email thread (not a reply), so it needs its own generated thread ID.
   const draftResult = await createDraftWithUserInfo(userInfo, {
     to: [toEmail],
     subject,
     body: forwardBody,
     action: "forward",
-    inReplyToThreadId: threadId,
   });
 
   if (!draftResult.success || !draftResult.draftId || !draftResult.threadId) {
