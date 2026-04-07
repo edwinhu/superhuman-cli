@@ -43,6 +43,10 @@ export interface TokenInfo {
   idTokenExpires?: number;
   // 4-char user prefix for generating event IDs (e.g., "4sKP")
   userPrefix?: string;
+  /** Full Superhuman external user ID, e.g. "user_11SzDPi4sKPTbHQRMQ" */
+  userExternalId?: string;
+  /** Stable device UUID for x-superhuman-device-id header */
+  deviceId?: string;
   /** Superhuman backend JWT — the primary token for all API operations */
   superhumanToken?: {
     token: string;
@@ -100,14 +104,22 @@ export async function extractToken(
 
           // Extract user prefix for event ID generation
           let userPrefix = null;
+          let userExternalId = null;
           try {
             const shUserId = ga?.labels?._settings?._cache?.userId;
             if (shUserId) {
+              userExternalId = shUserId;
               const suffix = shUserId.replace('user_', '');
               if (suffix.length >= 11) {
                 userPrefix = suffix.substring(7, 11);
               }
             }
+          } catch (_) {}
+
+          // Extract device ID
+          let deviceId = null;
+          try {
+            deviceId = window.device?.id || ga?.device?.id || null;
           } catch (_) {}
 
           return {
@@ -120,6 +132,8 @@ export async function extractToken(
             idToken: idToken,
             idTokenExpires: authData?.expires || (Date.now() + 3600000),
             userPrefix: userPrefix,
+            userExternalId: userExternalId,
+            deviceId: deviceId,
           };
         } catch (e) {
           return { error: e.message };
@@ -202,9 +216,11 @@ export async function extractTokenChrome(
       const bg = backgrounds[${JSON.stringify(email)}]?._accountBackground;
       if (!bg) return null;
       let userPrefix = null;
+      let userExternalId = null;
       try {
         const uid = bg.settings?._cache?.userId;
         if (uid) {
+          userExternalId = uid;
           const s = uid.replace("user_", "");
           if (s.length >= 11) userPrefix = s.substring(7, 11);
         }
@@ -213,6 +229,7 @@ export async function extractTokenChrome(
         userId: bg.labels?._user?._id || null,
         provider: bg.provider || "google",
         userPrefix,
+        userExternalId,
       };
     })()`,
     returnByValue: true,
@@ -222,6 +239,7 @@ export async function extractTokenChrome(
     userId: string | null;
     provider: string;
     userPrefix: string | null;
+    userExternalId: string | null;
   } | null;
 
   if (!metadata)
@@ -335,6 +353,7 @@ export async function extractTokenChrome(
         })()
       : undefined,
     userPrefix: metadata.userPrefix ?? undefined,
+    userExternalId: metadata.userExternalId ?? undefined,
   };
 
   // Cache it
@@ -415,6 +434,8 @@ export interface PersistedTokens {
       userId?: string; // Superhuman user ID for API paths
       refreshToken?: string; // OAuth refresh token for background refresh
       userPrefix?: string; // 4-char user prefix for event ID generation
+      userExternalId?: string; // Full Superhuman external user ID
+      deviceId?: string; // Stable device UUID for x-superhuman-device-id header
       superhumanToken?: {
         token: string; // idToken for Superhuman backend
         expires?: number;
@@ -464,6 +485,9 @@ export async function saveTokensToDisk(): Promise<void> {
       userId: token.userId,
       refreshToken: token.refreshToken,
       userPrefix: token.userPrefix,
+      userExternalId: token.userExternalId,
+      // Keep existing deviceId if present, otherwise generate a stable UUID
+      deviceId: token.deviceId || crypto.randomUUID(),
       superhumanToken: token.idToken ? {
         token: token.idToken,
         expires: token.idTokenExpires,
@@ -510,6 +534,8 @@ export async function loadTokensFromDisk(): Promise<boolean> {
         idToken: account.superhumanToken?.token,
         idTokenExpires: account.superhumanToken?.expires,
         userPrefix: account.userPrefix,
+        userExternalId: account.userExternalId,
+        deviceId: account.deviceId,
         superhumanToken: account.superhumanToken, // Preserve full superhuman token
       });
     }

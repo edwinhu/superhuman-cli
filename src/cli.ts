@@ -913,7 +913,7 @@ async function resolveBackendUserInfo(
   const token = await resolveToken(options.account);
   if (token?.idToken && token?.userId) {
     return {
-      userInfo: getUserInfoFromCache(token.userId, token.email, token.idToken),
+      userInfo: getUserInfoFromCache(token.userId, token.email, token.idToken, undefined, token.userExternalId, token.deviceId),
       email: token.email,
     };
   }
@@ -1080,7 +1080,7 @@ async function cmdDraft(options: CliOptions) {
         process.exit(1);
       }
 
-      const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
+      const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken, undefined, token.userExternalId, token.deviceId);
 
       // Use DraftService to get draft details for threadId
       const nativeProvider = new SuperhumanDraftProvider(token);
@@ -1159,7 +1159,10 @@ async function cmdDraft(options: CliOptions) {
       const userInfo = getUserInfoFromCache(
         token.userId,
         token.email,
-        token.idToken
+        token.idToken,
+        undefined,
+        token.userExternalId,
+        token.deviceId
       );
 
       const bodyContent = options.html || textToHtml(options.body);
@@ -1198,7 +1201,7 @@ async function cmdDraft(options: CliOptions) {
     const token = await provider.getToken();
     if (token?.idToken && token?.userId) {
       info("Creating draft via Superhuman API...");
-      const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
+      const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken, undefined, token.userExternalId, token.deviceId);
       const result = await createDraftWithUserInfo(userInfo, {
         to: resolvedTo,
         cc: resolvedCc,
@@ -1273,7 +1276,7 @@ async function cmdDeleteDraft(options: CliOptions) {
       process.exit(1);
     }
 
-    const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
+    const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken, undefined, token.userExternalId, token.deviceId);
 
     // Use DraftService to get draft details for threadId
     const nativeProvider = new SuperhumanDraftProvider(token);
@@ -1362,7 +1365,7 @@ async function cmdSendDraft(options: CliOptions) {
   }
 
   // Build userInfo
-  const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
+  const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken, undefined, token.userExternalId, token.deviceId);
 
   // Build recipients
   const toRecipients: Recipient[] = resolvedTo.map((email) => ({ email }));
@@ -1883,7 +1886,7 @@ async function cmdReply(options: CliOptions) {
         process.exit(1);
       }
 
-      const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
+      const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken, undefined, token.userExternalId, token.deviceId);
       const subject = threadInfo.subject.startsWith("Re:") ? threadInfo.subject : `Re: ${threadInfo.subject}`;
       const htmlBody = textToHtml(body);
       const parseAddr = (s: string) => {
@@ -2037,7 +2040,7 @@ async function cmdReplyAll(options: CliOptions) {
       ].filter(email => email && email.toLowerCase() !== token.email.toLowerCase());
       const uniqueRecipients = [...new Set(allRecipients.map(e => e.toLowerCase()))];
 
-      const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
+      const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken, undefined, token.userExternalId, token.deviceId);
       const htmlBody = textToHtml(body);
 
       if (options.send) {
@@ -2183,7 +2186,7 @@ async function cmdForward(options: CliOptions) {
         ? threadInfo.subject
         : `Fwd: ${threadInfo.subject}`;
 
-      const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken);
+      const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken, undefined, token.userExternalId, token.deviceId);
 
       // Fetch original message body to include in the forward
       let originalHtml = "";

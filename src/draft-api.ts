@@ -52,6 +52,10 @@ export interface UserInfo {
   token: string;
   timeZone: string;
   displayName?: string;
+  /** Full Superhuman external user ID for x-superhuman-user-external-id header */
+  userExternalId?: string;
+  /** Device UUID for x-superhuman-device-id header */
+  deviceId?: string;
 }
 
 /**
@@ -61,7 +65,9 @@ export function getUserInfoFromCache(
   userId: string,
   email: string,
   idToken: string,
-  displayName?: string
+  displayName?: string,
+  userExternalId?: string,
+  deviceId?: string
 ): UserInfo {
   return {
     userId,
@@ -69,6 +75,8 @@ export function getUserInfoFromCache(
     token: idToken,
     timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
     displayName,
+    userExternalId,
+    deviceId,
   };
 }
 
@@ -642,8 +650,16 @@ export async function sendDraftSuperhuman(
     const response = await fetch(`${SUPERHUMAN_BACKEND}/messages/send`, {
       method: "POST",
       headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${userInfo.token}`,
+        "Content-Type": "application/json; charset=utf-8",
+        "Authorization": `Bearer ${userInfo.token}`,
+        "Cache-Control": "no-store",
+        "x-superhuman-session-id": `background-${crypto.randomUUID()}`,
+        "x-superhuman-request-id": crypto.randomUUID(),
+        "x-superhuman-user-email": userInfo.email,
+        ...(userInfo.userExternalId ? { "x-superhuman-user-external-id": userInfo.userExternalId } : {}),
+        ...(userInfo.deviceId ? { "x-superhuman-device-id": userInfo.deviceId } : {}),
+        "x-superhuman-version": "2026-04-03T19:06:01Z",
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
       },
       body: JSON.stringify(requestBody),
     });
