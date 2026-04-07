@@ -9,6 +9,30 @@ Default to using Bun instead of Node.js.
 - Use `bunx <package> <command>` instead of `npx <package> <command>`
 - Bun automatically loads .env, so don't use dotenv.
 
+## Architecture: Superhuman API Strategy
+
+**HARD RULE: Always reverse-engineer and call Superhuman backend API endpoints directly. Never rely on browser automation, Gmail API, or MS Graph API.**
+
+Reason: managing three separate token lifetimes (Superhuman JWT + Gmail OAuth + MS Graph OAuth) is error-prone and has caused bugs. Superhuman's backend proxies the underlying provider — use that proxy instead.
+
+The correct approach for any Superhuman operation:
+1. **Use CDP/Network monitoring to discover the API endpoint** — capture the request/response by intercepting network traffic in the Superhuman background page
+2. **Call the endpoint directly** from the CLI using the JWT token obtained via CDP
+3. **Provider APIs are a last resort** — only use Gmail API or MS Graph API when a Superhuman endpoint is confirmed impossible from CLI context AND there is no alternative. Document the exception in CLAUDE.md.
+
+Known confirmed exceptions:
+- `userdata.getThreads` — use SQLite direct search (`sqlite-search.ts`) instead
+
+**Resolved (2026-04-07):** `messages/send` now works natively with JWT only. The fix was using object format `{email, name}` for `from`/`to`/`cc`/`bcc` fields in the `outgoing_message` payload (not string format `"Name <email>"`). Gmail API send (`sendViaGmailApi`) is no longer needed for Gmail accounts — `sendDraftSuperhuman` works for both Gmail and MS accounts.
+
+**Do NOT:**
+- Automate browser UI clicks to perform actions
+- Use Playwright/Puppeteer/CDP `Runtime.evaluate` to trigger Superhuman app functions
+- Reach for Gmail API or MS Graph API without first exhausting Superhuman endpoint options
+- Assume an operation can't be done via Superhuman API without first investigating network traffic
+
+**Investigation pattern:** Use `src/api-investigation/` scripts + CDP network monitoring to discover new endpoints before implementing any feature.
+
 ## Chrome DevTools Protocol (CDP)
 
 When connecting to Superhuman via CDP, **always monitor BOTH the background page AND the main UI page** to capture all API calls:

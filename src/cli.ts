@@ -2244,25 +2244,15 @@ async function cmdForward(options: CliOptions) {
 
       // Send if requested
       if (options.send) {
-        // Use Gmail API directly — Superhuman's messages/send requires browser
-        // session cookies and returns 520 from CLI contexts.
         const toRecipients = options.to.map((e: string) => ({ email: e, name: "" }));
-        const sent = token.isMicrosoft
-          ? await sendDraftSuperhuman(userInfo, {
-              draftId: result.draftId!,
-              threadId: result.threadId!,
-              to: toRecipients,
-              subject,
-              htmlBody,
-            })
-          : await sendViaGmailApi({
-              accessToken: token.accessToken,
-              from: token.email,
-              to: toRecipients,
-              subject,
-              htmlBody,
-              // No threadId/inReplyTo: forward creates a new thread
-            });
+        info(`Sending forward${attachLabel} via Superhuman API...`);
+        const sent = await sendDraftSuperhuman(userInfo, {
+          draftId: result.draftId!,
+          threadId: result.threadId!,
+          to: toRecipients,
+          subject,
+          htmlBody,
+        });
         if (sent.success) {
           deleteDraftMeta(result.draftId!);
           success(`Forward${attachLabel} sent!`);

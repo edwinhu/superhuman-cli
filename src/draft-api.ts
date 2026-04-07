@@ -505,12 +505,15 @@ export async function deleteDraftWithUserInfo(
 }
 
 /**
- * Format recipients for the outgoing_message structure
+ * Format recipients for the outgoing_message structure.
+ * The messages/send endpoint expects objects {email, name}, not strings.
+ * (The _appToBackendDraft transform converts objects→strings for userdata writes,
+ * but toJsonRequest() produces objects for the send payload.)
  */
-function formatRecipientForSend(recipients: Recipient[]): Array<{ email: string; name: string }> {
+function formatRecipientForSend(recipients: Recipient[]): Array<{ email: string; name?: string }> {
   return recipients.map((r) => ({
     email: r.email,
-    name: r.name || "",
+    ...(r.name ? { name: r.name } : {}),
   }));
 }
 
@@ -595,31 +598,37 @@ export async function sendDraftSuperhuman(
     const rfc822Id = generateRfc822Id();
     const superhumanId = crypto.randomUUID();
 
-    // Build headers like Superhuman's toJsonRequest()
-    const headers: Array<{ name: string; value: string }> = [
-      { name: "X-Mailer", value: "Superhuman CLI" },
+    // Build headers matching Superhuman's toJsonRequest() exactly
+    const xMailer = "Superhuman Web (2026-04-03T19:06:01Z)";
+    const emailHeaders: Array<{ name: string; value: string }> = [
+      { name: "X-Mailer", value: xMailer },
       { name: "X-Superhuman-ID", value: superhumanId },
       { name: "X-Superhuman-Draft-ID", value: options.draftId },
     ];
+    // Add X-Superhuman-Thread-ID when threadId is a draft ID (matches isDraftId check in app)
+    if (options.threadId.startsWith("draft")) {
+      emailHeaders.push({ name: "X-Superhuman-Thread-ID", value: options.threadId });
+    }
     if (options.inReplyTo) {
-      headers.push({ name: "In-Reply-To", value: options.inReplyTo });
+      emailHeaders.push({ name: "In-Reply-To", value: options.inReplyTo });
     }
     if (options.references && options.references.length > 0) {
-      headers.push({ name: "References", value: options.references.join(" ") });
+      emailHeaders.push({ name: "References", value: options.references.join(" ") });
     }
 
-    // Build the outgoing_message structure per Superhuman's API format
+    const fromName = userInfo.displayName || userInfo.email.split("@")[0];
+
+    // Build the outgoing_message structure matching toJsonRequest() output exactly.
+    // The messages/send endpoint expects from/to/cc/bcc as objects {email, name},
+    // NOT as formatted strings "Name <email>".
     const outgoingMessage = {
-      headers,
+      headers: emailHeaders,
       superhuman_id: superhumanId,
       rfc822_id: rfc822Id,
       thread_id: options.threadId,
       message_id: options.draftId,
       in_reply_to: options.inReplyTo || null,
-      from: {
-        email: userInfo.email,
-        name: userInfo.displayName || userInfo.email.split("@")[0],
-      },
+      from: { email: userInfo.email, name: fromName },
       to: formatRecipientForSend(options.to),
       cc: formatRecipientForSend(options.cc || []),
       bcc: formatRecipientForSend(options.bcc || []),
@@ -635,6 +644,7 @@ export async function sendDraftSuperhuman(
           uuid: att.uuid,
         },
       })),
+      scheduled_for: null,
       abort_on_reply: false,
       current_message_ids: [options.draftId],
       mail_merge_recipients: [],
@@ -644,23 +654,47 @@ export async function sendDraftSuperhuman(
       version: 3,
       outgoing_message: outgoingMessage,
       delay: options.delay ?? 20, // Default to 20 seconds (undo window)
-      is_multi_recipient: options.to.length > 1,
+      is_multi_recipient: true, // app always sends true
     };
+
+    // App calls logSend({action:'draft_ready', draft: outgoingMessage}) before sendEmail
+    const logBody = {
+      action: "draft_ready",
+      draft: outgoingMessage,
+      superhuman_id: superhumanId,
+      draft_message_id: options.draftId,
+      draft_thread_id: options.threadId,
+      client_sent_at: new Date().toISOString(),
+    };
+    const shHeaders = {
+      "Content-Type": "application/json; charset=utf-8",
+      "Authorization": `Bearer ${userInfo.token}`,
+      "Cache-Control": "no-store",
+      "x-superhuman-session-id": `background-${crypto.randomUUID()}`,
+      "x-superhuman-request-id": crypto.randomUUID(),
+      "x-superhuman-user-email": userInfo.email,
+      ...(userInfo.userExternalId ? { "x-superhuman-user-external-id": userInfo.userExternalId } : {}),
+      ...(userInfo.deviceId ? { "x-superhuman-device-id": userInfo.deviceId } : {}),
+      "x-superhuman-version": "2026-04-03T19:06:01Z",
+      "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+    };
+    // App calls logSend before sendEmail
+    const logResp = await fetch(`${SUPERHUMAN_BACKEND}/messages/send/log`, {
+      method: "POST",
+      headers: shHeaders,
+      body: JSON.stringify(logBody),
+    }).catch(() => null);
+    if (process.env.SH_DEBUG && logResp) {
+      console.error("DEBUG logSend status:", logResp.status, await logResp.text().catch(() => ""));
+    }
+
+    if (process.env.SH_DEBUG) {
+      console.error("DEBUG send body:", JSON.stringify(requestBody, null, 2));
+    }
 
     const response = await fetch(`${SUPERHUMAN_BACKEND}/messages/send`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json; charset=utf-8",
-        "Authorization": `Bearer ${userInfo.token}`,
-        "Cache-Control": "no-store",
-        "x-superhuman-session-id": `background-${crypto.randomUUID()}`,
-        "x-superhuman-request-id": crypto.randomUUID(),
-        "x-superhuman-user-email": userInfo.email,
-        ...(userInfo.userExternalId ? { "x-superhuman-user-external-id": userInfo.userExternalId } : {}),
-        ...(userInfo.deviceId ? { "x-superhuman-device-id": userInfo.deviceId } : {}),
-        "x-superhuman-version": "2026-04-03T19:06:01Z",
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
-      },
+      headers: { ...shHeaders, "x-superhuman-request-id": crypto.randomUUID() },
       body: JSON.stringify(requestBody),
     });
 
