@@ -94,17 +94,25 @@ export async function connectToSuperhuman(
       t.type === "page"
   );
 
+  // Sort by URL length descending — pages with account paths are longer
+  superhumanPages.sort((a: any, b: any) => b.url.length - a.url.length);
+
   // If an account email is provided, prefer the page whose URL contains that email.
-  // Fall back to longest-URL heuristic if no match (e.g. tab not open for that account).
-  let mainPage: any;
+  // If no matching tab is open, navigate the best available tab to that account URL.
+  let mainPage: any = superhumanPages[0];
+  let needsNavigation = false;
+
   if (accountEmail) {
-    mainPage =
-      superhumanPages.find((t: any) =>
-        t.url.toLowerCase().includes(accountEmail.toLowerCase())
-      ) ?? superhumanPages.sort((a: any, b: any) => b.url.length - a.url.length)[0];
-  } else {
-    superhumanPages.sort((a: any, b: any) => b.url.length - a.url.length);
-    mainPage = superhumanPages[0];
+    const matchingPage = superhumanPages.find((t: any) =>
+      t.url.toLowerCase().includes(accountEmail.toLowerCase())
+    );
+    if (matchingPage) {
+      mainPage = matchingPage;
+    } else {
+      // No tab open for this account — navigate the first available tab.
+      // Superhuman supports multi-account via URL: mail.superhuman.com/{email}
+      needsNavigation = true;
+    }
   }
 
   if (!mainPage) {
@@ -113,6 +121,32 @@ export async function connectToSuperhuman(
   }
 
   const client = await CDP({ target: mainPage.id, host, port });
+
+  if (needsNavigation && accountEmail) {
+    // Navigate to the target account and wait for it to load
+    await client.Page.enable();
+    await client.Page.navigate({ url: `https://mail.superhuman.com/${accountEmail}` });
+    // Wait for GoogleAccount to reflect the new account
+    const deadline = Date.now() + 8000;
+    while (Date.now() < deadline) {
+      await new Promise((r) => setTimeout(r, 300));
+      try {
+        const check = await client.Runtime.evaluate({
+          expression: `window.GoogleAccount?.emailAddress || ""`,
+          returnByValue: true,
+        });
+        if (
+          (check.result?.value as string)
+            ?.toLowerCase()
+            .includes(accountEmail.toLowerCase())
+        ) {
+          break;
+        }
+      } catch {
+        // Page still loading
+      }
+    }
+  }
 
   return {
     client,
