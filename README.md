@@ -38,12 +38,15 @@ superhuman inbox
 superhuman inbox --limit 20
 superhuman inbox --limit 20 --json      # NDJSON: one thread per line as fetched
 
-# Search emails (keyword FTS, returns thread IDs)
+# Search emails (keyword FTS via local SQLite index — all categories including Social/Promotions)
 superhuman search "from:john subject:meeting"
 superhuman search "project update" --limit 20
 superhuman search "invoice" --json      # NDJSON: one thread per line with IDs
 
-# AI-powered semantic search (natural language)
+# Search all emails including archived/done (server-side AI search)
+superhuman search "uber trip" --include-done
+
+# AI-powered semantic search (natural language, also server-side)
 superhuman search "emails about contract renewals last month" --ai
 superhuman search "what did John say about the deadline?" --ai --json
 

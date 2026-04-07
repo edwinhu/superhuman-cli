@@ -344,7 +344,7 @@ async function searchInboxSuperhuman(
 function parsePortalSearchResult(result: any): InboxThread[] {
   const rawThreads: any[] = Array.isArray(result?.threads) ? result.threads : [];
 
-  return rawThreads
+  const parsed = rawThreads
     .map((item: any): InboxThread | null => {
       let json: any;
       try {
@@ -392,6 +392,15 @@ function parsePortalSearchResult(result: any): InboxThread[] {
       };
     })
     .filter((t): t is InboxThread => t !== null);
+
+  // Sort by thread date descending (most recent first).
+  // FTS returns results by rowid DESC (indexing recency), which means recently
+  // forwarded/resent copies surface before the original email. Date sort fixes this.
+  parsed.sort(
+    (a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime()
+  );
+
+  return parsed;
 }
 
 // ---------------------------------------------------------------------------

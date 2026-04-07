@@ -236,9 +236,11 @@ describe("searchInbox with SuperhumanProvider", () => {
     const results = await searchInbox(provider, { query: "invoice" });
 
     expect(results).toHaveLength(2);
-    expect(results[0].id).toBe("thread_0");
-    expect(results[0].subject).toBe("Invoice 0");
-    expect(results[0].from.email).toBe("sender0@example.com");
+    // Results are sorted by date descending — thread_1 (2026-03-21) before thread_0 (2026-03-20)
+    expect(results[0].id).toBe("thread_1");
+    expect(results[1].id).toBe("thread_0");
+    expect(results[1].subject).toBe("Invoice 0");
+    expect(results[1].from.email).toBe("sender0@example.com");
   });
 
   test("searchInbox returns empty array when no portal available", async () => {

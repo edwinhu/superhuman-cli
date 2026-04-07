@@ -181,7 +181,7 @@ ${colors.bold}OPTIONS${colors.reset}
   --message <id>     Message ID (required with --attachment)
   --limit <number>   Number of results (default: 10, for inbox/search)
   --ai               Use AI-powered search (ai.askAIProxy) instead of keyword FTS
-  --include-done     Search all emails including archived/done (uses Gmail API directly)
+  --include-done     Search all emails including archived/done (routes to AI server-side search)
   --context <number> Number of messages to show full body (default: all, for read)
   --json             Output as NDJSON (arrays: one object per line; objects: pretty-printed)
   --stream           Alias for --json
@@ -1621,9 +1621,11 @@ async function cmdSearch(options: CliOptions) {
   };
 
   // For SuperhumanProvider: try FTS keyword search via portal first.
-  // If the portal is unavailable (no CDP) or --ai flag is set, use AI search.
+  // --ai flag or --include-done both route to AI/server-side search (ai.askAIProxy),
+  // which searches the full mailbox including archived emails.
+  // No CDP portal = fall back to AI too.
   if (provider instanceof SuperhumanProvider) {
-    const useAI = options.ai || !provider.hasPortal();
+    const useAI = options.ai || options.includeDone || !provider.hasPortal();
 
     if (!useAI) {
       // FTS keyword search via local SQLite index (requires CDP)
