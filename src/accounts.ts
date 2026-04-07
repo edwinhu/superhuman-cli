@@ -97,6 +97,9 @@ export async function switchAccount(
 ): Promise<SwitchResult> {
   const { Runtime, Page } = conn;
 
+  // Enable Page domain before navigating (required for Page.navigate/reload)
+  await conn.client.Page.enable();
+
   // First, navigate to inbox view to ensure we're not in calendar view
   // Account switching fails when in calendar view
   const currentEmail = await getCurrentAccount(conn);

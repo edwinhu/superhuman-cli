@@ -38,11 +38,14 @@ superhuman inbox
 superhuman inbox --limit 20
 superhuman inbox --limit 20 --json      # NDJSON: one thread per line as fetched
 
-# Search emails
+# Search emails (keyword FTS, returns thread IDs)
 superhuman search "from:john subject:meeting"
 superhuman search "project update" --limit 20
-superhuman search "from:anthropic" --include-done    # Search all including archived
-superhuman search "meeting" --json      # NDJSON streaming output
+superhuman search "invoice" --json      # NDJSON: one thread per line with IDs
+
+# AI-powered semantic search (natural language)
+superhuman search "emails about contract renewals last month" --ai
+superhuman search "what did John say about the deadline?" --ai --json
 
 # Read a specific thread (requires --account)
 superhuman read <thread-id> --account user@gmail.com
@@ -294,7 +297,8 @@ Works with cached JWT token — no Superhuman app needed after initial auth.
 | Operation | Endpoint |
 |-----------|----------|
 | List inbox | Portal RPC `threadInternal.listAsync` |
-| Search | `POST /v3/ai.askAIProxy` (AI-powered) |
+| Search (FTS) | Portal RPC `searchTable.query` (SQLite FTS3) |
+| Search (AI) | `POST /v3/ai.askAIProxy` (semantic, with `--ai`) |
 | Send email | `POST /messages/send` |
 | Drafts | `POST /v3/userdata.writeMessage` |
 | AI compose | `POST /v3/ai.compose` |

@@ -180,6 +180,7 @@ ${colors.bold}OPTIONS${colors.reset}
   --attachment <id>  Specific attachment ID (for attachment download)
   --message <id>     Message ID (required with --attachment)
   --limit <number>   Number of results (default: 10, for inbox/search)
+  --ai               Use AI-powered search (ai.askAIProxy) instead of keyword FTS
   --include-done     Search all emails including archived/done (uses Gmail API directly)
   --context <number> Number of messages to show full body (default: all, for read)
   --json             Output as NDJSON (arrays: one object per line; objects: pretty-printed)
@@ -378,6 +379,7 @@ interface CliOptions {
   // contacts options
   contactsQuery: string; // search query for contacts
   // search options
+  ai: boolean; // force AI-powered search (ai.askAIProxy) instead of keyword FTS
   includeDone: boolean; // use direct Gmail API to search all emails including archived
   // inbox filter
   focused: boolean; // only show important/primary emails (Gmail: category:primary, Outlook: Focused Inbox)
@@ -445,6 +447,7 @@ function parseArgs(args: string[]): CliOptions {
     eventLocation: "",
     eventId: "",
     contactsQuery: "",
+    ai: false,
     includeDone: false,
     focused: false,
     unread: false,
@@ -627,6 +630,9 @@ function parseArgs(args: string[]): CliOptions {
         case "account":
           options.account = unescapeString(value);
           i += inc;
+          break;
+        case "ai":
+          options.ai = true;
           break;
         case "include-done":
           options.includeDone = true;
@@ -1601,13 +1607,59 @@ async function cmdSearch(options: CliOptions) {
     process.exit(1);
   }
 
-  const provider = await getProvider(options);
+  // When --ai is requested, resolve provider without attaching a CDP connection.
+  // The AI path only needs the cached Superhuman token; a live CDP connection
+  // causes Bun's fetch to mail.superhuman.com to hang (Chrome intercepts it).
+  const provider = options.ai
+    ? await resolveProvider({ account: options.account, port: options.port }) ?? await getProvider(options)
+    : await getProvider(options);
 
-  // Superhuman's portal (threadInternal.listAsync) does not support text
-  // search — it only filters by list IDs (INBOX, UNREAD, STARRED, etc.).
-  // The only text search available is ai.askAIProxy, which returns a
-  // natural-language summary. Use that path directly for SuperhumanProvider.
+  const searchOptions = {
+    query: options.query,
+    limit: options.limit,
+    includeDone: options.includeDone,
+  };
+
+  // For SuperhumanProvider: try FTS keyword search via portal first.
+  // If the portal is unavailable (no CDP) or --ai flag is set, use AI search.
   if (provider instanceof SuperhumanProvider) {
+    const useAI = options.ai || !provider.hasPortal();
+
+    if (!useAI) {
+      // FTS keyword search via local SQLite index (requires CDP)
+      try {
+        const threads = await searchInbox(provider, searchOptions);
+        if (options.json) {
+          for (const t of threads) console.log(JSON.stringify(t));
+        } else {
+          if (threads.length === 0) {
+            info(`No results for "${options.query}"`);
+          } else {
+            info(`Found ${threads.length} result(s) for "${options.query}":\n`);
+            console.log(
+              `${colors.dim}${"  From".padEnd(27)} ${"Subject".padEnd(40)} ${"Date".padEnd(10)}${colors.reset}`
+            );
+            console.log(colors.dim + "─".repeat(80) + colors.reset);
+            for (const thread of threads) {
+              const starred = thread.labelIds.includes("STARRED") || thread.labelIds.includes("FLAGGED");
+              const star = starred ? `${colors.yellow}★${colors.reset} ` : "  ";
+              const from = truncate(thread.from.name || thread.from.email, 24);
+              const subject = truncate(thread.subject, 39);
+              const date = formatDate(thread.date);
+              console.log(`${star}${from.padEnd(25)} ${subject.padEnd(40)} ${date}`);
+            }
+          }
+        }
+        await provider.disconnect();
+        return;
+      } catch (e) {
+        error(`Search failed: ${(e as Error).message}`);
+        await provider.disconnect();
+        process.exit(1);
+      }
+    }
+
+    // AI search path (--ai flag or no CDP portal)
     try {
       const tokenInfo = provider.getTokenInfo();
       const email = await provider.getCurrentEmail();
@@ -1621,11 +1673,32 @@ async function cmdSearch(options: CliOptions) {
       );
 
       if (options.json) {
-        // Emit a single JSON object with the AI response text
-        console.log(JSON.stringify({ type: "ai_search", query: options.query, response: aiResult.response }));
+        // NDJSON: one line per retrieved thread (with id field for piping to forward/read)
+        // followed by a summary line with the AI response text
+        for (const r of aiResult.retrievals) {
+          console.log(JSON.stringify({
+            id: r.thread_id,
+            thread_id: r.thread_id,
+            subject: r.subject,
+            from: r.from,
+            date: r.date,
+            citation: r.index,
+          }));
+        }
+        // Final summary line (distinguishable by type field)
+        console.log(JSON.stringify({ type: "ai_summary", query: options.query, response: aiResult.response }));
       } else {
         info(`Search results for "${options.query}" (AI-powered):\n`);
+        // Show the AI narrative first
         console.log(aiResult.response);
+        // Then list thread IDs for easy piping
+        if (aiResult.retrievals.length > 0) {
+          console.log();
+          console.log(colors.dim + "Thread IDs:" + colors.reset);
+          for (const r of aiResult.retrievals) {
+            console.log(`  [${r.index}] ${r.thread_id}  ${truncate(r.subject, 50)}`);
+          }
+        }
       }
     } catch (e) {
       error(`Search failed: ${(e as Error).message}`);
@@ -1635,12 +1708,6 @@ async function cmdSearch(options: CliOptions) {
     await provider.disconnect();
     return;
   }
-
-  const searchOptions = {
-    query: options.query,
-    limit: options.limit,
-    includeDone: options.includeDone,
-  };
 
   if (options.json) {
     // NDJSON streaming: yield each result as it's fetched

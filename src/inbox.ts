@@ -283,23 +283,115 @@ async function listInboxSuperhuman(
   return threads.slice(0, limit);
 }
 
+/**
+ * Escape a search term for SQLite FTS3 MATCH expressions.
+ * Wraps in double-quotes and escapes any internal double-quotes.
+ */
+function escapeFtsToken(term: string): string {
+  return `"${term.replace(/"/g, '""')}"`;
+}
+
+/**
+ * Build the FTS3 SQL fragment and params for a keyword query.
+ * The fragment is the SELECT...FROM...WHERE part (no ORDER BY) that
+ * SearchTable.query() wraps in: WITH search AS ({fragment} ORDER BY rowid DESC LIMIT ?)
+ */
+function buildFtsQuery(queryStr: string): { sql: string; params: string[] } {
+  const ellipsis = "\u2026";
+  const sql = [
+    "SELECT rowid, thread_id,",
+    `SNIPPET(thread_search, '<b>', '</b>', '${ellipsis}', 1, -64) AS subject,`,
+    `SNIPPET(thread_search, '<b>', '</b>', '${ellipsis}', 2, -15) AS snippet`,
+    "FROM thread_search",
+    "WHERE thread_search MATCH ?",
+  ].join(" ");
+
+  // Build FTS MATCH expression: each word as a quoted token, joined with AND
+  const words = queryStr.trim().split(/\s+/).filter(Boolean);
+  const matchExpr = words.map(escapeFtsToken).join(" ");
+
+  return { sql, params: [matchExpr] };
+}
+
 async function searchInboxSuperhuman(
-  _provider: SuperhumanProvider,
-  _options: SearchOptions
+  provider: SuperhumanProvider,
+  options: SearchOptions
 ): Promise<InboxThread[]> {
-  // Superhuman's portal (threadInternal.listAsync) does NOT support text
-  // search. The `query` parameter is silently ignored — it is not forwarded
-  // to the SQL query and the method only filters by list IDs.
-  //
-  // The only text search available is ai.askAIProxy, which returns a
-  // natural-language summary rather than structured thread data.
-  //
-  // `cmdSearch` in cli.ts handles this by calling `askAISearch` directly
-  // for SuperhumanProvider and displaying the AI response as prose.
-  //
-  // This stub exists so that the `searchInbox` public API does not throw
-  // when called with a SuperhumanProvider (e.g. from tests or MCP tools).
-  return [];
+  if (!provider.hasPortal()) {
+    // No CDP connection — cannot invoke FTS search via portal.
+    // Caller (cmdSearch) falls back to AI search in this case.
+    return [];
+  }
+
+  const limit = options.limit ?? 50;
+  const { sql, params } = buildFtsQuery(options.query);
+
+  const result = await provider.portalInvoke("searchTable", "query", [
+    sql,
+    params,
+    { limit },
+  ]);
+
+  return parsePortalSearchResult(result);
+}
+
+/**
+ * Parse a searchTable.query result into InboxThread[].
+ *
+ * Each item has: { json (raw string or object), listIds, snippet, needsRender, superhumanData }
+ * json.messages is an array of message objects.
+ */
+function parsePortalSearchResult(result: any): InboxThread[] {
+  const rawThreads: any[] = Array.isArray(result?.threads) ? result.threads : [];
+
+  return rawThreads
+    .map((item: any): InboxThread | null => {
+      let json: any;
+      try {
+        json = typeof item.json === "string" ? JSON.parse(item.json) : item.json;
+      } catch {
+        return null;
+      }
+      if (!json) return null;
+
+      const threadId: string = json.id || "";
+      if (!threadId) return null;
+
+      const messages: any[] = Array.isArray(json.messages)
+        ? json.messages
+        : typeof json.messages === "object" && json.messages !== null
+        ? Object.values(json.messages)
+        : [];
+
+      if (messages.length === 0) {
+        return {
+          id: threadId,
+          subject: item.snippet?.replace(/<[^>]*>/g, "") || "",
+          from: { email: "", name: "" },
+          date: "",
+          snippet: item.snippet?.replace(/<[^>]*>/g, "") || "",
+          labelIds: item.listIds || [],
+          messageCount: 0,
+        };
+      }
+
+      messages.sort(
+        (a: any, b: any) =>
+          new Date(a.date || 0).getTime() - new Date(b.date || 0).getTime()
+      );
+      const latest = messages[messages.length - 1];
+
+      return {
+        id: threadId,
+        subject: latest.subject || "",
+        from: parseFromField(latest.from),
+        date: latest.date || "",
+        snippet: item.snippet?.replace(/<[^>]*>/g, "") || latest.snippet || "",
+        labelIds: item.listIds || latest.labelIds || [],
+        messageCount: messages.length,
+      };
+    })
+    .filter((t): t is InboxThread => t !== null);
 }
 
 // ---------------------------------------------------------------------------

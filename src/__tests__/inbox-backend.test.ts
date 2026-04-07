@@ -183,28 +183,68 @@ describe("inbox with SuperhumanProvider (portal path)", () => {
   });
 });
 
+/** Build a fake searchTable query result (FTS format) */
+function makeSearchTableResult(count: number) {
+  return {
+    threads: Array.from({ length: count }, (_, i) => ({
+      json: JSON.stringify({
+        id: `thread_${i}`,
+        historyId: `hist_${i}`,
+        messages: [
+          {
+            id: `thread_${i}`,
+            threadId: `thread_${i}`,
+            subject: `Invoice ${i}`,
+            from: { email: `sender${i}@example.com`, raw: `sender${i}@example.com`, name: `Sender ${i}`, rawName: `Sender ${i}` },
+            to: [{ email: "user@example.com", raw: "user@example.com" }],
+            date: `2026-03-${String(20 + i).padStart(2, "0")}T12:00:00Z`,
+            snippet: `Invoice preview ${i}`,
+            labelIds: ["INBOX"],
+          },
+        ],
+      }),
+      listIds: ["INBOX"],
+      snippet: `<b>Invoice</b> preview ${i}`,
+      needsRender: false,
+      superhumanData: null,
+    })),
+    noMoreOnDisk: true,
+  };
+}
+
 describe("searchInbox with SuperhumanProvider", () => {
-  // Superhuman's portal (threadInternal.listAsync) does NOT support text
-  // search — the `query` parameter is silently ignored and only inbox items
-  // are returned. Text search is handled at the CLI level via askAISearch,
-  // which calls ai.askAIProxy and displays a natural-language response.
-  // searchInbox() therefore returns [] for SuperhumanProvider.
+  // searchInbox() uses the local SQLite FTS index (searchTable service) via portal
+  // when a CDP connection is available.
 
-  test("searchInbox returns empty array for SuperhumanProvider (portal not used)", async () => {
-    const portalResult = makePortalListResult(3);
-    const { provider, portalMock } = createProviderWithPortal(portalResult);
+  test("searchInbox calls portalInvoke with searchTable service", async () => {
+    const ftsResult = makeSearchTableResult(2);
+    const { provider, portalMock } = createProviderWithPortal(ftsResult);
 
-    const results = await searchInbox(provider, { query: "dinner from:alice", limit: 10 });
+    const results = await searchInbox(provider, { query: "invoice", limit: 10 });
 
-    // Portal must NOT be called — text search is handled separately via askAISearch
-    expect(portalMock).not.toHaveBeenCalled();
-    // Returns empty array; CLI layer uses askAISearch for actual search
-    expect(results).toEqual([]);
+    // Portal MUST be called with searchTable service
+    expect(portalMock).toHaveBeenCalled();
+    const [service, method] = (portalMock.mock.calls[0] as any[]);
+    expect(service).toBe("searchTable");
+    expect(method).toBe("query");
   });
 
-  test("searchInbox returns empty array regardless of query", async () => {
-    const { provider } = createProviderWithPortal(makePortalListResult(3));
-    const results = await searchInbox(provider, { query: "from:boss@company.com" });
+  test("searchInbox maps FTS results to InboxThread[]", async () => {
+    const ftsResult = makeSearchTableResult(2);
+    const { provider } = createProviderWithPortal(ftsResult);
+
+    const results = await searchInbox(provider, { query: "invoice" });
+
+    expect(results).toHaveLength(2);
+    expect(results[0].id).toBe("thread_0");
+    expect(results[0].subject).toBe("Invoice 0");
+    expect(results[0].from.email).toBe("sender0@example.com");
+  });
+
+  test("searchInbox returns empty array when no portal available", async () => {
+    const provider = new SuperhumanProvider(sampleToken);
+    // No CDP connection: hasPortal() returns false
+    const results = await searchInbox(provider, { query: "invoice" });
     expect(results).toEqual([]);
   });
 

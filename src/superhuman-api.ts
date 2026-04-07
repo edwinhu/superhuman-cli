@@ -96,9 +96,6 @@ export async function connectToSuperhuman(
 
   const client = await CDP({ target: mainPage.id, host, port });
 
-  // Enable Page domain for navigation events
-  await client.Page.enable();
-
   return {
     client,
     Runtime: client.Runtime,

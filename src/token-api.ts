@@ -250,6 +250,8 @@ export async function extractTokenChrome(
   Fetch.requestPaused(handler);
 
   // 3. Navigate to account and reload to trigger API calls
+  // Enable Page domain before navigating (required for Page.navigate/reload)
+  await mainClient.Page.enable();
   await mainClient.Page.navigate({
     url: `https://mail.superhuman.com/${email}`,
   });
@@ -998,9 +1000,28 @@ export interface AIQueryOptions {
 /**
  * AI query result.
  */
+export interface AIRetrieval {
+  /** Thread ID (hex string) */
+  thread_id: string;
+  /** Message ID (may equal thread_id for single-message threads) */
+  message_id: string;
+  /** Email subject */
+  subject: string;
+  /** Sender "Name <email>" string */
+  from: string;
+  /** Recipient "Name <email>" string */
+  to?: string;
+  /** Message date (ISO string) */
+  date: string;
+  /** 1-based citation index used in the AI response text */
+  index: number;
+}
+
 export interface AIQueryResult {
   response: string;
   sessionId: string;
+  /** Retrieved email threads that back the AI response citations */
+  retrievals: AIRetrieval[];
 }
 
 /**
@@ -1212,33 +1233,83 @@ export async function askAISearch(
     throw new Error(`AI query failed: ${fetchResponse.status} ${fetchResponse.statusText} - ${errorText}`);
   }
 
-  // Parse the SSE streaming response
-  // askAIProxy returns cumulative content: each event has the full text up to that point
-  const responseText = await fetchResponse.text();
+  // Parse the SSE streaming response using a streaming reader.
+  // askAIProxy uses transfer-encoding: chunked and keeps the connection open,
+  // so fetchResponse.text() would hang indefinitely. We read chunks as they
+  // arrive and stop when we see [DONE] or the stream closes.
+  const reader = fetchResponse.body!.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
   let fullContent = "";
+  // Track retrievals by thread_id to deduplicate; keep lowest index per thread
+  const retrievalMap = new Map<string, AIRetrieval>();
 
-  for (const line of responseText.split("\n")) {
-    if (line.startsWith("data: ")) {
-      const jsonStr = line.substring(6).trim();
-      if (jsonStr === "[DONE]" || jsonStr === "END" || jsonStr === "") continue;
+  const processLine = (line: string) => {
+    if (!line.startsWith("data: ")) return;
+    const jsonStr = line.substring(6).trim();
+    if (jsonStr === "[DONE]" || jsonStr === "END" || jsonStr === "") return;
 
-      try {
-        const data = JSON.parse(jsonStr);
-        // askAIProxy format: content at top level (cumulative)
-        if (typeof data.content === "string") {
-          fullContent = data.content;
-        }
-      } catch {
-        // Ignore non-JSON lines
+    try {
+      const data = JSON.parse(jsonStr);
+      // askAIProxy format: content at top level (cumulative)
+      if (typeof data.content === "string") {
+        fullContent = data.content;
       }
+      // Collect retrieved email threads from `retrievals` field
+      if (Array.isArray(data.retrievals)) {
+        for (const r of data.retrievals) {
+          const tid = r.thread_id as string | undefined;
+          if (!tid) continue;
+          // Keep the first occurrence (lowest index) per thread
+          if (!retrievalMap.has(tid)) {
+            retrievalMap.set(tid, {
+              thread_id: tid,
+              message_id: (r.message_id as string) || tid,
+              subject: (r.subject as string) || "",
+              from: (r.from as string) || "",
+              to: r.to as string | undefined,
+              date: (r.date as string) || "",
+              index: (r.index as number) || 0,
+            });
+          }
+        }
+      }
+    } catch {
+      // Ignore non-JSON lines
     }
+  };
+
+  let done = false;
+  while (!done) {
+    const { done: streamDone, value } = await reader.read();
+    if (streamDone) break;
+    buffer += decoder.decode(value, { stream: true });
+    // Process all complete lines in the buffer
+    const lines = buffer.split("\n");
+    // Last element may be incomplete — keep it in buffer
+    buffer = lines.pop() ?? "";
+    for (const line of lines) {
+      processLine(line.trim());
+    }
+    // Stop reading once we've received the [DONE] sentinel
+    if (buffer.includes("data: [DONE]") || buffer.includes("data: END")) {
+      done = true;
+    }
+  }
+  // Process any remaining buffered lines
+  for (const line of buffer.split("\n")) {
+    processLine(line.trim());
   }
 
   // Strip <thinking>...</thinking> tags from the response
   fullContent = fullContent.replace(/<thinking>[\s\S]*?<\/thinking>\s*/g, "").trim();
 
+  // Sort retrievals by citation index
+  const retrievals = [...retrievalMap.values()].sort((a, b) => a.index - b.index);
+
   return {
-    response: fullContent || responseText,
+    response: fullContent,
     sessionId,
+    retrievals,
   };
 }
