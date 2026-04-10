@@ -149,7 +149,15 @@ export async function listAttachments(
     }
   }
 
+  // If SQLite lookup failed entirely (no OPFS blob — e.g. container/server
+  // environment without Chrome local storage), attempt MS Graph fallback
+  // directly using the threadId as a conversationId.
   if (!thread) {
+    await loadTokensFromDisk();
+    const token = await getCachedToken(resolvedEmail);
+    if (token?.isMicrosoft && token.accessToken) {
+      return listAttachmentsMsGraphByConversation(threadId, token.accessToken);
+    }
     return [];
   }
 
@@ -213,12 +221,14 @@ async function listAttachmentsMsGraph(
   threadId: string,
   messages: any[],
   cachedThreadId: string | undefined,
-  accessToken: string
+  accessToken: string,
+  preResolvedMessageIds?: string[]
 ): Promise<Attachment[]> {
   const result: Attachment[] = [];
 
-  // Collect message IDs from the SQLite-cached message objects
-  const messageIds: string[] = messages
+  // Use pre-resolved message IDs if provided (e.g. from conversationId lookup),
+  // otherwise collect them from the SQLite-cached message objects.
+  const messageIds: string[] = preResolvedMessageIds ?? messages
     .map((m: any) => m.id)
     .filter((id: any): id is string => typeof id === "string" && id.length > 0);
 
@@ -262,6 +272,49 @@ async function listAttachmentsMsGraph(
   }
 
   return result;
+}
+
+/**
+ * List attachments via MS Graph API when no local SQLite data is available
+ * (e.g. container/server environment without Chrome's OPFS storage).
+ *
+ * Uses the threadId as a conversationId to find all messages in the thread,
+ * then queries each message with hasAttachments=true for its attachments.
+ *
+ * MS Graph filter: GET /me/messages?$filter=conversationId eq '{threadId}'
+ */
+async function listAttachmentsMsGraphByConversation(
+  threadId: string,
+  accessToken: string
+): Promise<Attachment[]> {
+  // Step 1: find all message IDs in this conversation that have attachments
+  const filterUrl =
+    `https://graph.microsoft.com/v1.0/me/messages` +
+    `?$filter=conversationId+eq+'${encodeURIComponent(threadId)}'` +
+    `&$select=id,hasAttachments`;
+
+  let messageIds: string[] = [];
+  try {
+    const resp = await fetch(filterUrl, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (resp.ok) {
+      const data = await resp.json() as { value?: any[] };
+      messageIds = (data.value || [])
+        .filter((m: any) => m.hasAttachments)
+        .map((m: any) => m.id as string)
+        .filter((id: string) => typeof id === "string" && id.length > 0);
+    }
+  } catch {
+    // Network error — fall through with empty list
+  }
+
+  if (messageIds.length === 0) {
+    return [];
+  }
+
+  // Step 2: fetch attachments for each message (same logic as listAttachmentsMsGraph)
+  return listAttachmentsMsGraph(threadId, [], threadId, accessToken, messageIds);
 }
 
 /**
