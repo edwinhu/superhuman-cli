@@ -38,6 +38,15 @@ superhuman inbox
 superhuman inbox --limit 20
 superhuman inbox --limit 20 --json      # NDJSON: one thread per line as fetched
 
+# Filter inbox
+superhuman inbox --focused              # Important/primary only
+superhuman inbox --needs-reply           # Exclude threads where you were last sender
+superhuman inbox --unread                # Unread only
+superhuman inbox --exclude "newsletter,noreply@,statuspage"  # Exclude by from/subject pattern
+
+# Combine filters
+superhuman inbox --focused --needs-reply --exclude "statuspage,reminder@" --limit 20
+
 # Search emails (keyword FTS via local SQLite index — all categories including Social/Promotions)
 superhuman search "from:john subject:meeting"
 superhuman search "project update" --limit 20
@@ -274,6 +283,11 @@ superhuman calendar free --date tomorrow --range 7
 | `--attachment <id>` | Specific attachment ID |
 | `--message <id>` | Message ID (required with --attachment) |
 | `--limit <number>` | Number of results (default: 10) |
+| `--focused` | Only show important/primary emails (Gmail: category:personal, Outlook: Focused) |
+| `--needs-reply` | Exclude threads where you were the last sender |
+| `--unread` | Only show unread emails |
+| `--exclude <patterns>` | Exclude threads matching patterns (comma-separated, matches from/subject) |
+| `--ai` | Use AI-powered search instead of keyword FTS (for search) |
 | `--include-done` | Search all emails including archived (for search) |
 | `--context <number>` | Number of messages to show full body (default: all, for read) |
 | `--date <date>` | Date for calendar (YYYY-MM-DD or "today", "tomorrow") |
