@@ -65,6 +65,41 @@ async function replyImpl(
 }
 
 /**
+ * Fetch the last message's RFC822 ID and references from a thread.
+ * Used to populate In-Reply-To / References threading headers.
+ */
+async function fetchThreadReplyMeta(
+  provider: SuperhumanProvider,
+  threadId: string
+): Promise<{ messageId: string | null; references: string[] }> {
+  try {
+    const data = await provider.backendFetch("/v3/userdata.getThreads", {
+      method: "POST",
+      body: JSON.stringify({
+        filter: { threadIds: [threadId] },
+        offset: 0,
+        limit: 1,
+      }),
+    });
+    if (!data?.threadList?.[0]?.thread?.messages) {
+      return { messageId: null, references: [] };
+    }
+    const msgs = Object.values(data.threadList[0].thread.messages) as any[];
+    if (msgs.length === 0) return { messageId: null, references: [] };
+    // Sort ascending by date to get the last (most recent) message
+    msgs.sort((a: any, b: any) => new Date(a.date ?? 0).getTime() - new Date(b.date ?? 0).getTime());
+    const last = msgs[msgs.length - 1];
+    const msg = last.message || last.draft || last;
+    return {
+      messageId: msg.rfc822Id || msg.messageId || null,
+      references: Array.isArray(msg.references) ? msg.references : [],
+    };
+  } catch {
+    return { messageId: null, references: [] };
+  }
+}
+
+/**
  * Reply via Superhuman backend: create a reply draft, optionally send it.
  */
 async function replyViaSuperhuman(
@@ -83,6 +118,14 @@ async function replyViaSuperhuman(
     email.split("@")[0]
   );
 
+  // Fetch original thread's last message ID and references for threading headers.
+  // Without these, the sent email has no In-Reply-To / References headers and
+  // mail clients create a new thread instead of threading with the original.
+  const { messageId: inReplyTo, references } = await fetchThreadReplyMeta(
+    provider,
+    threadId
+  );
+
   const htmlBody = textToHtml(body);
 
   // Create a reply draft on the existing thread
@@ -90,6 +133,8 @@ async function replyViaSuperhuman(
     body: htmlBody,
     action: "reply",
     inReplyToThreadId: threadId,
+    inReplyToRfc822Id: inReplyTo || undefined,
+    references,
   });
 
   if (!draftResult.success || !draftResult.draftId || !draftResult.threadId) {
@@ -113,8 +158,8 @@ async function replyViaSuperhuman(
     to: [], // recipients are set from thread context
     subject: "",
     htmlBody,
-    inReplyTo: undefined,
-    references: [],
+    inReplyTo: inReplyTo || undefined,
+    references,
   });
 
   if (!sendResult.success) {
