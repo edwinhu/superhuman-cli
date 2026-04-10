@@ -8,6 +8,7 @@ import { test, expect, describe, beforeEach, afterEach, mock } from "bun:test";
 import { SuperhumanProvider } from "../superhuman-provider";
 import type { SuperhumanTokenInfo } from "../superhuman-provider";
 import { readThread, type ThreadMessage } from "../read";
+import * as sqliteSearch from "../sqlite-search";
 
 const sampleToken: SuperhumanTokenInfo = {
   token: "test-jwt-token",
@@ -16,40 +17,51 @@ const sampleToken: SuperhumanTokenInfo = {
   expires: Date.now() + 3600_000,
 };
 
-/** Fake portal getAsync response — thread with messages map */
-function makePortalThreadResponse(threadId: string) {
+/**
+ * Build a portal listAsync response wrapping a single thread.
+ * The thread item has shape: { json: { id, messages: [] }, listIds }
+ * Messages are an array of message objects.
+ */
+function makePortalListAsyncResponse(threadInternalId: string, latestMsgId: string) {
   return {
-    id: threadId,
-    messages: {
-      msg_1: {
-        id: "msg_1",
-        threadId,
-        subject: "Hello World",
-        from: "Alice Smith <alice@example.com>",
-        to: ["user@example.com"],
-        cc: ["cc@example.com"],
-        date: "2026-03-30T10:00:00Z",
-        snippet: "Hi there, this is a test",
-        body: "<p>Hi there, this is a test email.</p>",
-        labelIds: ["INBOX", "UNREAD"],
+    threads: [
+      {
+        json: {
+          id: threadInternalId,
+          messages: [
+            {
+              id: "msg_1",
+              threadId: threadInternalId,
+              subject: "Hello World",
+              from: "Alice Smith <alice@example.com>",
+              to: ["user@example.com"],
+              cc: ["cc@example.com"],
+              date: "2026-03-30T10:00:00Z",
+              snippet: "Hi there, this is a test",
+              body: "<p>Hi there, this is a test email.</p>",
+              labelIds: ["INBOX", "UNREAD"],
+            },
+            {
+              id: latestMsgId,
+              threadId: threadInternalId,
+              subject: "Re: Hello World",
+              from: "user@example.com",
+              to: ["alice@example.com"],
+              cc: [],
+              date: "2026-03-30T12:00:00Z",
+              snippet: "Thanks for the email",
+              body: "<p>Thanks for the email.</p>",
+              labelIds: ["SENT"],
+            },
+          ],
+        },
+        listIds: ["INBOX"],
       },
-      msg_2: {
-        id: "msg_2",
-        threadId,
-        subject: "Re: Hello World",
-        from: "user@example.com",
-        to: ["alice@example.com"],
-        cc: [],
-        date: "2026-03-30T12:00:00Z",
-        snippet: "Thanks for the email",
-        body: "<p>Thanks for the email.</p>",
-        labelIds: ["SENT"],
-      },
-    },
+    ],
   };
 }
 
-/** Fake backend getThreads response for a single thread */
+/** Fake backend getThreads response for a single thread (no listId filter) */
 function makeBackendGetThreadsResponse(threadId: string) {
   return {
     threadList: [
@@ -94,6 +106,8 @@ describe("readThread with SuperhumanProvider", () => {
 
   beforeEach(() => {
     originalFetch = globalThis.fetch;
+    // Ensure sqlite-search is always restored to real module before each test
+    mock.module("../sqlite-search", () => sqliteSearch);
   });
 
   afterEach(() => {
@@ -113,49 +127,131 @@ describe("readThread with SuperhumanProvider", () => {
     return mockFn;
   }
 
-  test("with portal: calls portalInvoke('threadInternal', 'getAsync', [threadId])", async () => {
-    const threadId = "thread_abc123";
-    const portalResponse = makePortalThreadResponse(threadId);
+  // ---------------------------------------------------------------------------
+  // Regression test: the original 400 error
+  // ---------------------------------------------------------------------------
 
-    // Create provider with a mock connection
+  test("REGRESSION: portal path uses listAsync not getAsync (getAsync caused 400 on Exchange)", async () => {
+    // The bug: readThreadPortal called portalInvoke("threadInternal", "getAsync", ...)
+    // which does not exist on the portal and caused 400 errors for Exchange accounts.
+    // Fix: use listAsync and match by message ID.
+    const threadInternalId = "thread_internal_abc";
+    const latestMsgId = "AAkALgAAAAAAHYQDEapmEc2byACqAC-EWg0AXIqdBgk1EkKJ_kY4ZzlqaQABueROowAA";
+    const portalResponse = makePortalListAsyncResponse(threadInternalId, latestMsgId);
+
     const provider = new SuperhumanProvider(sampleToken);
-
-    // Mock portalInvoke directly
     const mockPortalInvoke = mock(() => Promise.resolve(portalResponse));
     (provider as any).conn = {}; // make hasPortal() return true
     provider.portalInvoke = mockPortalInvoke as any;
 
-    const messages = await readThread(provider, threadId);
+    // User passes the latest message ID (as returned by inbox)
+    const messages = await readThread(provider, latestMsgId);
 
-    // Verify portalInvoke was called correctly
+    // Must call listAsync, NOT getAsync
     expect(mockPortalInvoke).toHaveBeenCalledTimes(1);
-    expect(mockPortalInvoke.mock.calls[0]).toEqual([
-      "threadInternal",
-      "getAsync",
-      [threadId, { format: "full" }],
-    ]);
+    const [service, method] = mockPortalInvoke.mock.calls[0] as [string, string, any[]];
+    expect(service).toBe("threadInternal");
+    expect(method).toBe("listAsync");
+    expect(method).not.toBe("getAsync");
 
-    // Verify parsed output
+    // Should return both messages
     expect(messages).toHaveLength(2);
+    expect(messages[1].id).toBe(latestMsgId);
+  });
+
+  test("REGRESSION: backend path does not send listId filter (listId caused 400 on Exchange)", async () => {
+    // The bug: readThreadBackend sent filter: { listId: "INBOX" } which the
+    // Superhuman backend does not support — returning 400 for Exchange accounts.
+    // Fix: use filter: {} (no listId).
+    const threadId = "thread_abc123";
+    const backendResponse = makeBackendGetThreadsResponse(threadId);
+    const mf = setupMockFetch(backendResponse);
+
+    const provider = new SuperhumanProvider(sampleToken);
+    expect(provider.hasPortal()).toBe(false);
+
+    await readThread(provider, threadId);
+
+    expect(mf).toHaveBeenCalledTimes(1);
+    const [, opts] = mf.mock.calls[0] as [string, RequestInit];
+    const body = JSON.parse(opts.body as string);
+    // Must NOT contain listId
+    expect(body.filter).toBeDefined();
+    expect((body.filter as any).listId).toBeUndefined();
+  });
+
+  // ---------------------------------------------------------------------------
+  // Portal path: uses listAsync + matches by message ID
+  // ---------------------------------------------------------------------------
+
+  test("portal: calls listAsync('INBOX', ...) and matches thread by message ID", async () => {
+    const threadInternalId = "thread_abc123";
+    const latestMsgId = "msg_2";
+    const portalResponse = makePortalListAsyncResponse(threadInternalId, latestMsgId);
+
+    const provider = new SuperhumanProvider(sampleToken);
+    const mockPortalInvoke = mock(() => Promise.resolve(portalResponse));
+    (provider as any).conn = {};
+    provider.portalInvoke = mockPortalInvoke as any;
+
+    // Pass the latest message ID (what inbox returns as the thread ID)
+    const messages = await readThread(provider, latestMsgId);
+
+    expect(mockPortalInvoke).toHaveBeenCalledTimes(1);
+    const [service, method, args] = mockPortalInvoke.mock.calls[0] as [string, string, any[]];
+    expect(service).toBe("threadInternal");
+    expect(method).toBe("listAsync");
+    expect(args[0]).toBe("INBOX");
+
+    expect(messages).toHaveLength(2);
+    // Messages sorted oldest-first
     expect(messages[0].id).toBe("msg_1");
-    expect(messages[0].threadId).toBe(threadId);
+    expect(messages[1].id).toBe(latestMsgId);
     expect(messages[0].subject).toBe("Hello World");
     expect(messages[0].from.email).toBe("alice@example.com");
     expect(messages[0].from.name).toBe("Alice Smith");
   });
 
-  test("without portal: calls backendFetch('/v3/userdata.getThreads')", async () => {
+  test("portal: also matches by thread internal ID (json.id)", async () => {
+    const threadInternalId = "thread_by_thread_id";
+    const portalResponse = makePortalListAsyncResponse(threadInternalId, "msg_latest");
+
+    const provider = new SuperhumanProvider(sampleToken);
+    const mockPortalInvoke = mock(() => Promise.resolve(portalResponse));
+    (provider as any).conn = {};
+    provider.portalInvoke = mockPortalInvoke as any;
+
+    // Pass the thread's internal ID instead of message ID
+    const messages = await readThread(provider, threadInternalId);
+    expect(messages).toHaveLength(2);
+  });
+
+  test("portal: returns empty array if no thread matches the ID", async () => {
+    const portalResponse = makePortalListAsyncResponse("thread_other", "msg_other");
+
+    const provider = new SuperhumanProvider(sampleToken);
+    const mockPortalInvoke = mock(() => Promise.resolve(portalResponse));
+    (provider as any).conn = {};
+    provider.portalInvoke = mockPortalInvoke as any;
+
+    const messages = await readThread(provider, "nonexistent_id");
+    expect(messages).toEqual([]);
+  });
+
+  // ---------------------------------------------------------------------------
+  // Backend path: no listId filter
+  // ---------------------------------------------------------------------------
+
+  test("without portal: calls backendFetch('/v3/userdata.getThreads') without listId", async () => {
     const threadId = "thread_abc123";
     const backendResponse = makeBackendGetThreadsResponse(threadId);
     const mf = setupMockFetch(backendResponse);
 
-    // Provider without connection (no portal)
     const provider = new SuperhumanProvider(sampleToken);
     expect(provider.hasPortal()).toBe(false);
 
     const messages = await readThread(provider, threadId);
 
-    // Verify backendFetch was called
     expect(mf).toHaveBeenCalledTimes(1);
     const [url, opts] = mf.mock.calls[0] as [string, RequestInit];
     expect(url).toBe(
@@ -163,28 +259,32 @@ describe("readThread with SuperhumanProvider", () => {
     );
     const body = JSON.parse(opts.body as string);
     expect(body.filter).toBeDefined();
+    expect((body.filter as any).listId).toBeUndefined();
     expect(body.limit).toBeDefined();
 
-    // Verify parsed output
     expect(messages).toHaveLength(2);
     expect(messages[0].subject).toBe("Hello World");
   });
 
-  test("response parsing: parses portal thread into ThreadMessage[]", async () => {
-    const threadId = "thread_parse_test";
-    const portalResponse = makePortalThreadResponse(threadId);
+  // ---------------------------------------------------------------------------
+  // Response parsing
+  // ---------------------------------------------------------------------------
+
+  test("response parsing: portal listAsync result parsed into ThreadMessage[]", async () => {
+    const threadInternalId = "thread_parse_test";
+    const latestMsgId = "msg_2";
+    const portalResponse = makePortalListAsyncResponse(threadInternalId, latestMsgId);
 
     const provider = new SuperhumanProvider(sampleToken);
     const mockPortalInvoke = mock(() => Promise.resolve(portalResponse));
     (provider as any).conn = {};
     provider.portalInvoke = mockPortalInvoke as any;
 
-    const messages = await readThread(provider, threadId);
+    const messages = await readThread(provider, latestMsgId);
 
-    // Check all fields of first message
     const m1 = messages[0];
     expect(m1.id).toBe("msg_1");
-    expect(m1.threadId).toBe(threadId);
+    expect(m1.threadId).toBe(threadInternalId);
     expect(m1.subject).toBe("Hello World");
     expect(m1.from).toEqual({ email: "alice@example.com", name: "Alice Smith" });
     expect(m1.to).toEqual([{ email: "user@example.com", name: "user@example.com" }]);
@@ -193,13 +293,12 @@ describe("readThread with SuperhumanProvider", () => {
     expect(m1.snippet).toBe("Hi there, this is a test");
     expect(m1.body).toBe("<p>Hi there, this is a test email.</p>");
 
-    // Check second message
     const m2 = messages[1];
-    expect(m2.id).toBe("msg_2");
+    expect(m2.id).toBe(latestMsgId);
     expect(m2.from.email).toBe("user@example.com");
   });
 
-  test("response parsing: parses backend thread into ThreadMessage[]", async () => {
+  test("response parsing: backend getThreads result parsed into ThreadMessage[]", async () => {
     const threadId = "thread_backend_parse";
     const backendResponse = makeBackendGetThreadsResponse(threadId);
     setupMockFetch(backendResponse);
@@ -240,11 +339,9 @@ describe("readThread with SuperhumanProvider", () => {
     expect(messages).toHaveLength(2);
   });
 
-  test("handles empty thread (no messages)", async () => {
+  test("handles empty inbox (no threads in listAsync response)", async () => {
     const provider = new SuperhumanProvider(sampleToken);
-    const mockPortalInvoke = mock(() =>
-      Promise.resolve({ id: "thread_empty", messages: {} })
-    );
+    const mockPortalInvoke = mock(() => Promise.resolve({ threads: [] }));
     (provider as any).conn = {};
     provider.portalInvoke = mockPortalInvoke as any;
 
@@ -267,25 +364,32 @@ describe("readThread with SuperhumanProvider", () => {
     const provider = new SuperhumanProvider(sampleToken);
     const mockPortalInvoke = mock(() =>
       Promise.resolve({
-        id: "t1",
-        messages: {
-          m1: {
-            id: "m1",
-            threadId: "t1",
-            subject: "Test",
-            from: "plain@example.com",
-            to: [],
-            cc: [],
-            date: "2026-03-31T12:00:00Z",
-            snippet: "Hello",
+        threads: [
+          {
+            json: {
+              id: "t1",
+              messages: [
+                {
+                  id: "m1",
+                  threadId: "t1",
+                  subject: "Test",
+                  from: "plain@example.com",
+                  to: [],
+                  cc: [],
+                  date: "2026-03-31T12:00:00Z",
+                  snippet: "Hello",
+                },
+              ],
+            },
+            listIds: ["INBOX"],
           },
-        },
+        ],
       })
     );
     (provider as any).conn = {};
     provider.portalInvoke = mockPortalInvoke as any;
 
-    const messages = await readThread(provider, "t1");
+    const messages = await readThread(provider, "m1");
     expect(messages[0].from.email).toBe("plain@example.com");
     expect(messages[0].from.name).toBe("plain@example.com");
   });
@@ -294,63 +398,205 @@ describe("readThread with SuperhumanProvider", () => {
     const provider = new SuperhumanProvider(sampleToken);
     const mockPortalInvoke = mock(() =>
       Promise.resolve({
-        id: "t1",
-        messages: {
-          m1: {
-            id: "m1",
-            threadId: "t1",
-            subject: "Test",
-            from: "Bob Jones <bob@example.com>",
-            to: [],
-            cc: [],
-            date: "2026-03-31T12:00:00Z",
-            snippet: "Hello",
+        threads: [
+          {
+            json: {
+              id: "t1",
+              messages: [
+                {
+                  id: "m1",
+                  threadId: "t1",
+                  subject: "Test",
+                  from: "Bob Jones <bob@example.com>",
+                  to: [],
+                  cc: [],
+                  date: "2026-03-31T12:00:00Z",
+                  snippet: "Hello",
+                },
+              ],
+            },
+            listIds: ["INBOX"],
           },
-        },
+        ],
       })
     );
     (provider as any).conn = {};
     provider.portalInvoke = mockPortalInvoke as any;
 
-    const messages = await readThread(provider, "t1");
+    const messages = await readThread(provider, "m1");
     expect(messages[0].from.email).toBe("bob@example.com");
     expect(messages[0].from.name).toBe("Bob Jones");
   });
 
-  test("messages are sorted by date ascending", async () => {
+  test("messages are sorted by date ascending (oldest first)", async () => {
     const provider = new SuperhumanProvider(sampleToken);
     const mockPortalInvoke = mock(() =>
       Promise.resolve({
-        id: "t1",
-        messages: {
-          newer: {
-            id: "newer",
-            threadId: "t1",
-            subject: "Test",
-            from: "a@example.com",
-            to: [],
-            cc: [],
-            date: "2026-03-31T14:00:00Z",
-            snippet: "Later",
+        threads: [
+          {
+            json: {
+              id: "t1",
+              messages: [
+                {
+                  id: "newer",
+                  threadId: "t1",
+                  subject: "Test",
+                  from: "a@example.com",
+                  to: [],
+                  cc: [],
+                  date: "2026-03-31T14:00:00Z",
+                  snippet: "Later",
+                },
+                {
+                  id: "older",
+                  threadId: "t1",
+                  subject: "Test",
+                  from: "b@example.com",
+                  to: [],
+                  cc: [],
+                  date: "2026-03-31T10:00:00Z",
+                  snippet: "Earlier",
+                },
+              ],
+            },
+            listIds: ["INBOX"],
           },
-          older: {
-            id: "older",
-            threadId: "t1",
-            subject: "Test",
-            from: "b@example.com",
-            to: [],
-            cc: [],
-            date: "2026-03-31T10:00:00Z",
-            snippet: "Earlier",
-          },
-        },
+        ],
       })
     );
     (provider as any).conn = {};
     provider.portalInvoke = mockPortalInvoke as any;
 
-    const messages = await readThread(provider, "t1");
+    const messages = await readThread(provider, "newer");
     expect(messages[0].id).toBe("older");
     expect(messages[1].id).toBe("newer");
+  });
+
+  // ---------------------------------------------------------------------------
+  // SQLite path tests (MUST be last — mock.module affects global state)
+  // ---------------------------------------------------------------------------
+
+  describe("SQLite-first path", () => {
+    function makeSQLiteThread(threadId: string) {
+      return {
+        id: threadId,
+        messages: [
+          {
+            id: "msg_sqlite_1",
+            threadId,
+            subject: "SQLite Thread",
+            from: { email: "alice@example.com", name: "Alice" },
+            to: [{ email: "user@example.com", name: "User" }],
+            cc: [],
+            date: "2026-04-01T10:00:00Z",
+            snippet: "From SQLite",
+            body: "<p>SQLite body</p>",
+          },
+          {
+            id: "msg_sqlite_2",
+            threadId,
+            subject: "Re: SQLite Thread",
+            from: { email: "user@example.com", name: "User" },
+            to: [{ email: "alice@example.com", name: "Alice" }],
+            cc: [],
+            date: "2026-04-01T12:00:00Z",
+            snippet: "Reply from SQLite",
+            body: "<p>Reply body</p>",
+          },
+        ],
+      };
+    }
+
+    function mockSQLite(readThreadFromDB: (...args: any[]) => any) {
+      mock.module("../sqlite-search", () => ({
+        ...sqliteSearch,
+        readThreadFromDB,
+      }));
+    }
+
+    afterEach(() => {
+      mock.module("../sqlite-search", () => sqliteSearch);
+    });
+
+    test("readThread uses SQLite when DB has thread", async () => {
+      const threadId = "thread_sqlite_hit";
+      mockSQLite(() => makeSQLiteThread(threadId));
+      const { readThread: readThreadFresh } = await import("../read");
+
+      const provider = new SuperhumanProvider(sampleToken);
+      const mockPortalInvoke = mock(() => Promise.resolve({ threads: [] }));
+      (provider as any).conn = {};
+      provider.portalInvoke = mockPortalInvoke as any;
+
+      const messages = await readThreadFresh(provider, threadId);
+
+      // Should have messages from SQLite
+      expect(messages).toHaveLength(2);
+      expect(messages[0].id).toBe("msg_sqlite_1");
+      expect(messages[1].id).toBe("msg_sqlite_2");
+      // Portal should NOT have been called
+      expect(mockPortalInvoke).not.toHaveBeenCalled();
+
+    });
+
+    test("readThread falls back to portal when SQLite returns null", async () => {
+      mockSQLite(() => null);
+      const { readThread: readThreadFresh } = await import("../read");
+
+      const threadId = "thread_portal_fallback";
+      const portalResponse = makePortalListAsyncResponse(threadId, "msg_2");
+
+      const provider = new SuperhumanProvider(sampleToken);
+      const mockPortalInvoke = mock(() => Promise.resolve(portalResponse));
+      (provider as any).conn = {};
+      provider.portalInvoke = mockPortalInvoke as any;
+
+      const messages = await readThreadFresh(provider, threadId);
+
+      // SQLite returned null, so portal should have been called
+      expect(mockPortalInvoke).toHaveBeenCalledTimes(1);
+      expect(messages).toHaveLength(2);
+
+    });
+
+    test("readThread falls back to portal when SQLite throws", async () => {
+      mockSQLite(() => {
+        throw new Error("SQLite DB corrupted");
+      });
+      const { readThread: readThreadFresh } = await import("../read");
+
+      const threadId = "thread_sqlite_error";
+      const portalResponse = makePortalListAsyncResponse(threadId, "msg_2");
+
+      const provider = new SuperhumanProvider(sampleToken);
+      const mockPortalInvoke = mock(() => Promise.resolve(portalResponse));
+      (provider as any).conn = {};
+      provider.portalInvoke = mockPortalInvoke as any;
+
+      const messages = await readThreadFresh(provider, threadId);
+
+      // SQLite threw, so portal should have been called
+      expect(mockPortalInvoke).toHaveBeenCalledTimes(1);
+      expect(messages).toHaveLength(2);
+
+    });
+
+    test("SQLite path handles object from field correctly", async () => {
+      const threadId = "thread_object_from";
+      mockSQLite(() => makeSQLiteThread(threadId));
+      const { readThread: readThreadFresh } = await import("../read");
+
+      const provider = new SuperhumanProvider(sampleToken);
+      const mockPortalInvoke = mock(() => Promise.resolve({ threads: [] }));
+      (provider as any).conn = {};
+      provider.portalInvoke = mockPortalInvoke as any;
+
+      const messages = await readThreadFresh(provider, threadId);
+
+      // from should be properly parsed from object format
+      expect(messages[0].from).toEqual({ email: "alice@example.com", name: "Alice" });
+      expect(messages[1].from).toEqual({ email: "user@example.com", name: "User" });
+
+    });
   });
 });

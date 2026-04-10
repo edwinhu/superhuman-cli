@@ -276,3 +276,109 @@ describe("inbox without portal (no CDP connection)", () => {
     expect(listInbox(provider)).rejects.toThrow("superhuman account auth");
   });
 });
+
+// ---------------------------------------------------------------------------
+// SQLite-first path tests
+// ---------------------------------------------------------------------------
+
+import * as sqliteSearch from "../sqlite-search";
+
+/** Build a fake ListInboxRow[] with parsed JSON thread data */
+function makeSQLiteRows(count: number, opts?: { allUnread?: boolean }): sqliteSearch.ListInboxRow[] {
+  return Array.from({ length: count }, (_, i) => ({
+    threadId: `thread_${i}`,
+    json: JSON.stringify({
+      id: `thread_${i}`,
+      messages: [
+        {
+          id: `msg_${i}_a`,
+          subject: `SQLite Subject ${i}`,
+          from: { email: `sqlite${i}@example.com`, name: `SQLite Sender ${i}` },
+          date: `2026-04-${String(1 + i).padStart(2, "0")}T10:00:00Z`,
+          snippet: `SQLite snippet ${i}`,
+          labelIds: ["INBOX", ...(opts?.allUnread || i === 0 ? ["UNREAD"] : [])],
+        },
+      ],
+    }),
+    labelIds: ["INBOX", ...(opts?.allUnread || i === 0 ? ["UNREAD"] : [])],
+  }));
+}
+
+describe("listInbox SQLite-first path", () => {
+  test("uses SQLite when DB available, does not call portalInvoke", async () => {
+    const rows = makeSQLiteRows(3);
+    const dbMock = mock(() => rows);
+    mock.module("../sqlite-search", () => ({
+      listInboxFromDB: dbMock,
+    }));
+
+    const portalResult = makePortalListResult(5);
+    const { provider, portalMock } = createProviderWithPortal(portalResult);
+
+    const threads = await listInbox(provider, { limit: 10 });
+
+    expect(dbMock).toHaveBeenCalledTimes(1);
+    expect(portalMock).not.toHaveBeenCalled();
+    expect(threads).toHaveLength(3);
+    expect(threads[0].subject).toBe("SQLite Subject 0");
+    expect(threads[0].from.email).toBe("sqlite0@example.com");
+
+    mock.module("../sqlite-search", () => sqliteSearch);
+  });
+
+  test("falls back to portal when SQLite returns null", async () => {
+    const dbMock = mock(() => null);
+    mock.module("../sqlite-search", () => ({
+      listInboxFromDB: dbMock,
+    }));
+
+    const portalResult = makePortalListResult(2);
+    const { provider, portalMock } = createProviderWithPortal(portalResult);
+
+    const threads = await listInbox(provider, { limit: 10 });
+
+    expect(dbMock).toHaveBeenCalledTimes(1);
+    expect(portalMock).toHaveBeenCalledTimes(1);
+    expect(threads).toHaveLength(2);
+
+    mock.module("../sqlite-search", () => sqliteSearch);
+  });
+
+  test("SQLite path respects unreadOnly filter", async () => {
+    // 3 rows: only index 0 has UNREAD
+    const rows = makeSQLiteRows(3);
+    const dbMock = mock(() => rows);
+    mock.module("../sqlite-search", () => ({
+      listInboxFromDB: dbMock,
+    }));
+
+    const { provider, portalMock } = createProviderWithPortal([]);
+
+    const threads = await listInbox(provider, { unreadOnly: true, limit: 10 });
+
+    expect(portalMock).not.toHaveBeenCalled();
+    expect(threads).toHaveLength(1);
+    expect(threads[0].labelIds).toContain("UNREAD");
+
+    mock.module("../sqlite-search", () => sqliteSearch);
+  });
+
+  test("SQLite path respects splitInbox option (passes correct listId)", async () => {
+    const rows = makeSQLiteRows(2);
+    const dbMock = mock((_email: string, listId: string, _limit: number) => rows);
+    mock.module("../sqlite-search", () => ({
+      listInboxFromDB: dbMock,
+    }));
+
+    const { provider, portalMock } = createProviderWithPortal([]);
+
+    await listInbox(provider, { splitInbox: "important", limit: 5 });
+
+    expect(portalMock).not.toHaveBeenCalled();
+    expect(dbMock).toHaveBeenCalledTimes(1);
+    const [emailArg, listIdArg] = dbMock.mock.calls[0] as [string, string, number];
+    expect(listIdArg).toBe("SH_IMPORTANT");
+
+    mock.module("../sqlite-search", () => sqliteSearch);
+  });
+});

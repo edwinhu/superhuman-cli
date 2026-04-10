@@ -15,14 +15,24 @@ describe("askAISearch", () => {
     status?: number;
     text?: string;
   }) {
-    const mockFn = mock(() =>
-      Promise.resolve({
+    const mockFn = mock(() => {
+      const text = response.text ?? "";
+      const body = response.ok
+        ? new ReadableStream({
+            start(controller) {
+              controller.enqueue(new TextEncoder().encode(text));
+              controller.close();
+            },
+          })
+        : undefined;
+      return Promise.resolve({
         ok: response.ok,
         status: response.status ?? (response.ok ? 200 : 500),
-        text: () => Promise.resolve(response.text ?? ""),
+        text: () => Promise.resolve(text),
         json: () => Promise.resolve({}),
-      } as Response)
-    );
+        body,
+      } as Response);
+    });
     globalThis.fetch = mockFn as unknown as typeof fetch;
     return mockFn;
   }

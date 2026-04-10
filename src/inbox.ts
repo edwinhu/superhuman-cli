@@ -7,6 +7,7 @@
 
 import type { ConnectionProvider } from "./connection-provider";
 import { SuperhumanProvider } from "./superhuman-provider";
+import { listInboxFromDB } from "./sqlite-search";
 
 export interface InboxThread {
   id: string;
@@ -219,6 +220,63 @@ function parsePortalListResult(result: any): InboxThread[] {
     .filter((t): t is InboxThread => t !== null);
 }
 
+/**
+ * Try to list inbox threads from the local SQLite database.
+ * Returns InboxThread[] on success, or null if no DB found / query failed.
+ */
+function listInboxSQLite(
+  accountEmail: string,
+  options: ListInboxOptions
+): InboxThread[] | null {
+  const limit = options.limit ?? 10;
+  const listId = buildGetThreadsFilter(options).listId;
+
+  try {
+    const rows = listInboxFromDB(accountEmail, listId, limit * 2); // fetch extra for client-side filtering
+    if (!rows) return null;
+
+    return rows.map((row) => {
+      const json =
+        typeof row.json === "string" ? JSON.parse(row.json) : row.json;
+      const messages: any[] = Array.isArray(json.messages)
+        ? json.messages
+        : typeof json.messages === "object" && json.messages !== null
+        ? Object.values(json.messages)
+        : [];
+
+      if (messages.length === 0) {
+        return {
+          id: row.threadId,
+          subject: "",
+          from: { email: "", name: "" },
+          date: "",
+          snippet: "",
+          labelIds: row.labelIds,
+          messageCount: 0,
+        };
+      }
+
+      messages.sort(
+        (a: any, b: any) =>
+          new Date(a.date || 0).getTime() - new Date(b.date || 0).getTime()
+      );
+      const latest = messages[messages.length - 1];
+
+      return {
+        id: latest.id || row.threadId,
+        subject: latest.subject || "",
+        from: parseFromField(latest.from),
+        date: latest.date || "",
+        snippet: latest.snippet || "",
+        labelIds: row.labelIds,
+        messageCount: messages.length,
+      };
+    });
+  } catch {
+    return null; // SQLite failed, caller falls back to network
+  }
+}
+
 async function listInboxSuperhuman(
   provider: SuperhumanProvider,
   options: ListInboxOptions = {}
@@ -232,7 +290,13 @@ async function listInboxSuperhuman(
 
   let threads: InboxThread[];
 
-  if (isInboxRequest) {
+  // Try SQLite first
+  const email = await provider.getCurrentEmail();
+  const sqliteThreads = listInboxSQLite(email, options);
+
+  if (sqliteThreads !== null) {
+    threads = sqliteThreads;
+  } else if (isInboxRequest) {
     // Inbox listing requires portal RPC (the backend getThreads API
     // does not support inbox/listId filters).
     if (!provider.hasPortal()) {

@@ -184,11 +184,12 @@ describe("markAsRead via portal", () => {
     );
   });
 
-  test("returns error when no portal", async () => {
+  test("falls back to backend when no portal", async () => {
     const provider = createNoPortalProvider();
+    provider.backendFetch = mock(() => Promise.resolve({})) as any;
     const result = await markAsRead(provider, THREAD_ID);
-    expect(result.success).toBe(false);
-    expect(result.error).toContain("Requires running Superhuman app");
+    expect(result.success).toBe(true);
+    expect(provider.backendFetch).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -205,10 +206,11 @@ describe("markAsUnread via portal", () => {
     );
   });
 
-  test("returns error when no portal", async () => {
+  test("falls back to backend when no portal", async () => {
     const provider = createNoPortalProvider();
+    provider.backendFetch = mock(() => Promise.resolve({})) as any;
     const result = await markAsUnread(provider, THREAD_ID);
-    expect(result.success).toBe(false);
-    expect(result.error).toContain("Requires running Superhuman app");
+    expect(result.success).toBe(true);
+    expect(provider.backendFetch).toHaveBeenCalledTimes(1);
   });
 });

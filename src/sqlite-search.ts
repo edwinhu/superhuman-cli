@@ -110,7 +110,7 @@ function readOPFSHeader(blobPath: string): string | null {
  * Extract the SQLite data portion of an OPFS blob to a temp file.
  * Returns the temp file path (caller should delete when done).
  */
-function extractSQLite(blobPath: string): string {
+export function extractSQLite(blobPath: string): string {
   const { readFileSync } = require("fs");
   const data = readFileSync(blobPath) as Buffer;
   const sqliteData = data.slice(OPFS_HEADER_SIZE);
@@ -362,4 +362,130 @@ function parseFromStr(from: string): { email: string; name: string } {
   const match = from.match(/^(.+?)\s*<(.+?)>$/);
   if (match) return { name: match[1].trim(), email: match[2].trim() };
   return { email: from, name: from };
+}
+
+// ---------------------------------------------------------------------------
+// Direct DB read/list helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Read a single thread from the local SQLite database by thread ID or message ID.
+ *
+ * First tries exact match on thread_id, then falls back to searching inside
+ * the JSON blob for a matching message ID (users often pass message IDs from
+ * inbox output rather than thread IDs).
+ *
+ * Returns the parsed JSON object (with `.messages` normalized to an array) or null.
+ */
+export function readThreadFromDB(
+  accountEmail: string,
+  threadId: string
+): Record<string, unknown> | null {
+  const blobPath = findOPFSBlob(accountEmail);
+  if (!blobPath) return null;
+
+  const tmpPath = extractSQLite(blobPath);
+  try {
+    const db = new Database(tmpPath, { readonly: true });
+    try {
+      // 1. Exact match on thread_id
+      let row = db.query<{ thread_id: string; json: string }>(
+        "SELECT thread_id, json FROM threads WHERE thread_id = ?"
+      ).get(threadId);
+
+      // 2. Fallback: search by message ID inside the JSON
+      if (!row) {
+        row = db.query<{ thread_id: string; json: string }>(
+          "SELECT t.thread_id, t.json FROM threads t WHERE t.json LIKE ? LIMIT 1"
+        ).get(`%"id":"${threadId}"%`);
+      }
+
+      if (!row) return null;
+
+      let json: Record<string, unknown>;
+      try {
+        json = JSON.parse(row.json);
+      } catch {
+        return null;
+      }
+
+      // Normalize messages to array
+      const rawMessages = (json as any).messages;
+      const messages: unknown[] = Array.isArray(rawMessages)
+        ? rawMessages
+        : typeof rawMessages === "object" && rawMessages !== null
+        ? Object.values(rawMessages)
+        : [];
+      json.messages = messages;
+
+      return json;
+    } finally {
+      db.close();
+    }
+  } finally {
+    try { rmSync(tmpPath); } catch {}
+  }
+}
+
+export interface ListInboxRow {
+  threadId: string;
+  json: string;
+  labelIds: string[];
+}
+
+/**
+ * List threads from a specific inbox list (e.g. "INBOX", "SH_IMPORTANT",
+ * "SH_OTHER") directly from the local SQLite database.
+ *
+ * Returns raw rows with thread_id, json string, and label IDs so callers
+ * can parse as needed. Returns null if the OPFS blob cannot be found.
+ */
+export function listInboxFromDB(
+  accountEmail: string,
+  listId: string,
+  limit: number
+): ListInboxRow[] | null {
+  const blobPath = findOPFSBlob(accountEmail);
+  if (!blobPath) return null;
+
+  const tmpPath = extractSQLite(blobPath);
+  try {
+    const db = new Database(tmpPath, { readonly: true });
+    try {
+      const rows = db.query<{ thread_id: string; json: string }>(`
+        SELECT t.thread_id, t.json
+        FROM threads t
+        JOIN list_ids li ON t.thread_id = li.thread_id
+        WHERE li.list_id = ?
+        ORDER BY t.sort DESC
+        LIMIT ?
+      `).all(listId, limit);
+
+      if (rows.length === 0) return [];
+
+      // Batch-query list_ids for all returned threads
+      const threadIds = rows.map(r => r.thread_id);
+      const placeholders = threadIds.map(() => "?").join(",");
+      const labelRows = db.query<{ thread_id: string; list_id: string }>(
+        `SELECT thread_id, list_id FROM list_ids WHERE thread_id IN (${placeholders})`
+      ).all(...threadIds);
+
+      const labelMap = new Map<string, string[]>();
+      for (const lr of labelRows) {
+        const arr = labelMap.get(lr.thread_id) ?? [];
+        arr.push(lr.list_id);
+        labelMap.set(lr.thread_id, arr);
+      }
+
+      return rows.map(r => ({
+        threadId: r.thread_id,
+        json: r.json,
+        labelIds: labelMap.get(r.thread_id) ?? [],
+      }));
+    } finally {
+      db.close();
+    }
+  } finally {
+    try { rmSync(tmpPath); } catch {}
+  }
 }

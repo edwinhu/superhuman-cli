@@ -23,6 +23,8 @@ The correct approach for any Superhuman operation:
 Known confirmed exceptions:
 - `userdata.getThreads` — use SQLite direct search (`sqlite-search.ts`) instead
 
+**Local-first data strategy (2026-04-09):** `read`, `inbox list`, and `mark read` now use the local SQLite database (OPFS blob) as the primary data path, falling back to portal RPC / backend API only when SQLite lookup fails. The `sqlite-search.ts` module provides shared helpers: `readThreadFromDB()`, `listInboxFromDB()`, `findOPFSBlob()`, `extractSQLite()`. The `mark read/unread` operations also have a backend API fallback via `userdata.writeMessage` when portal RPC (`threadInternal.modifyLabels`) fails.
+
 **Resolved (2026-04-07):** `messages/send` now works natively with JWT only. The fix was using object format `{email, name}` for `from`/`to`/`cc`/`bcc` fields in the `outgoing_message` payload (not string format `"Name <email>"`). Gmail API send (`sendViaGmailApi`) is no longer needed for Gmail accounts — `sendDraftSuperhuman` works for both Gmail and MS accounts.
 
 **Do NOT:**
