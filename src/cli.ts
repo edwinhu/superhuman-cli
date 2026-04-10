@@ -2717,8 +2717,9 @@ async function cmdAttachments(options: CliOptions) {
   }
 
   const provider = await getProvider(options);
+  const accountEmail = await provider.getCurrentEmail();
 
-  const attachments = await listAttachments(provider, options.threadId);
+  const attachments = await listAttachments(provider, options.threadId, accountEmail);
 
   if (options.json) {
     printJson(attachments);
@@ -2749,10 +2750,14 @@ async function cmdDownload(options: CliOptions) {
     }
 
     const provider = await getProvider(options);
+    const token = await resolveToken(options.account);
+    const auth = token
+      ? { accessToken: token.accessToken, isMicrosoft: token.isMicrosoft }
+      : undefined;
 
     try {
       info(`Downloading attachment ${options.attachmentId}...`);
-      const content = await downloadAttachment(provider, options.messageId, options.attachmentId);
+      const content = await downloadAttachment(provider, options.messageId, options.attachmentId, undefined, undefined, auth);
       const outputPath = options.outputPath || `attachment-${options.attachmentId}`;
       await Bun.write(outputPath, Buffer.from(content.data, "base64"));
       success(`Downloaded: ${outputPath} (${formatFileSize(content.size)})`);
@@ -2773,8 +2778,13 @@ async function cmdDownload(options: CliOptions) {
   }
 
   const provider = await getProvider(options);
+  const accountEmail = await provider.getCurrentEmail();
+  const token = await resolveToken(options.account);
+  const auth = token
+    ? { accessToken: token.accessToken, isMicrosoft: token.isMicrosoft }
+    : undefined;
 
-  const attachments = await listAttachments(provider, options.threadId);
+  const attachments = await listAttachments(provider, options.threadId, accountEmail);
 
   if (attachments.length === 0) {
     info("No attachments in this thread");
@@ -2794,7 +2804,8 @@ async function cmdDownload(options: CliOptions) {
         att.messageId,
         att.attachmentId,
         att.threadId,
-        att.mimeType
+        att.mimeType,
+        auth
       );
       const outputPath = `${outputDir}/${att.name}`;
       await Bun.write(outputPath, Buffer.from(content.data, "base64"));

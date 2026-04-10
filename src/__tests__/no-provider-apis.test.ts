@@ -69,8 +69,10 @@ describe("no provider APIs remain in src/", () => {
     // Allow: CDP fetch patterns like "*googleapis.com*" (token extraction)
     // Allow: draft-api.ts still contains legacy sendViaGmailApi and fetchGmailMessageHtml
     //   (fetchGmailMessageHtml is used for forward body fetching)
+    // Allow: attachments.ts uses gmail.googleapis.com for attachment download
+    //   (confirmed exception: no Superhuman backend endpoint for downloading received attachments)
     // Disallow: gmail.googleapis.com, people.googleapis.com, etc. everywhere else
-    const allowlist = new Set(["draft-api.ts"]);
+    const allowlist = new Set(["draft-api.ts", "attachments.ts"]);
     const hits: string[] = [];
     for (const [path, content] of sources) {
       const rel = path.replace(SRC_DIR + "/", "");
@@ -92,8 +94,10 @@ describe("no provider APIs remain in src/", () => {
   test("no graph.microsoft.com URLs (CDP fetch pattern allowed)", () => {
     // Allow: CDP fetch patterns like "*graph.microsoft.com*" (token extraction)
     // Allow: calendar.ts uses graph.microsoft.com URLs via Superhuman's microsoftCalendar.proxy backend
+    // Allow: attachments.ts uses graph.microsoft.com for attachment download
+    //   (confirmed exception: no Superhuman backend endpoint for downloading received attachments)
     // Disallow: actual direct graph.microsoft.com API calls
-    const allowlist = new Set(["calendar.ts"]);
+    const allowlist = new Set(["calendar.ts", "attachments.ts"]);
     const hits: string[] = [];
     for (const [path, content] of sources) {
       const rel = path.replace(SRC_DIR + "/", "");

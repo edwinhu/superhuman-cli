@@ -2,11 +2,15 @@
  * Attachments Module
  *
  * Functions for listing and downloading attachments from Superhuman emails.
- * Provider-specific OAuth APIs have been removed. Attachment listing/downloading
- * now requires MCP provider support (not yet available in MCP server).
+ *
+ * List: reads attachment metadata from the local SQLite OPFS blob (no API call needed).
+ * Download: calls the provider's attachment API directly using the stored OAuth access token:
+ *   - Gmail accounts: GET /gmail/v1/users/me/messages/{messageId}/attachments/{attachmentId}
+ *   - Microsoft accounts: GET /graph.microsoft.com/v1.0/me/messages/{messageId}/attachments/{attachmentId}
  */
 
 import type { ConnectionProvider } from "./connection-provider";
+import { readThreadFromDB } from "./sqlite-search";
 
 export interface Attachment {
   id: string;
@@ -33,6 +37,13 @@ export interface FileAttachmentData {
   filename: string;
   base64Data: string;
   mimeType: string;
+}
+
+export interface AttachmentAuthOptions {
+  /** OAuth access token (from tokens.json: account.accessToken) */
+  accessToken: string;
+  /** True for Microsoft/Outlook accounts, false for Gmail */
+  isMicrosoft: boolean;
 }
 
 const MIME_TYPES: Record<string, string> = {
@@ -95,40 +106,157 @@ function getExtension(filename: string): string {
 }
 
 /**
- * List all attachments from a thread.
+ * List all attachments from a thread by reading the local SQLite OPFS blob.
  *
- * Note: Provider-specific OAuth APIs (Gmail/MS Graph) have been removed.
- * This function is no longer operational until MCP server adds attachment support.
+ * No API call is needed — attachment metadata (attachmentId, name, type, size)
+ * is stored in the thread JSON in Superhuman's local database.
+ *
+ * @param _provider - Not used (kept for interface compatibility)
+ * @param threadId  - Thread ID or message ID to look up
+ * @param accountEmail - Account email for OPFS blob lookup (required for SQLite path)
  */
 export async function listAttachments(
   _provider: ConnectionProvider,
-  _threadId: string
+  threadId: string,
+  accountEmail?: string
 ): Promise<Attachment[]> {
-  throw new Error(
-    "listAttachments requires provider API support which has been removed. " +
-    "Attachment listing is not yet supported via MCP. " +
-    "Use 'superhuman account auth --mcp' and check for MCP server updates."
-  );
+  // If no account email provided, fall back to empty list (can't query SQLite)
+  if (!accountEmail) {
+    return [];
+  }
+
+  const thread = readThreadFromDB(accountEmail, threadId);
+  if (!thread) {
+    return [];
+  }
+
+  const messages: any[] = Array.isArray(thread.messages)
+    ? (thread.messages as any[])
+    : [];
+
+  const result: Attachment[] = [];
+
+  for (const msg of messages) {
+    if (!Array.isArray(msg.attachments)) continue;
+    for (const att of msg.attachments) {
+      if (!att.attachmentId) continue;
+      result.push({
+        id: att.attachmentId,
+        attachmentId: att.attachmentId,
+        name: att.name || "attachment",
+        mimeType: att.type || "application/octet-stream",
+        extension: getExtension(att.name || ""),
+        messageId: att.messageId || msg.id || "",
+        threadId: att.threadId || (thread.id as string) || threadId,
+        inline: att.inline ?? false,
+      });
+    }
+  }
+
+  return result;
 }
 
 /**
  * Download attachment content as base64.
  *
- * Note: Provider-specific OAuth APIs (Gmail/MS Graph) have been removed.
- * This function is no longer operational until MCP server adds attachment support.
+ * Routes to Gmail API or MS Graph API depending on account type, using the
+ * stored OAuth access token from tokens.json.
+ *
+ * @param _provider  - Not used (kept for interface compatibility)
+ * @param messageId  - The message ID containing the attachment
+ * @param attachmentId - The provider attachment ID (from listAttachments)
+ * @param _threadId  - Optional thread ID (unused, kept for call-site compatibility)
+ * @param _mimeType  - Optional MIME type hint (unused, kept for call-site compatibility)
+ * @param auth       - OAuth credentials: { accessToken, isMicrosoft }
  */
 export async function downloadAttachment(
   _provider: ConnectionProvider,
-  _messageId: string,
-  _attachmentId: string,
+  messageId: string,
+  attachmentId: string,
   _threadId?: string,
-  _mimeType?: string
+  _mimeType?: string,
+  auth?: AttachmentAuthOptions
 ): Promise<AttachmentContent> {
-  throw new Error(
-    "downloadAttachment requires provider API support which has been removed. " +
-    "Attachment downloading is not yet supported via MCP. " +
-    "Use 'superhuman account auth --mcp' and check for MCP server updates."
-  );
+  if (!auth?.accessToken) {
+    throw new Error(
+      "downloadAttachment requires an OAuth access token. " +
+      "Pass auth.accessToken from the cached token (token.accessToken)."
+    );
+  }
+
+  if (auth.isMicrosoft) {
+    return downloadAttachmentMsGraph(messageId, attachmentId, auth.accessToken);
+  } else {
+    return downloadAttachmentGmail(messageId, attachmentId, auth.accessToken);
+  }
+}
+
+/**
+ * Download an attachment via the Gmail REST API.
+ * Endpoint: GET /gmail/v1/users/me/messages/{messageId}/attachments/{attachmentId}
+ */
+async function downloadAttachmentGmail(
+  messageId: string,
+  attachmentId: string,
+  accessToken: string
+): Promise<AttachmentContent> {
+  const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`;
+
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Gmail API error ${resp.status}: ${text}`);
+  }
+
+  const data = await resp.json() as { data: string; size: number };
+  // Gmail API returns base64url-encoded data; convert to standard base64
+  const base64 = (data.data || "")
+    .replace(/-/g, "+")
+    .replace(/_/g, "/");
+
+  return {
+    data: base64,
+    size: data.size || Math.ceil((base64.length * 3) / 4),
+  };
+}
+
+/**
+ * Download an attachment via the MS Graph REST API.
+ * Endpoint: GET /v1.0/me/messages/{messageId}/attachments/{attachmentId}
+ */
+async function downloadAttachmentMsGraph(
+  messageId: string,
+  attachmentId: string,
+  accessToken: string
+): Promise<AttachmentContent> {
+  const url = `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(messageId)}/attachments/${encodeURIComponent(attachmentId)}`;
+
+  const resp = await fetch(url, {
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      Accept: "application/json",
+    },
+  });
+
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`MS Graph API error ${resp.status}: ${text}`);
+  }
+
+  const data = await resp.json() as {
+    contentBytes?: string;
+    size?: number;
+    name?: string;
+  };
+
+  const base64 = data.contentBytes || "";
+  return {
+    data: base64,
+    size: data.size || Math.ceil((base64.length * 3) / 4),
+  };
 }
 
 /**

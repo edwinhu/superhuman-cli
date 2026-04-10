@@ -22,6 +22,7 @@ The correct approach for any Superhuman operation:
 
 Known confirmed exceptions:
 - `userdata.getThreads` — use SQLite direct search (`sqlite-search.ts`) instead
+- `attachment download` (`attachments.ts`) — no Superhuman backend download proxy exists for received emails; uses Gmail API (`gmail.googleapis.com`) for Gmail accounts and MS Graph (`graph.microsoft.com`) for Microsoft accounts, with the stored OAuth `accessToken` from tokens.json. Listing uses SQLite local DB (no API call). This is the ONLY remaining use of provider APIs for a read operation.
 
 **Local-first data strategy (2026-04-09):** `read`, `inbox list`, and `mark read` now use the local SQLite database (OPFS blob) as the primary data path, falling back to portal RPC / backend API only when SQLite lookup fails. The `sqlite-search.ts` module provides shared helpers: `readThreadFromDB()`, `listInboxFromDB()`, `findOPFSBlob()`, `extractSQLite()`. The `mark read/unread` operations also have a backend API fallback via `userdata.writeMessage` when portal RPC (`threadInternal.modifyLabels`) fails.
 
