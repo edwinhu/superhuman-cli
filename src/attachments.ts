@@ -11,6 +11,7 @@
 
 import type { ConnectionProvider } from "./connection-provider";
 import { readThreadFromDB, listLocalAccounts } from "./sqlite-search";
+import { getCachedToken, loadTokensFromDisk } from "./token-api";
 
 export interface Attachment {
   id: string;
@@ -108,8 +109,12 @@ function getExtension(filename: string): string {
 /**
  * List all attachments from a thread by reading the local SQLite OPFS blob.
  *
- * No API call is needed — attachment metadata (attachmentId, name, type, size)
- * is stored in the thread JSON in Superhuman's local database.
+ * Primary path: reads attachment metadata from Superhuman's local SQLite cache.
+ * Fallback path (Microsoft accounts only): when SQLite returns 0 non-inline
+ * attachments, calls MS Graph API `GET /me/messages/{id}/attachments` to fetch
+ * the live attachment list. This handles emails that haven't been fully loaded
+ * in the Superhuman app yet (Superhuman only populates msg.attachments[] in the
+ * local cache after an email is opened).
  *
  * @param _provider - Not used (kept for interface compatibility)
  * @param threadId  - Thread ID or message ID to look up
@@ -126,6 +131,7 @@ export async function listAttachments(
   }
 
   let thread = readThreadFromDB(accountEmail, threadId);
+  let resolvedEmail = accountEmail;
 
   // If the primary account lookup failed, the active CDP tab may have resolved
   // to a different account than the one that owns this thread (e.g. Gmail tab
@@ -137,6 +143,7 @@ export async function listAttachments(
       const candidate = readThreadFromDB(localEmail, threadId);
       if (candidate) {
         thread = candidate;
+        resolvedEmail = localEmail;
         break;
       }
     }
@@ -166,6 +173,91 @@ export async function listAttachments(
         threadId: att.threadId || (thread.id as string) || threadId,
         inline: att.inline ?? false,
       });
+    }
+  }
+
+  // If SQLite returned no non-inline attachments, the email may not have been
+  // opened in the Superhuman app yet (attachment metadata is lazily cached).
+  // For Microsoft accounts, fall back to MS Graph API to fetch live attachment
+  // metadata. This ensures attachment list works for all emails regardless of
+  // whether they've been opened in the app.
+  const nonInlineCount = result.filter(a => !a.inline).length;
+  if (nonInlineCount === 0) {
+    await loadTokensFromDisk();
+    const token = await getCachedToken(resolvedEmail);
+    if (token?.isMicrosoft && token.accessToken) {
+      const graphAttachments = await listAttachmentsMsGraph(
+        threadId,
+        messages,
+        thread.id as string | undefined,
+        token.accessToken
+      );
+      if (graphAttachments.length > 0) {
+        return graphAttachments;
+      }
+    }
+  }
+
+  return result;
+}
+
+/**
+ * List attachments via MS Graph API for a thread whose messages are already
+ * known from the local SQLite cache (we have message IDs).
+ *
+ * Queries each message in the thread for its attachments. Stops after finding
+ * at least one message with attachments (typically only the first message with
+ * attachments matters for simple threads).
+ */
+async function listAttachmentsMsGraph(
+  threadId: string,
+  messages: any[],
+  cachedThreadId: string | undefined,
+  accessToken: string
+): Promise<Attachment[]> {
+  const result: Attachment[] = [];
+
+  // Collect message IDs from the SQLite-cached message objects
+  const messageIds: string[] = messages
+    .map((m: any) => m.id)
+    .filter((id: any): id is string => typeof id === "string" && id.length > 0);
+
+  // If we have no message IDs from SQLite, try using threadId directly as a
+  // message ID (for single-message threads where threadId === messageId)
+  if (messageIds.length === 0 && threadId) {
+    messageIds.push(threadId);
+  }
+
+  for (const msgId of messageIds) {
+    const url = `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(msgId)}/attachments?$select=id,name,contentType,size,isInline,contentId`;
+    try {
+      const resp = await fetch(url, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!resp.ok) continue;
+
+      const data = await resp.json() as { value?: any[] };
+      if (!Array.isArray(data.value) || data.value.length === 0) continue;
+
+      for (const att of data.value) {
+        // Skip inline images (calendar images, signature images, etc.)
+        if (att.isInline) continue;
+        result.push({
+          id: att.id,
+          attachmentId: att.id,
+          name: att.name || "attachment",
+          mimeType: att.contentType || "application/octet-stream",
+          extension: getExtension(att.name || ""),
+          messageId: msgId,
+          threadId: cachedThreadId || threadId,
+          inline: false,
+        });
+      }
+
+      // Found attachments on this message; no need to query remaining messages
+      if (result.length > 0) break;
+    } catch {
+      // Network error or rate limit — skip this message
     }
   }
 

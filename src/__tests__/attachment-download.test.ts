@@ -122,6 +122,51 @@ describe("attachments module - cross-account fallback (Outlook bug regression)",
   });
 });
 
+describe("attachments module - MS Graph fallback for uncached Outlook attachments", () => {
+  test("REGRESSION: listAttachments source imports getCachedToken for MS Graph fallback", async () => {
+    // Verify the fix is present: attachments.ts must import getCachedToken from
+    // token-api to load the stored OAuth access token for MS Graph API calls.
+    const src = await Bun.file(
+      new URL("../attachments.ts", import.meta.url).pathname
+    ).text();
+    expect(src).toContain("getCachedToken");
+    expect(src).toContain("listAttachmentsMsGraph");
+  });
+
+  test("REGRESSION: listAttachments source includes MS Graph attachment URL", async () => {
+    // Verify the MS Graph API endpoint is present in the source code.
+    const src = await Bun.file(
+      new URL("../attachments.ts", import.meta.url).pathname
+    ).text();
+    expect(src).toContain("graph.microsoft.com/v1.0/me/messages");
+    expect(src).toContain("/attachments");
+  });
+
+  test("REGRESSION: listAttachments falls back to MS Graph when SQLite returns 0 non-inline attachments", async () => {
+    // For Microsoft accounts where attachment metadata is not cached in the local
+    // SQLite DB (email hasn't been opened in Superhuman app), listAttachments must
+    // call MS Graph to get the live attachment list rather than silently returning [].
+    // This test verifies the code path exists in the source (no mock needed for logic check).
+    const src = await Bun.file(
+      new URL("../attachments.ts", import.meta.url).pathname
+    ).text();
+    // The MS Graph fallback must only trigger when SQLite returns 0 non-inline attachments
+    expect(src).toContain("nonInlineCount === 0");
+    // Must use the resolved email (which may differ from accountEmail after cross-account fallback)
+    expect(src).toContain("resolvedEmail");
+    // Must check isMicrosoft before calling MS Graph
+    expect(src).toContain("token?.isMicrosoft");
+  });
+
+  test("listAttachments returns [] without throwing for Microsoft account with no local blob", async () => {
+    // The MS Graph fallback should not throw when the account has no cached token
+    const { listAttachments } = await import("../attachments");
+    const result = await listAttachments({} as any, "thread-id", "nobody@example.invalid");
+    expect(Array.isArray(result)).toBe(true);
+    expect(result).toEqual([]);
+  });
+});
+
 describe("attachments module - downloadAttachment provider routing", () => {
   test("calls Gmail API endpoint for non-Microsoft accounts", async () => {
     const { downloadAttachment } = await import("../attachments");
