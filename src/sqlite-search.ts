@@ -22,6 +22,7 @@ const BROWSER_ROOTS = [
   join(homedir(), "Library/Application Support/Dia/User Data"),
   join(homedir(), "Library/Application Support/Chromium/User Data"),
   join(homedir(), "Library/Application Support/Google/Chrome/User Data"),
+  join(homedir(), "Library/Application Support/Google/Chrome"),
   join(homedir(), "Library/Application Support/BraveSoftware/Brave-Browser/User Data"),
   // Linux paths
   join(homedir(), ".config/chromium"),
