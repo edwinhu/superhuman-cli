@@ -167,6 +167,22 @@ describe("attachments module - MS Graph fallback for uncached Outlook attachment
   });
 });
 
+describe("attachments module - MS Graph $select does not include contentId", () => {
+  test("REGRESSION: listAttachmentsMsGraph $select must not include contentId", async () => {
+    // contentId is not a property on the base microsoft.graph.attachment type.
+    // Including it in $select causes a 400 BadRequest for ALL messages, and the
+    // code's `if (!resp.ok) continue;` silently swallows it, returning 0 attachments.
+    // Fix: remove contentId from $select. It belongs on fileAttachment subtype only.
+    const src = await Bun.file(
+      new URL("../attachments.ts", import.meta.url).pathname
+    ).text();
+    // The $select parameter must not include contentId
+    expect(src).not.toContain("contentId");
+    // The $select must include the correct fields
+    expect(src).toContain("isInline");
+  });
+});
+
 describe("attachments module - downloadAttachment provider routing", () => {
   test("calls Gmail API endpoint for non-Microsoft accounts", async () => {
     const { downloadAttachment } = await import("../attachments");

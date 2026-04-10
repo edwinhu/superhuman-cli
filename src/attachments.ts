@@ -229,7 +229,7 @@ async function listAttachmentsMsGraph(
   }
 
   for (const msgId of messageIds) {
-    const url = `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(msgId)}/attachments?$select=id,name,contentType,size,isInline,contentId`;
+    const url = `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(msgId)}/attachments?$select=id,name,contentType,size,isInline`;
     try {
       const resp = await fetch(url, {
         headers: { Authorization: `Bearer ${accessToken}` },
