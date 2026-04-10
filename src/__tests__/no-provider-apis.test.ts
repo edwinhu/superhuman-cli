@@ -99,7 +99,9 @@ describe("no provider APIs remain in src/", () => {
     // Disallow: actual direct graph.microsoft.com API calls
     // Allow: read.ts uses graph.microsoft.com for MS Graph read fallback
     //   (confirmed exception: userdata.getThreads returns 400 for all MS/Exchange accounts)
-    const allowlist = new Set(["calendar.ts", "attachments.ts", "read.ts"]);
+    // Allow: token-api.ts contains getThreadInfoMsGraph() used as fallback in resolveThreadInfo()
+    //   when userdata.getThreads returns 400 for Microsoft/Exchange accounts from CLI context
+    const allowlist = new Set(["calendar.ts", "attachments.ts", "read.ts", "token-api.ts"]);
     const hits: string[] = [];
     for (const [path, content] of sources) {
       const rel = path.replace(SRC_DIR + "/", "");

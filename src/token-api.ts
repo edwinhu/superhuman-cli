@@ -586,16 +586,56 @@ async function extractAndCache(conn: SuperhumanConnection, email: string): Promi
 }
 
 export async function refreshTokenViaCDP(email: string): Promise<TokenInfo | undefined> {
+  // Only attempt CDP refresh if the account was previously cached.
+  // Accounts that have never been authenticated cannot be refreshed via CDP —
+  // the user must run 'superhuman account auth' first.
+  // This also prevents hanging in test environments where Chrome CDP is
+  // reachable but the test email doesn't exist in the Superhuman session.
+  if (!tokenCache.has(email)) return undefined;
+
+  // Apply a 4-second timeout to the entire CDP refresh operation.
+  // The Superhuman page's JS context can become frozen (e.g. DevTools open
+  // with a breakpoint), which causes Runtime.evaluate to hang indefinitely.
+  // Returning undefined on timeout is safe — the caller falls back gracefully.
+  const CDP_REFRESH_TIMEOUT_MS = 2000;
+
   let conn: SuperhumanConnection | null = null;
-  try {
-    conn = await connectToSuperhuman(getCDPPort(), false);
-    if (!conn) return undefined;
-    return await extractAndCache(conn, email);
-  } catch {
-    return undefined;
-  } finally {
-    if (conn) await disconnect(conn);
-  }
+
+  // Apply timeout: if CDP operations don't complete in time, forcefully close
+  // the connection (to unblock any pending Runtime.evaluate) and return undefined.
+  // The Superhuman page's JS context can become frozen (e.g. DevTools open with
+  // a breakpoint), causing Runtime.evaluate to hang indefinitely.
+  let timeoutHandle: ReturnType<typeof setTimeout>;
+
+  const timeoutPromise = new Promise<undefined>((resolve) => {
+    timeoutHandle = setTimeout(async () => {
+      // Forcefully close the connection to unblock any pending CDP calls
+      if (conn) {
+        try { await disconnect(conn); } catch {}
+        conn = null;
+      }
+      resolve(undefined);
+    }, CDP_REFRESH_TIMEOUT_MS);
+  });
+
+  const refreshPromise = (async () => {
+    try {
+      conn = await connectToSuperhuman(getCDPPort(), false);
+      if (!conn) return undefined;
+      return await extractAndCache(conn, email);
+    } catch {
+      return undefined;
+    } finally {
+      if (conn) {
+        try { await disconnect(conn); } catch {}
+        conn = null;
+      }
+    }
+  })();
+
+  const result = await Promise.race([refreshPromise, timeoutPromise]);
+  clearTimeout(timeoutHandle!);
+  return result;
 }
 
 /**
@@ -666,29 +706,31 @@ export function getTokensFilePath(): string {
 export async function resolveToken(email?: string): Promise<TokenInfo | null> {
   await loadTokensFromDisk();
 
-  // 1. Try requested account (getCachedToken auto-refreshes if expired)
+  // 1. Try requested account (getCachedToken auto-refreshes via CDP if expired)
   if (email) {
     const token = await getCachedToken(email);
     if (token?.idToken && token?.userId) return token;
-    // Explicit account requested but not found — don't fall through to other accounts
-  } else {
-    // 2. Try any cached account
-    for (const cachedEmail of tokenCache.keys()) {
-      const token = await getCachedToken(cachedEmail);
-      if (token?.idToken && token?.userId) return token;
-    }
+    // Explicit account requested but not found in cache — return null immediately.
+    // Do NOT fall through to CDP cold-start: if the caller specified a specific
+    // account that isn't cached, it means credentials haven't been set up yet.
+    // The user should run 'superhuman account auth' first.
+    // (CDP cold-start is only used when no account is specified, to discover
+    // the currently active Superhuman session.)
+    return null;
   }
 
-  // 3. Cold-start: bootstrap from the currently active Superhuman session
+  // 2. Try any cached account with valid Superhuman credentials
+  for (const cachedEmail of tokenCache.keys()) {
+    const token = await getCachedToken(cachedEmail);
+    if (token?.idToken && token?.userId) return token;
+  }
+
+  // 3. Cold-start: no specific account requested and no cached tokens found —
+  // bootstrap from the currently active Superhuman session via CDP.
   let conn: SuperhumanConnection | null = null;
   try {
     conn = await connectToSuperhuman(getCDPPort(), false);
     if (!conn) return null;
-
-    if (email) {
-      // Specific account requested — extractToken handles switching to it
-      return await extractAndCache(conn, email);
-    }
 
     // No account specified — use whatever is currently active
     const emailResult = await conn.Runtime.evaluate({
@@ -971,6 +1013,84 @@ export async function getThreadInfoSuperhuman(
       cc: Array.isArray(msg.cc) ? msg.cc : msg.cc ? [msg.cc] : [],
       messageId: msg.messageId || msg.rfc822Id || null,
       references: Array.isArray(msg.references) ? msg.references : [],
+    };
+  } catch (_e) {
+    return null;
+  }
+}
+
+/**
+ * Get thread info (subject, from, to, cc, messageId, references) via MS Graph API.
+ *
+ * Used as a fallback for Microsoft/Exchange accounts when `userdata.getThreads`
+ * returns 400 (it does not support MS account requests from CLI context).
+ *
+ * Queries: GET /me/messages?$filter=conversationId eq '{threadId}'
+ * Returns the last message's metadata for reply threading headers.
+ *
+ * @param threadId - Conversation/thread ID (same as MS Graph conversationId)
+ * @param accessToken - MS Graph OAuth access token
+ */
+export async function getThreadInfoMsGraph(
+  threadId: string,
+  accessToken: string
+): Promise<ThreadInfoDirect | null> {
+  try {
+    const select = [
+      "id",
+      "subject",
+      "from",
+      "toRecipients",
+      "ccRecipients",
+      "internetMessageId",
+      "receivedDateTime",
+    ].join(",");
+
+    const url =
+      `https://graph.microsoft.com/v1.0/me/messages` +
+      `?$filter=conversationId+eq+'${encodeURIComponent(threadId)}'` +
+      `&$select=${select}` +
+      `&$orderby=receivedDateTime+asc` +
+      `&$top=50`;
+
+    const resp = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!resp.ok) return null;
+
+    const data = await resp.json() as { value?: any[] };
+    const items: any[] = data.value || [];
+    if (items.length === 0) return null;
+
+    // Sort ascending by receivedDateTime to get last (most recent) message
+    items.sort(
+      (a, b) =>
+        new Date(a.receivedDateTime || 0).getTime() -
+        new Date(b.receivedDateTime || 0).getTime()
+    );
+    const last = items[items.length - 1];
+
+    const fromAddr = last.from?.emailAddress;
+    const fromStr = fromAddr?.name
+      ? `${fromAddr.name} <${fromAddr.address}>`
+      : fromAddr?.address || "";
+
+    const toList = (last.toRecipients || []).map((r: any) => {
+      const addr = r.emailAddress;
+      return addr?.name ? `${addr.name} <${addr.address}>` : (addr?.address || "");
+    });
+    const ccList = (last.ccRecipients || []).map((r: any) => {
+      const addr = r.emailAddress;
+      return addr?.name ? `${addr.name} <${addr.address}>` : (addr?.address || "");
+    });
+
+    return {
+      subject: last.subject || "",
+      from: fromStr,
+      to: toList,
+      cc: ccList,
+      messageId: last.internetMessageId || null,
+      references: [],
     };
   } catch (_e) {
     return null;

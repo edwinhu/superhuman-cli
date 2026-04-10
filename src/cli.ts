@@ -55,6 +55,7 @@ import {
   askAISearch,
   getCachedToken,
   getThreadInfoSuperhuman,
+  getThreadInfoMsGraph,
   extractTokenChrome,
   resolveToken,
   type TokenInfo,
@@ -1855,6 +1856,14 @@ async function resolveThreadInfo(token: any, accountEmail: string, threadId: str
   // SQLite path works offline; REST API requires browser session (returns 400 otherwise)
   const sqliteInfo = lookupThreadInfoById(accountEmail, threadId);
   if (sqliteInfo) return sqliteInfo;
+
+  // For Microsoft/Exchange accounts, userdata.getThreads returns 400 from CLI context.
+  // Fall back to MS Graph API using the cached OAuth access token.
+  if (token.isMicrosoft && token.accessToken) {
+    const graphInfo = await getThreadInfoMsGraph(threadId, token.accessToken);
+    if (graphInfo) return graphInfo;
+  }
+
   return getThreadInfoSuperhuman(token, threadId);
 }
 

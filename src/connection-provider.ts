@@ -168,13 +168,16 @@ export async function resolveProvider(
   // Try loading cached tokens
   await loadTokensFromDisk();
 
-  // If --account specified, check if we have a cached token for it
+  // If --account specified, only use that account — do not fall through to others.
+  // If the account isn't cached, return null immediately so callers can show
+  // a targeted "no credentials for <email>" error rather than silently using
+  // a different account or hanging on CDP refresh.
   if (options.account) {
     const token = await getCachedToken(options.account);
     if (token) {
       return providerFromToken(token, options.account);
     }
-    // Fall through if explicit account not in cached tokens
+    return null;
   }
 
   // Try cached accounts — getCachedToken() will attempt CDP refresh if expired
