@@ -320,7 +320,9 @@ Works with cached JWT token — no Superhuman app needed after initial auth.
 | Drafts | `POST /v3/userdata.writeMessage` |
 | AI compose | `POST /v3/ai.compose` |
 | Snooze | `POST /reminders/create`, `POST /reminders/cancel` |
-| Attachments | `POST /v3/attachments.upload` |
+| Attachments (upload) | `POST /v3/attachments.upload` |
+| Attachments (list) | Local SQLite OPFS blob (no API call) |
+| Attachments (download) | Gmail API / MS Graph (stored OAuth token) |
 | Snippets | Superhuman backend API |
 
 **Layer 2: Portal RPC** (`portal.invoke` via CDP `Runtime.evaluate`)
@@ -330,7 +332,7 @@ Requires Superhuman app running. Proxies through the app's own OAuth session.
 | Operation | Portal Service |
 |-----------|---------------|
 | Inbox listing | `threadInternal.listAsync` |
-| Read thread | `threadInternal.getAsync` |
+| Read thread | `threadInternal.listAsync` |
 | Archive / Delete | `threadInternal.modifyLabels` |
 | Labels / Star | `threadInternal.listAsync` (STARRED), `runtimeEvaluate` (labels) |
 | Read status | `threadInternal.modifyLabels` |
@@ -354,7 +356,7 @@ Chrome DevTools Protocol is used for:
 
 - **Simple auth**: Single Superhuman JWT, no OAuth token management
 - **On-demand refresh**: Tokens auto-refresh via CDP when expired
-- **No external dependencies**: No MCP server, no Gmail/MS Graph OAuth
+- **No external dependencies**: No MCP server, minimal provider API use (attachment download only)
 - **Multi-account**: Works with both Gmail and Microsoft/Outlook accounts
 
 ## License
