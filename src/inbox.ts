@@ -30,6 +30,8 @@ export interface ListInboxOptions {
   unreadOnly?: boolean;
   /** When true, exclude threads where the user was the last sender */
   needsReply?: boolean;
+  /** Exclude threads where from email/name or subject matches any pattern (case-insensitive substring) */
+  exclude?: string[];
   /** Filter to threads that have ANY of these label names */
   labels?: string[];
   /**
@@ -335,6 +337,18 @@ async function listInboxSuperhuman(
         t.messageCount <= 1 ||
         t.from.email.toLowerCase() !== userEmail
     );
+  }
+
+  if (options.exclude?.length) {
+    const patterns = options.exclude.map((p) => p.toLowerCase());
+    threads = threads.filter((t) => {
+      const fromEmail = t.from.email.toLowerCase();
+      const fromName = t.from.name.toLowerCase();
+      const subject = t.subject.toLowerCase();
+      return !patterns.some(
+        (p) => fromEmail.includes(p) || fromName.includes(p) || subject.includes(p)
+      );
+    });
   }
 
   if (options.labels?.length) {

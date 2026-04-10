@@ -175,6 +175,7 @@ ${colors.bold}OPTIONS${colors.reset}
   --delay <seconds>  Delay before sending in seconds (for draft send, default: 20)
   --label <name|id>  Label name or ID (for label add/remove, or inbox filter; repeatable)
   --needs-reply      Exclude threads where you were the last sender (for inbox)
+  --exclude <patterns> Exclude threads matching patterns (comma-separated, matches from/subject)
   --ai-label <name>  Filter by Superhuman AI label (e.g., Respond, Meeting, News, Waiting)
   --split <bucket>   Filter by Superhuman split inbox: "important" or "other" (uses CDP)
   --until <time>     Snooze until: preset (tomorrow, next-week, weekend, evening) or ISO datetime
@@ -387,6 +388,7 @@ interface CliOptions {
   focused: boolean; // only show important/primary emails (Gmail: category:primary, Outlook: Focused Inbox)
   unread: boolean; // only show unread emails
   needsReply: boolean; // exclude threads where user was last sender
+  exclude: string[]; // exclude threads matching these patterns (from/subject)
   labels: string[]; // filter to threads with any of these label names
   splitInbox: "important" | "other" | ""; // Superhuman split inbox filter
   aiLabel: string; // Superhuman AI label filter (e.g., "Respond", "Meeting")
@@ -454,6 +456,7 @@ function parseArgs(args: string[]): CliOptions {
     focused: false,
     unread: false,
     needsReply: false,
+    exclude: [],
     labels: [],
     splitInbox: "",
     aiLabel: "",
@@ -651,6 +654,10 @@ function parseArgs(args: string[]): CliOptions {
         case "needs-reply":
           options.needsReply = true;
           i += 1;
+          break;
+        case "exclude":
+          options.exclude.push(...value.split(",").map((s) => s.trim()).filter(Boolean));
+          i += inc;
           break;
         case "split":
           if (value === "important" || value === "other") {
@@ -1582,6 +1589,7 @@ async function cmdInbox(options: CliOptions) {
     focusedOnly: options.focused,
     unreadOnly: options.unread,
     needsReply: options.needsReply,
+    exclude: options.exclude.length > 0 ? options.exclude : undefined,
     labels: options.labels,
     splitInbox: options.splitInbox || undefined,
     aiLabel: options.aiLabel || undefined,
