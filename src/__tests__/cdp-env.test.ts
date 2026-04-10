@@ -65,10 +65,13 @@ describe("container scenarios (expired tokens, unreachable CDP)", () => {
     expect(result).toBeUndefined();
   });
 
-  test("getCachedToken with expired token attempts refresh (returns undefined when CDP unreachable)", async () => {
+  test("getCachedToken with expired token attempts refresh (returns stale token when CDP unreachable)", async () => {
     // Simulate container: token is expired, CDP is not reachable
     // refreshTokenViaCDP will call connectToSuperhuman which will fail
-    // because no Chrome is running — it should return undefined gracefully
+    // because no Chrome is running — getCachedToken should fall back to
+    // returning the stale token so the caller can attempt the backend API.
+    // The Superhuman backend handles 401 with its own retry logic, and
+    // returning undefined here caused a misleading "No cached tokens" error.
     const expiredToken: TokenInfo = {
       accessToken: "expired-access",
       email: "container@example.com",
@@ -79,14 +82,16 @@ describe("container scenarios (expired tokens, unreachable CDP)", () => {
     setTokenCacheForTest("container@example.com", expiredToken);
 
     // getCachedToken sees the expired token and tries refreshTokenViaCDP
-    // which tries connectToSuperhuman → fails (no Chrome) → returns undefined
+    // which tries connectToSuperhuman → fails (no Chrome) → falls back to stale token
     // Set CDP to a port nothing is listening on to ensure it fails fast
     const origPort = process.env.CDP_PORT;
     process.env.CDP_PORT = "19999";
     try {
       const result = await getCachedToken("container@example.com");
-      // Should return undefined since refresh failed
-      expect(result).toBeUndefined();
+      // Should return the stale token (not undefined) so backend API can be attempted
+      expect(result).toBeDefined();
+      expect(result!.email).toBe("container@example.com");
+      expect(result!.accessToken).toBe("expired-access");
     } finally {
       if (origPort === undefined) delete process.env.CDP_PORT;
       else process.env.CDP_PORT = origPort;

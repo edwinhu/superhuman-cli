@@ -653,8 +653,14 @@ export async function getCachedToken(email: string): Promise<TokenInfo | undefin
 
   const bufferMs = 5 * 60 * 1000; // 5 minutes
   if (token.expires < Date.now() + bufferMs) {
-    // Token expired or expiring soon — try on-demand refresh
-    return await refreshTokenViaCDP(email);
+    // Token expired or expiring soon — try on-demand refresh via CDP.
+    // If CDP is unavailable (Chrome not running, timeout), fall back to
+    // returning the stale token so the caller can attempt the Superhuman
+    // backend API. The backend handles 401 with its own retry logic, and
+    // returning undefined here causes a misleading "No cached tokens" error
+    // when the account IS known but tokens simply need refreshing.
+    const refreshed = await refreshTokenViaCDP(email);
+    return refreshed ?? token;
   }
 
   return token;
@@ -710,41 +716,80 @@ export async function resolveToken(email?: string): Promise<TokenInfo | null> {
   if (email) {
     const token = await getCachedToken(email);
     if (token?.idToken && token?.userId) return token;
-    // Explicit account requested but not found in cache — return null immediately.
-    // Do NOT fall through to CDP cold-start: if the caller specified a specific
-    // account that isn't cached, it means credentials haven't been set up yet.
-    // The user should run 'superhuman account auth' first.
-    // (CDP cold-start is only used when no account is specified, to discover
-    // the currently active Superhuman session.)
-    return null;
+
+    // If the email is not in tokenCache at all, the account was never authenticated.
+    // Return null immediately — the user must run 'superhuman account auth' first.
+    // Do NOT fall through to CDP cold-start for completely unknown accounts.
+    if (!tokenCache.has(email)) {
+      return null;
+    }
+
+    // The account IS known (exists in tokenCache from disk) but the token is
+    // expired and the 2s CDP refresh in getCachedToken timed out. Fall through
+    // to CDP cold-start below to extract a fresh token for this specific account.
   }
 
   // 2. Try any cached account with valid Superhuman credentials
-  for (const cachedEmail of tokenCache.keys()) {
-    const token = await getCachedToken(cachedEmail);
-    if (token?.idToken && token?.userId) return token;
+  if (!email) {
+    for (const cachedEmail of tokenCache.keys()) {
+      const token = await getCachedToken(cachedEmail);
+      if (token?.idToken && token?.userId) return token;
+    }
   }
 
-  // 3. Cold-start: no specific account requested and no cached tokens found —
-  // bootstrap from the currently active Superhuman session via CDP.
-  let conn: SuperhumanConnection | null = null;
-  try {
-    conn = await connectToSuperhuman(getCDPPort(), false);
-    if (!conn) return null;
+  // 3. Cold-start: connect to CDP to extract a fresh token.
+  //    - If a specific email was requested and is a known-but-expired account,
+  //      extract a fresh token for that account.
+  //    - If no email was specified and no cached tokens are valid, bootstrap
+  //      from whatever account is currently active in Superhuman.
+  //
+  //    Apply a timeout: Runtime.evaluate can hang indefinitely if the JS context
+  //    is frozen (DevTools open with a breakpoint, or getIDTokenAsync stalls).
+  const CDP_COLDSTART_TIMEOUT_MS = 8000;
+  let coldConn: SuperhumanConnection | null = null;
+  let coldTimeoutHandle: ReturnType<typeof setTimeout>;
 
-    // No account specified — use whatever is currently active
-    const emailResult = await conn.Runtime.evaluate({
-      expression: `window.GoogleAccount?.emailAddress || null`,
-      returnByValue: true,
-    });
-    const activeEmail: string | null = emailResult.result.value;
-    if (!activeEmail) return null;
-    return await extractAndCache(conn, activeEmail);
-  } catch {
-    return null;
-  } finally {
-    if (conn) await disconnect(conn);
-  }
+  const coldTimeoutPromise = new Promise<null>((resolve) => {
+    coldTimeoutHandle = setTimeout(async () => {
+      if (coldConn) {
+        try { await disconnect(coldConn); } catch {}
+        coldConn = null;
+      }
+      resolve(null);
+    }, CDP_COLDSTART_TIMEOUT_MS);
+  });
+
+  const coldStartPromise = (async (): Promise<TokenInfo | null> => {
+    try {
+      coldConn = await connectToSuperhuman(getCDPPort(), false);
+      if (!coldConn) return null;
+
+      if (email) {
+        // Known account with expired token — extract fresh token for this account
+        return await extractAndCache(coldConn, email);
+      }
+
+      // No account specified — use whatever is currently active
+      const emailResult = await coldConn.Runtime.evaluate({
+        expression: `window.GoogleAccount?.emailAddress || null`,
+        returnByValue: true,
+      });
+      const activeEmail: string | null = emailResult.result.value;
+      if (!activeEmail) return null;
+      return await extractAndCache(coldConn, activeEmail);
+    } catch {
+      return null;
+    } finally {
+      if (coldConn) {
+        try { await disconnect(coldConn); } catch {}
+        coldConn = null;
+      }
+    }
+  })();
+
+  const coldResult = await Promise.race([coldStartPromise, coldTimeoutPromise]);
+  clearTimeout(coldTimeoutHandle!);
+  return coldResult;
 }
 
 // ============================================================================
@@ -1046,20 +1091,58 @@ export async function getThreadInfoMsGraph(
       "receivedDateTime",
     ].join(",");
 
-    const url =
-      `https://graph.microsoft.com/v1.0/me/messages` +
-      `?$filter=conversationId+eq+'${encodeURIComponent(threadId)}'` +
-      `&$select=${select}` +
-      `&$orderby=receivedDateTime+asc` +
-      `&$top=50`;
-
-    const resp = await fetch(url, {
+    // Primary path: Superhuman passes the MS Graph message ID as threadId for
+    // Outlook/Exchange accounts. Try a direct message lookup first — O(1) and
+    // always succeeds when threadId is a valid message ID.
+    const directUrl = `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(threadId)}?$select=${select}`;
+    const directResp = await fetch(directUrl, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
-    if (!resp.ok) return null;
+    if (directResp.ok) {
+      const msg = await directResp.json() as any;
+      const fromAddr = msg.from?.emailAddress;
+      const fromStr = fromAddr?.name
+        ? `${fromAddr.name} <${fromAddr.address}>`
+        : fromAddr?.address || "";
+      const toList = (msg.toRecipients || []).map((r: any) => {
+        const addr = r.emailAddress;
+        return addr?.name ? `${addr.name} <${addr.address}>` : (addr?.address || "");
+      });
+      const ccList = (msg.ccRecipients || []).map((r: any) => {
+        const addr = r.emailAddress;
+        return addr?.name ? `${addr.name} <${addr.address}>` : (addr?.address || "");
+      });
+      return {
+        subject: msg.subject || "",
+        from: fromStr,
+        to: toList,
+        cc: ccList,
+        messageId: msg.internetMessageId || null,
+        references: [],
+      };
+    }
 
-    const data = await resp.json() as { value?: any[] };
-    const items: any[] = data.value || [];
+    // Fallback: threadId might be a conversationId — filter at folder level.
+    // Note: $filter=conversationId at /me/messages returns InefficientFilter (400)
+    // for many Exchange tenants. Folder-level filtering also returns 400 on some
+    // tenants (confirmed on UVA Law). This path is retained for compatibility but
+    // may not work on all tenants.
+    const folders = ["Inbox", "SentItems", "Archive", "DeletedItems"];
+    const filterParam = `conversationId eq '${threadId}'`;
+    const queryParams = `?$filter=${encodeURIComponent(filterParam)}&$select=${select}&$orderby=receivedDateTime+asc&$top=50`;
+
+    let items: any[] = [];
+    for (const folder of folders) {
+      const url = `https://graph.microsoft.com/v1.0/me/mailFolders/${folder}/messages${queryParams}`;
+      const resp = await fetch(url, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!resp.ok) continue;
+      const data = await resp.json() as { value?: any[] };
+      const folderItems: any[] = data.value || [];
+      items = items.concat(folderItems);
+      if (items.length > 0) break;
+    }
     if (items.length === 0) return null;
 
     // Sort ascending by receivedDateTime to get last (most recent) message
