@@ -42,3 +42,13 @@ report.[0-9]_.[0-9]_.[0-9]_.[0-9]_.json
 *.bun-build
 /superhuman
 /superhuman-linux
+superhuman-*-arm64*
+superhuman-0.*
+/index.js
+
+# scratch / investigation files
+scratch/
+src/api-investigation/
+
+# planning artifacts
+.planning/
