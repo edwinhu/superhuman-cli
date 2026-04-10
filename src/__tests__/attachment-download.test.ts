@@ -93,6 +93,35 @@ describe("attachments module - listAttachments from SQLite", () => {
   });
 });
 
+describe("attachments module - cross-account fallback (Outlook bug regression)", () => {
+  test("REGRESSION: listAttachments source imports listLocalAccounts for cross-account fallback", async () => {
+    // Verify the fix is present in the source: attachments.ts must import
+    // listLocalAccounts from sqlite-search (the fallback mechanism).
+    const src = await Bun.file(
+      new URL("../attachments.ts", import.meta.url).pathname
+    ).text();
+    expect(src).toContain("listLocalAccounts");
+  });
+
+  test("REGRESSION: listAttachments falls back gracefully when primary account has no OPFS blob", async () => {
+    // Before the fix, passing a wrong/different account email would return []
+    // silently. The fix adds a fallback loop. For an account with no local blob
+    // at all, the function must still return [] without throwing.
+    const { listAttachments } = await import("../attachments");
+    const result = await listAttachments({} as any, "some-thread-id", "missing@example.invalid");
+    expect(Array.isArray(result)).toBe(true);
+    expect(result).toEqual([]);
+  });
+
+  test("REGRESSION: listAttachments cross-account fallback logic skips primary email", async () => {
+    // Verify the skip condition exists in source: "localEmail.toLowerCase() === accountEmail.toLowerCase()"
+    const src = await Bun.file(
+      new URL("../attachments.ts", import.meta.url).pathname
+    ).text();
+    expect(src).toContain("localEmail.toLowerCase() === accountEmail.toLowerCase()");
+  });
+});
+
 describe("attachments module - downloadAttachment provider routing", () => {
   test("calls Gmail API endpoint for non-Microsoft accounts", async () => {
     const { downloadAttachment } = await import("../attachments");

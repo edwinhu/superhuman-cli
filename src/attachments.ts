@@ -10,7 +10,7 @@
  */
 
 import type { ConnectionProvider } from "./connection-provider";
-import { readThreadFromDB } from "./sqlite-search";
+import { readThreadFromDB, listLocalAccounts } from "./sqlite-search";
 
 export interface Attachment {
   id: string;
@@ -125,7 +125,23 @@ export async function listAttachments(
     return [];
   }
 
-  const thread = readThreadFromDB(accountEmail, threadId);
+  let thread = readThreadFromDB(accountEmail, threadId);
+
+  // If the primary account lookup failed, the active CDP tab may have resolved
+  // to a different account than the one that owns this thread (e.g. Gmail tab
+  // active while looking up an Outlook thread ID). Fall back to all local
+  // accounts that have an OPFS blob.
+  if (!thread) {
+    for (const localEmail of listLocalAccounts()) {
+      if (localEmail.toLowerCase() === accountEmail.toLowerCase()) continue;
+      const candidate = readThreadFromDB(localEmail, threadId);
+      if (candidate) {
+        thread = candidate;
+        break;
+      }
+    }
+  }
+
   if (!thread) {
     return [];
   }
