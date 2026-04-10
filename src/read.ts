@@ -8,6 +8,7 @@
 import type { ConnectionProvider } from "./connection-provider";
 import { SuperhumanProvider } from "./superhuman-provider";
 import { readThreadFromDB } from "./sqlite-search";
+import { getCachedToken, loadTokensFromDisk } from "./token-api";
 
 export interface ThreadMessage {
   id: string;
@@ -241,6 +242,90 @@ async function readThreadSQLite(
 }
 
 // ---------------------------------------------------------------------------
+// MS Graph fallback path (Microsoft/Exchange accounts when SQLite misses)
+// ---------------------------------------------------------------------------
+
+/**
+ * Read a thread via MS Graph API using conversationId filtering.
+ *
+ * Used as a fallback when the local SQLite cache misses (e.g. thread not yet
+ * opened in Superhuman app, or container environment without Chrome OPFS blobs)
+ * AND the Superhuman backend `userdata.getThreads` endpoint returns 400 for
+ * Microsoft/Exchange accounts (it does not support MS account requests from CLI).
+ *
+ * Queries: GET /me/messages?$filter=conversationId eq '{threadId}'&$select=...
+ */
+async function readThreadMsGraph(
+  threadId: string,
+  accessToken: string
+): Promise<ThreadMessage[]> {
+  const select = [
+    "id",
+    "subject",
+    "from",
+    "toRecipients",
+    "ccRecipients",
+    "receivedDateTime",
+    "bodyPreview",
+    "body",
+    "conversationId",
+  ].join(",");
+
+  const url =
+    `https://graph.microsoft.com/v1.0/me/messages` +
+    `?$filter=conversationId+eq+'${encodeURIComponent(threadId)}'` +
+    `&$select=${select}` +
+    `&$top=50`;
+
+  try {
+    const resp = await fetch(url, {
+      headers: { Authorization: `Bearer ${accessToken}` },
+    });
+    if (!resp.ok) return [];
+
+    const data = await resp.json() as { value?: any[] };
+    const items: any[] = data.value || [];
+    if (items.length === 0) return [];
+
+    // Sort by receivedDateTime ascending (oldest first)
+    items.sort(
+      (a, b) =>
+        new Date(a.receivedDateTime || 0).getTime() -
+        new Date(b.receivedDateTime || 0).getTime()
+    );
+
+    return items.map((msg): ThreadMessage => {
+      const from = msg.from?.emailAddress;
+      const toList = (msg.toRecipients || []).map((r: any) => ({
+        email: r.emailAddress?.address || "",
+        name: r.emailAddress?.name || "",
+      }));
+      const ccList = (msg.ccRecipients || []).map((r: any) => ({
+        email: r.emailAddress?.address || "",
+        name: r.emailAddress?.name || "",
+      }));
+
+      return {
+        id: msg.id || "",
+        threadId: msg.conversationId || threadId,
+        subject: msg.subject || "",
+        from: {
+          email: from?.address || "",
+          name: from?.name || "",
+        },
+        to: toList,
+        cc: ccList,
+        date: msg.receivedDateTime || "",
+        snippet: msg.bodyPreview || "",
+        body: msg.body?.content || undefined,
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
+// ---------------------------------------------------------------------------
 // Superhuman combined path
 // ---------------------------------------------------------------------------
 
@@ -259,8 +344,18 @@ async function readThreadSuperhuman(
       const portalResult = await readThreadPortal(provider, threadId);
       if (portalResult.length > 0) return portalResult;
     } catch {
-      // Fall through to backend
+      // Fall through to MS Graph / backend
     }
+  }
+
+  // For Microsoft/Exchange accounts, userdata.getThreads returns 400 — use
+  // MS Graph API instead. This is the correct path in container environments
+  // where there is no Chrome OPFS blob and no CDP portal.
+  await loadTokensFromDisk();
+  const cachedToken = await getCachedToken(email);
+  if (cachedToken?.isMicrosoft && cachedToken.accessToken) {
+    const graphResult = await readThreadMsGraph(threadId, cachedToken.accessToken);
+    if (graphResult.length > 0) return graphResult;
   }
 
   return readThreadBackend(provider, threadId);

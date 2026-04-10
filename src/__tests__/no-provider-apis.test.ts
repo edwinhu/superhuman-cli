@@ -97,7 +97,9 @@ describe("no provider APIs remain in src/", () => {
     // Allow: attachments.ts uses graph.microsoft.com for attachment download
     //   (confirmed exception: no Superhuman backend endpoint for downloading received attachments)
     // Disallow: actual direct graph.microsoft.com API calls
-    const allowlist = new Set(["calendar.ts", "attachments.ts"]);
+    // Allow: read.ts uses graph.microsoft.com for MS Graph read fallback
+    //   (confirmed exception: userdata.getThreads returns 400 for all MS/Exchange accounts)
+    const allowlist = new Set(["calendar.ts", "attachments.ts", "read.ts"]);
     const hits: string[] = [];
     for (const [path, content] of sources) {
       const rel = path.replace(SRC_DIR + "/", "");
