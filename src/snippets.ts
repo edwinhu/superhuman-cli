@@ -32,14 +32,36 @@ interface DraftEntry {
     body: string;
     subject?: string;
     snippet?: string;
-    to?: string[];
-    cc?: string[];
-    bcc?: string[];
+    // Recipients may be strings ("Name <email>" or "email") or
+    // {email, name} objects depending on how the snippet was created.
+    to?: Array<string | { email: string; name?: string }>;
+    cc?: Array<string | { email: string; name?: string }>;
+    bcc?: Array<string | { email: string; name?: string }>;
   };
   snippetAnalytics?: {
     sends?: number;
     lastSentAt?: string | null;
   };
+}
+
+/**
+ * Normalize a single recipient value to a string.
+ * Handles both plain email strings and {email, name} objects.
+ */
+function normalizeRecipient(r: string | { email: string; name?: string }): string {
+  if (typeof r === "string") return r;
+  return r.name ? `${r.name} <${r.email}>` : r.email;
+}
+
+/**
+ * Normalize a recipients array to string[].
+ * Handles arrays of strings, objects, or a mix.
+ */
+function normalizeRecipients(
+  list: Array<string | { email: string; name?: string }> | undefined
+): string[] {
+  if (!list || list.length === 0) return [];
+  return list.map(normalizeRecipient);
 }
 
 interface GetThreadsResponse {
@@ -117,9 +139,9 @@ export async function listSnippets(
         body: draft.body,
         subject: draft.subject || "",
         snippet: draft.snippet || "",
-        to: draft.to || [],
-        cc: draft.cc || [],
-        bcc: draft.bcc || [],
+        to: normalizeRecipients(draft.to),
+        cc: normalizeRecipients(draft.cc),
+        bcc: normalizeRecipients(draft.bcc),
         sends: entry.snippetAnalytics?.sends ?? 0,
         lastSentAt: entry.snippetAnalytics?.lastSentAt ?? null,
       });
