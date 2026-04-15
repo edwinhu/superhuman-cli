@@ -566,29 +566,40 @@ export async function uploadAttachmentSuperhuman(
   const data = await response.json();
 
   // Write attachment metadata so the draft shows the attachment in Superhuman UI
+  const cid = crypto.randomUUID();
   const metadataBody = {
     writes: [
       {
         path: `users/${userInfo.userId}/threads/${threadId}/messages/${draftId}/attachments/${uuid}`,
         value: {
           uuid,
-          cid: uuid,
+          cid,
           name: filename,
           type: mimeType,
+          fixedPartId: "0",
+          messageId: draftId,
+          threadId,
           inline: false,
           source: {
-            type: "upload",
-            thread_id: threadId,
-            message_id: draftId,
+            type: "upload-firebase",
+            threadId,
+            messageId: draftId,
             uuid,
-            download_url: data.downloadUrl,
+            url: data.downloadUrl,
           },
+          discardedAt: null,
+          createdAt: new Date().toISOString(),
+          size: Buffer.from(base64Content, "base64").length,
         },
       },
     ],
   };
 
-  await fetch(`${SUPERHUMAN_BACKEND}/v3/userdata.writeMessage`, {
+  if (process.env.SH_DEBUG) {
+    console.error("DEBUG attachment metadata write:", JSON.stringify(metadataBody, null, 2));
+  }
+
+  const metaResp = await fetch(`${SUPERHUMAN_BACKEND}/v3/userdata.writeMessage`, {
     method: "POST",
     headers: {
       "Content-Type": "text/plain;charset=UTF-8",
@@ -596,6 +607,16 @@ export async function uploadAttachmentSuperhuman(
     },
     body: JSON.stringify(metadataBody),
   });
+
+  if (!metaResp.ok) {
+    const metaText = await metaResp.text();
+    throw new Error(`Attachment metadata write failed (${metaResp.status}): ${metaText}`);
+  }
+
+  if (process.env.SH_DEBUG) {
+    const metaText = await metaResp.clone().text();
+    console.error(`DEBUG attachment metadata response: ${metaResp.status} ${metaText}`);
+  }
 
   return {
     uuid,
