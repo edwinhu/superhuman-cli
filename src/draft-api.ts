@@ -565,11 +565,37 @@ export async function uploadAttachmentSuperhuman(
 
   const data = await response.json();
 
-  // Note: We skip writing attachment metadata to userdata.writeMessage here.
-  // The upload endpoint registers the attachment server-side, and we reference
-  // it in the outgoing_message.attachments[] when sending. The metadata write
-  // is only needed for the draft to show attachments in the Superhuman UI,
-  // but for CLI-created drafts this is optional.
+  // Write attachment metadata so the draft shows the attachment in Superhuman UI
+  const metadataBody = {
+    writes: [
+      {
+        path: `users/${userInfo.userId}/threads/${threadId}/messages/${draftId}/attachments/${uuid}`,
+        value: {
+          uuid,
+          cid: uuid,
+          name: filename,
+          type: mimeType,
+          inline: false,
+          source: {
+            type: "upload",
+            thread_id: threadId,
+            message_id: draftId,
+            uuid,
+            download_url: data.downloadUrl,
+          },
+        },
+      },
+    ],
+  };
+
+  await fetch(`${SUPERHUMAN_BACKEND}/v3/userdata.writeMessage`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "text/plain;charset=UTF-8",
+      Authorization: `Bearer ${userInfo.token}`,
+    },
+    body: JSON.stringify(metadataBody),
+  });
 
   return {
     uuid,

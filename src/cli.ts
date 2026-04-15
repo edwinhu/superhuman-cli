@@ -1975,12 +1975,14 @@ async function cmdReply(options: CliOptions) {
       });
 
       // Attach files if any
+      const uploadedAttachments: SuperhumanAttachment[] = [];
       if (hasAttachments) {
         for (const filePath of options.attachFiles!) {
           const fileData = await readFileAsBase64(filePath);
           info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
           try {
-            await uploadAttachmentSuperhuman(userInfo, result.draftId!, result.threadId!, fileData.filename, fileData.mimeType, fileData.base64Data);
+            const att = await uploadAttachmentSuperhuman(userInfo, result.draftId!, result.threadId!, fileData.filename, fileData.mimeType, fileData.base64Data);
+            uploadedAttachments.push(att);
           } catch (e: any) {
             error(`Failed to attach ${fileData.filename}: ${e.message}`);
             process.exit(1);
@@ -1998,6 +2000,7 @@ async function cmdReply(options: CliOptions) {
           htmlBody,
           inReplyTo: threadInfo.messageId || undefined,
           references: threadInfo.references,
+          attachments: uploadedAttachments.length > 0 ? uploadedAttachments : undefined,
         });
         if (sent.success) {
           deleteDraftMeta(result.draftId!);
@@ -2111,12 +2114,14 @@ async function cmdReplyAll(options: CliOptions) {
       });
 
       // Attach files if any
+      const uploadedAttachments: SuperhumanAttachment[] = [];
       if (hasAttachments) {
         for (const filePath of options.attachFiles!) {
           const fileData = await readFileAsBase64(filePath);
           info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
           try {
-            await uploadAttachmentSuperhuman(userInfo, result.draftId!, result.threadId!, fileData.filename, fileData.mimeType, fileData.base64Data);
+            const att = await uploadAttachmentSuperhuman(userInfo, result.draftId!, result.threadId!, fileData.filename, fileData.mimeType, fileData.base64Data);
+            uploadedAttachments.push(att);
           } catch (e: any) {
             error(`Failed to attach ${fileData.filename}: ${e.message}`);
             process.exit(1);
@@ -2135,6 +2140,7 @@ async function cmdReplyAll(options: CliOptions) {
           htmlBody,
           inReplyTo: threadInfo.messageId || undefined,
           references: threadInfo.references,
+          attachments: uploadedAttachments.length > 0 ? uploadedAttachments : undefined,
         });
         if (sent.success) {
           deleteDraftMeta(result.draftId!);
@@ -2254,12 +2260,14 @@ async function cmdForward(options: CliOptions) {
       });
 
       // Attach files if any
+      const uploadedAttachments: SuperhumanAttachment[] = [];
       if (hasAttachments) {
         for (const filePath of options.attachFiles!) {
           const fileData = await readFileAsBase64(filePath);
           info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
           try {
-            await uploadAttachmentSuperhuman(userInfo, result.draftId!, result.threadId!, fileData.filename, fileData.mimeType, fileData.base64Data);
+            const att = await uploadAttachmentSuperhuman(userInfo, result.draftId!, result.threadId!, fileData.filename, fileData.mimeType, fileData.base64Data);
+            uploadedAttachments.push(att);
           } catch (e: any) {
             error(`Failed to attach ${fileData.filename}: ${e.message}`);
             process.exit(1);
@@ -2277,6 +2285,7 @@ async function cmdForward(options: CliOptions) {
           to: toRecipients,
           subject,
           htmlBody,
+          attachments: uploadedAttachments.length > 0 ? uploadedAttachments : undefined,
         });
         if (sent.success) {
           deleteDraftMeta(result.draftId!);
