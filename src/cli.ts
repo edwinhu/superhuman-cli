@@ -1104,8 +1104,10 @@ async function cmdDraft(options: CliOptions) {
       // Use HTML body if provided, otherwise convert plain text to HTML (if body provided)
       const bodyContent = options.html || (options.body ? textToHtml(options.body) : undefined);
 
+      const hasAttachments = options.attachFiles && options.attachFiles.length > 0;
+
       info(`Updating native draft ${draftId}...`);
-      const success = await updateDraftWithUserInfo(userInfo, draft.threadId, draftId, {
+      const updateOk = await updateDraftWithUserInfo(userInfo, draft.threadId, draftId, {
         to: options.to.length > 0 ? options.to : undefined,
         cc: options.cc.length > 0 ? options.cc : undefined,
         bcc: options.bcc.length > 0 ? options.bcc : undefined,
@@ -1113,8 +1115,21 @@ async function cmdDraft(options: CliOptions) {
         body: bodyContent,
       });
 
-      if (success) {
-        log(`${colors.green}✓${colors.reset} Draft updated!`);
+      if (updateOk) {
+        if (hasAttachments) {
+          for (const filePath of options.attachFiles!) {
+            const fileData = await readFileAsBase64(filePath);
+            info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
+            try {
+              await uploadAttachmentSuperhuman(userInfo, draftId, draft.threadId, fileData.filename, fileData.mimeType, fileData.base64Data);
+            } catch (e: any) {
+              error(`Failed to attach ${fileData.filename}: ${e.message}`);
+              process.exit(1);
+            }
+          }
+        }
+        const attachLabel = hasAttachments ? ` with ${options.attachFiles!.length} attachment(s)` : "";
+        log(`${colors.green}✓${colors.reset} Draft updated${attachLabel}!`);
         log(`  ${colors.dim}Draft ID: ${draftId}${colors.reset}`);
         log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
       }
@@ -1162,6 +1177,7 @@ async function cmdDraft(options: CliOptions) {
   if (options.provider === "superhuman") {
     const token = await resolveToken(options.account);
     if (token) {
+      const hasAttachments = options.attachFiles && options.attachFiles.length > 0;
       info("Creating draft via Superhuman API...");
 
       const userInfo = getUserInfoFromCache(
@@ -1183,7 +1199,20 @@ async function cmdDraft(options: CliOptions) {
       });
 
       if (result.success) {
-        success("Draft created in Superhuman!");
+        if (hasAttachments) {
+          for (const filePath of options.attachFiles!) {
+            const fileData = await readFileAsBase64(filePath);
+            info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
+            try {
+              await uploadAttachmentSuperhuman(userInfo, result.draftId!, result.threadId!, fileData.filename, fileData.mimeType, fileData.base64Data);
+            } catch (e: any) {
+              error(`Failed to attach ${fileData.filename}: ${e.message}`);
+              process.exit(1);
+            }
+          }
+        }
+        const attachLabel = hasAttachments ? ` with ${options.attachFiles!.length} attachment(s)` : "";
+        success(`Draft created${attachLabel} in Superhuman!`);
         log(`  ${colors.dim}Draft ID: ${result.draftId}${colors.reset}`);
         log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
         log(`  ${colors.dim}Syncs to all devices automatically${colors.reset}`);
@@ -1208,6 +1237,7 @@ async function cmdDraft(options: CliOptions) {
     // Try native Superhuman API via provider token (produces draft00... IDs)
     const token = await provider.getToken();
     if (token?.idToken && token?.userId) {
+      const hasAttachments = options.attachFiles && options.attachFiles.length > 0;
       info("Creating draft via Superhuman API...");
       const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken, undefined, token.userExternalId, token.deviceId);
       const result = await createDraftWithUserInfo(userInfo, {
@@ -1219,7 +1249,20 @@ async function cmdDraft(options: CliOptions) {
       });
 
       if (result.success) {
-        success("Draft created in Superhuman!");
+        if (hasAttachments) {
+          for (const filePath of options.attachFiles!) {
+            const fileData = await readFileAsBase64(filePath);
+            info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
+            try {
+              await uploadAttachmentSuperhuman(userInfo, result.draftId!, result.threadId!, fileData.filename, fileData.mimeType, fileData.base64Data);
+            } catch (e: any) {
+              error(`Failed to attach ${fileData.filename}: ${e.message}`);
+              process.exit(1);
+            }
+          }
+        }
+        const attachLabel = hasAttachments ? ` with ${options.attachFiles!.length} attachment(s)` : "";
+        success(`Draft created${attachLabel} in Superhuman!`);
         log(`  ${colors.dim}Draft ID: ${result.draftId}${colors.reset}`);
         log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
         log(`  ${colors.dim}Syncs to all devices automatically${colors.reset}`);

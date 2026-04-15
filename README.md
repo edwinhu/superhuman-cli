@@ -128,6 +128,7 @@ Recipients can be specified as email addresses or contact names. Names are autom
 # Create a draft (using email or name)
 superhuman draft create --to user@example.com --subject "Hello" --body "Hi there!"
 superhuman draft create --to "john" --subject "Hello" --body "Hi there!"
+superhuman draft create --to user@example.com --subject "Report" --body "See attached" --attach ./report.pdf
 
 # List drafts
 superhuman draft list
@@ -151,6 +152,7 @@ superhuman forward <thread-id> --to colleague@example.com --body "FYI"
 
 # Update a draft
 superhuman draft update <draft-id> --body "Updated content"
+superhuman draft update <draft-id> --attach ./document.pdf
 
 # Delete drafts
 superhuman draft delete <draft-id>
