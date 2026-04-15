@@ -1,0 +1,44 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - os: macos-latest
+            target: darwin-arm64
+          - os: ubuntu-latest
+            target: linux-x64
+          - os: windows-latest
+            target: windows-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - run: bun install
+      - name: Build
+        run: bun build src/cli.ts --compile --outfile superhuman-${{ matrix.target }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: superhuman-${{ matrix.target }}
+          path: superhuman-${{ matrix.target }}*
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - run: ls -la superhuman-*
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: superhuman-*
+          generate_release_notes: true
