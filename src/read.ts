@@ -255,6 +255,33 @@ async function readThreadSQLite(
  *
  * Queries: GET /me/messages?$filter=conversationId eq '{threadId}'&$select=...
  */
+function msGraphMsgToThreadMessage(msg: any, fallbackThreadId: string): ThreadMessage {
+  const from = msg.from?.emailAddress;
+  const toList = (msg.toRecipients || []).map((r: any) => ({
+    email: r.emailAddress?.address || "",
+    name: r.emailAddress?.name || "",
+  }));
+  const ccList = (msg.ccRecipients || []).map((r: any) => ({
+    email: r.emailAddress?.address || "",
+    name: r.emailAddress?.name || "",
+  }));
+
+  return {
+    id: msg.id || "",
+    threadId: msg.conversationId || fallbackThreadId,
+    subject: msg.subject || "",
+    from: {
+      email: from?.address || "",
+      name: from?.name || "",
+    },
+    to: toList,
+    cc: ccList,
+    date: msg.receivedDateTime || "",
+    snippet: msg.bodyPreview || "",
+    body: msg.body?.content || undefined,
+  };
+}
+
 async function readThreadMsGraph(
   threadId: string,
   accessToken: string
@@ -271,55 +298,88 @@ async function readThreadMsGraph(
     "conversationId",
   ].join(",");
 
-  const url =
-    `https://graph.microsoft.com/v1.0/me/messages` +
-    `?$filter=conversationId+eq+'${encodeURIComponent(threadId)}'` +
-    `&$select=${select}` +
-    `&$top=50`;
-
   try {
-    const resp = await fetch(url, {
+    // Primary path: threadId is a message ID (what inbox returns). Direct
+    // lookup is O(1) and avoids the InefficientFilter 400 that
+    // $filter=conversationId causes on /me/messages for many Exchange tenants.
+    const directUrl = `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(threadId)}?$select=${select}`;
+    const directResp = await fetch(directUrl, {
       headers: { Authorization: `Bearer ${accessToken}` },
     });
-    if (!resp.ok) return [];
+    if (directResp.ok) {
+      const msg = await directResp.json() as any;
+      const convId = msg.conversationId;
 
-    const data = await resp.json() as { value?: any[] };
-    const items: any[] = data.value || [];
+      // We found one message — now fetch the rest of the conversation so
+      // `read` shows the full thread, not just one message.
+      if (convId) {
+        const folders = ["Inbox", "SentItems", "Archive", "DeletedItems"];
+        const filterParam = `conversationId eq '${convId}'`;
+        const queryParams = `?$filter=${encodeURIComponent(filterParam)}&$select=${select}&$orderby=receivedDateTime+asc&$top=50`;
+
+        let items: any[] = [];
+        for (const folder of folders) {
+          const url = `https://graph.microsoft.com/v1.0/me/mailFolders/${folder}/messages${queryParams}`;
+          const resp = await fetch(url, {
+            headers: { Authorization: `Bearer ${accessToken}` },
+          });
+          if (!resp.ok) continue;
+          const data = await resp.json() as { value?: any[] };
+          items = items.concat(data.value || []);
+        }
+
+        if (items.length > 0) {
+          // Deduplicate by message id
+          const seen = new Set<string>();
+          items = items.filter((m) => {
+            if (seen.has(m.id)) return false;
+            seen.add(m.id);
+            return true;
+          });
+          items.sort(
+            (a, b) =>
+              new Date(a.receivedDateTime || 0).getTime() -
+              new Date(b.receivedDateTime || 0).getTime()
+          );
+          return items.map((m) => msGraphMsgToThreadMessage(m, threadId));
+        }
+      }
+
+      // Couldn't expand the conversation — return the single message
+      return [msGraphMsgToThreadMessage(msg, threadId)];
+    }
+
+    // Fallback: threadId might be a conversationId. Query at folder level
+    // (NOT /me/messages which returns InefficientFilter 400 on Exchange).
+    const folders = ["Inbox", "SentItems", "Archive", "DeletedItems"];
+    const filterParam = `conversationId eq '${threadId}'`;
+    const queryParams = `?$filter=${encodeURIComponent(filterParam)}&$select=${select}&$orderby=receivedDateTime+asc&$top=50`;
+
+    let items: any[] = [];
+    for (const folder of folders) {
+      const url = `https://graph.microsoft.com/v1.0/me/mailFolders/${folder}/messages${queryParams}`;
+      const resp = await fetch(url, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      });
+      if (!resp.ok) continue;
+      const data = await resp.json() as { value?: any[] };
+      items = items.concat(data.value || []);
+    }
     if (items.length === 0) return [];
 
-    // Sort by receivedDateTime ascending (oldest first)
+    // Deduplicate and sort
+    const seen = new Set<string>();
+    items = items.filter((m) => {
+      if (seen.has(m.id)) return false;
+      seen.add(m.id);
+      return true;
+    });
     items.sort(
       (a, b) =>
         new Date(a.receivedDateTime || 0).getTime() -
         new Date(b.receivedDateTime || 0).getTime()
     );
-
-    return items.map((msg): ThreadMessage => {
-      const from = msg.from?.emailAddress;
-      const toList = (msg.toRecipients || []).map((r: any) => ({
-        email: r.emailAddress?.address || "",
-        name: r.emailAddress?.name || "",
-      }));
-      const ccList = (msg.ccRecipients || []).map((r: any) => ({
-        email: r.emailAddress?.address || "",
-        name: r.emailAddress?.name || "",
-      }));
-
-      return {
-        id: msg.id || "",
-        threadId: msg.conversationId || threadId,
-        subject: msg.subject || "",
-        from: {
-          email: from?.address || "",
-          name: from?.name || "",
-        },
-        to: toList,
-        cc: ccList,
-        date: msg.receivedDateTime || "",
-        snippet: msg.bodyPreview || "",
-        body: msg.body?.content || undefined,
-      };
-    });
+    return items.map((m) => msGraphMsgToThreadMessage(m, threadId));
   } catch {
     return [];
   }

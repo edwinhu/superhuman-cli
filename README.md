@@ -361,6 +361,44 @@ Chrome DevTools Protocol is used for:
 - **No external dependencies**: No MCP server, minimal provider API use (attachment download only)
 - **Multi-account**: Works with both Gmail and Microsoft/Outlook accounts
 
+## Superhuman's Official MCP Server
+
+Superhuman ships an official MCP server ([`@superhuman/mcp-mail`](https://github.com/superhuman/mcp-mail)) at `mcp.mail.superhuman.com`. It's a remote MCP (HTTP transport via `mcp-remote`) — no local binary needed.
+
+### Official MCP Tools (v1.0.2, March 2026)
+
+| Tool | Description |
+|------|-------------|
+| `list_threads` | Search threads with structured filters (from, to, subject, labels, date) |
+| `query_email_and_calendar` | Natural language / semantic search over email and calendar |
+| `create_or_update_draft` | Create or edit a draft using your voice and tone |
+| `send_draft` | Send email (Smart Send, Scheduled Send, Undo Send) |
+| `create_or_update_event` | Create and update calendar events |
+| `update_preferences_email_and_calendar` | Update writing style, event preferences, drafting facts |
+
+### What This CLI Adds
+
+| Capability | Official MCP | This CLI |
+|------------|:---:|:---:|
+| Search (keyword FTS + AI) | ✓ | ✓ |
+| Read full thread content | — | ✓ |
+| Reply / Reply-all / Forward | — | ✓ |
+| Archive / Delete / Trash | — | ✓ |
+| Mark read / unread | — | ✓ |
+| Star / Unstar | — | ✓ |
+| Snooze / Unsnooze | — | ✓ |
+| Labels (list, add, remove) | — | ✓ |
+| Attachments (upload, list, download) | — | ✓ |
+| Snippets (list, use, send) | — | ✓ |
+| Drafts (create, list, update, delete, send) | partial | ✓ |
+| Calendar (list, create, update, delete, free/busy) | partial | ✓ |
+| AI compose / Ask AI | — | ✓ |
+| Contact search | — | ✓ |
+| Multi-account switching | — | ✓ |
+| Headless / container mode | — | ✓ |
+
+The official MCP is worth tracking — if Superhuman adds read, reply, and thread management, it could replace the backend API layer here. Monitor progress at [superhuman/mcp-mail](https://github.com/superhuman/mcp-mail).
+
 ## License
 
 MIT

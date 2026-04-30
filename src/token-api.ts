@@ -1026,12 +1026,15 @@ export async function getThreadInfoSuperhuman(
   }
 
   try {
+    // The backend does NOT support `threadIds` filter — it returns empty
+    // results. Use an empty filter and match client-side, same approach as
+    // readThreadBackend() in read.ts.
     const result = await superhumanFetch(authToken, "/v3/userdata.getThreads", {
       method: "POST",
       body: JSON.stringify({
-        filter: { threadIds: [threadId] },
+        filter: {},
         offset: 0,
-        limit: 1,
+        limit: 50,
       }),
     });
 
@@ -1039,7 +1042,28 @@ export async function getThreadInfoSuperhuman(
       return null;
     }
 
-    const threadData = result.threadList[0];
+    // Find the thread containing a message that matches the given ID
+    let threadData: any = null;
+    for (const item of result.threadList) {
+      const thread = item?.thread;
+      if (!thread?.messages) continue;
+      const msgs = Object.values(thread.messages) as any[];
+      const match = msgs.some(
+        (m: any) =>
+          m.threadId === threadId ||
+          m.id === threadId ||
+          (m.id && threadId.includes(m.id))
+      );
+      if (match) {
+        threadData = item;
+        break;
+      }
+    }
+
+    if (!threadData) {
+      return null;
+    }
+
     const messages = threadData.thread?.messages || {};
     const messageEntries = Object.values(messages) as any[];
 
