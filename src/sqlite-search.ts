@@ -156,9 +156,19 @@ export function lookupThreadInfoById(
   try {
     const db = new Database(tmpPath, { readonly: true });
     try {
-      const row = db.query<{ json: string }>(
+      // 1. Exact match on thread_id (conversation ID)
+      let row = db.query<{ json: string }>(
         "SELECT json FROM threads WHERE thread_id = ?"
       ).get(threadId);
+
+      // 2. Fallback: search by message ID inside the JSON blob.
+      // Inbox returns message-level IDs (O365 Item IDs) which differ from
+      // the thread_id (O365 Conversation ID) stored as the primary key.
+      if (!row) {
+        row = db.query<{ json: string }>(
+          "SELECT t.json FROM threads t WHERE t.json LIKE ? LIMIT 1"
+        ).get(`%"id":"${threadId}"%`);
+      }
 
       if (!row) return null;
 
