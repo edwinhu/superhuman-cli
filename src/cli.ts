@@ -69,6 +69,17 @@ import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 const VERSION = "0.28.1";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9250", 10);
 
+/**
+ * Build UserInfo from a resolved token. Handles O365 accounts where
+ * `idToken` is undefined — falls back to `superhumanToken.token` or
+ * `accessToken`. Also falls back to the account email from CLI args.
+ */
+function buildUserInfo(token: any, accountEmail?: string): UserInfo {
+  const authToken = token.superhumanToken?.token || token.idToken || token.accessToken;
+  const email = token.email || accountEmail || "";
+  return getUserInfoFromCache(token.userId, email, authToken, undefined, token.userExternalId, token.deviceId);
+}
+
 // ANSI colors
 const colors = {
   reset: "\x1b[0m",
@@ -919,10 +930,11 @@ async function resolveBackendUserInfo(
   options: CliOptions
 ): Promise<{ userInfo: UserInfo; email: string }> {
   const token = await resolveToken(options.account);
-  if (token?.idToken && token?.userId) {
+  const hasToken = token?.userId && (token?.superhumanToken?.token || token?.idToken || token?.accessToken);
+  if (hasToken) {
     return {
-      userInfo: getUserInfoFromCache(token.userId, token.email, token.idToken, undefined, token.userExternalId, token.deviceId),
-      email: token.email,
+      userInfo: buildUserInfo(token, options?.account),
+      email: token.email || options.account || "",
     };
   }
   error("Could not resolve Superhuman credentials");
@@ -1088,7 +1100,7 @@ async function cmdDraft(options: CliOptions) {
         process.exit(1);
       }
 
-      const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken, undefined, token.userExternalId, token.deviceId);
+      const userInfo = buildUserInfo(token, options?.account);
 
       // Use DraftService to get draft details for threadId
       const nativeProvider = new SuperhumanDraftProvider(token);
@@ -1236,10 +1248,10 @@ async function cmdDraft(options: CliOptions) {
   if (options.provider === "superhuman") {
     // Try native Superhuman API via provider token (produces draft00... IDs)
     const token = await provider.getToken();
-    if (token?.idToken && token?.userId) {
+    if (token?.userId && (token?.superhumanToken?.token || token?.idToken || token?.accessToken)) {
       const hasAttachments = options.attachFiles && options.attachFiles.length > 0;
       info("Creating draft via Superhuman API...");
-      const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken, undefined, token.userExternalId, token.deviceId);
+      const userInfo = buildUserInfo(token, options?.account);
       const result = await createDraftWithUserInfo(userInfo, {
         to: resolvedTo,
         cc: resolvedCc,
@@ -1327,7 +1339,7 @@ async function cmdDeleteDraft(options: CliOptions) {
       process.exit(1);
     }
 
-    const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken, undefined, token.userExternalId, token.deviceId);
+    const userInfo = buildUserInfo(token, options?.account);
 
     // Use DraftService to get draft details for threadId
     const nativeProvider = new SuperhumanDraftProvider(token);
@@ -1410,13 +1422,13 @@ async function cmdSendDraft(options: CliOptions) {
   }
 
   const token = await resolveToken(options.account);
-  if (!token?.idToken || !token?.userId) {
+  if (!token?.userId || !(token?.superhumanToken?.token || token?.idToken || token?.accessToken)) {
     error("Could not resolve Superhuman credentials");
     process.exit(1);
   }
 
   // Build userInfo
-  const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken, undefined, token.userExternalId, token.deviceId);
+  const userInfo = buildUserInfo(token, options?.account);
 
   // Build recipients
   const toRecipients: Recipient[] = resolvedTo.map((email) => ({ email }));
@@ -1938,7 +1950,7 @@ async function cmdReply(options: CliOptions) {
       // created on the correct conversation thread for proper sync.
       const canonicalThreadId = (threadInfo as any).canonicalThreadId || options.threadId;
 
-      const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken, undefined, token.userExternalId, token.deviceId);
+      const userInfo = buildUserInfo(token, options?.account);
       const subject = threadInfo.subject.startsWith("Re:") ? threadInfo.subject : `Re: ${threadInfo.subject}`;
       const htmlBody = textToHtml(body);
       const parseAddr = (s: string) => {
@@ -2084,7 +2096,7 @@ async function cmdReplyAll(options: CliOptions) {
       ].filter(email => email && email.toLowerCase() !== token.email.toLowerCase());
       const uniqueRecipients = [...new Set(allRecipients.map(e => e.toLowerCase()))];
 
-      const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken, undefined, token.userExternalId, token.deviceId);
+      const userInfo = buildUserInfo(token, options?.account);
       const htmlBody = textToHtml(body);
 
       if (options.send) {
@@ -2222,7 +2234,7 @@ async function cmdForward(options: CliOptions) {
         ? threadInfo.subject
         : `Fwd: ${threadInfo.subject}`;
 
-      const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken, undefined, token.userExternalId, token.deviceId);
+      const userInfo = buildUserInfo(token, options?.account);
 
       // Fetch original message body to include in the forward
       let originalHtml = "";
