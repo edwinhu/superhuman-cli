@@ -643,7 +643,10 @@ export async function sendDraftSuperhuman(
 ): Promise<SendDraftResult> {
   try {
     const rfc822Id = generateRfc822Id();
-    const superhumanId = crypto.randomUUID();
+    // Superhuman ID format: timestamp-base36 + "." + UUID
+    // The backend validates this format and rejects plain UUIDs.
+    const tsBase36 = Math.min(Math.max(Date.now(), 36 ** 7), 36 ** 8 - 1).toString(36);
+    const superhumanId = `${tsBase36}.${crypto.randomUUID()}`;
 
     // Build headers matching Superhuman's toJsonRequest() exactly
     const xMailer = "Superhuman Web (2026-04-03T19:06:01Z)";
