@@ -1430,12 +1430,16 @@ async function cmdSendDraft(options: CliOptions) {
   // Build userInfo
   const userInfo = buildUserInfo(token, options?.account);
 
-  // Build recipients
-  const toRecipients: Recipient[] = resolvedTo.map((email) => ({ email }));
+  // Build recipients — parse "Name <email>" format into {email, name} objects
+  const parseRecipient = (s: string): Recipient => {
+    const m = s.match(/^(.+?)\s*<(.+?)>$/);
+    return m ? { name: m[1].trim(), email: m[2].trim() } : { email: s };
+  };
+  const toRecipients: Recipient[] = resolvedTo.map(parseRecipient);
   const ccRecipients: Recipient[] | undefined =
-    options.cc.length > 0 ? options.cc.map((email) => ({ email })) : undefined;
+    options.cc.length > 0 ? options.cc.map(parseRecipient) : undefined;
   const bccRecipients: Recipient[] | undefined =
-    options.bcc.length > 0 ? options.bcc.map((email) => ({ email })) : undefined;
+    options.bcc.length > 0 ? options.bcc.map(parseRecipient) : undefined;
 
   if (cachedMeta) {
     info(`Sending draft ${draftId.slice(-15)} to ${resolvedTo.join(", ")}...`);
