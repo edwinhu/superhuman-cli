@@ -136,6 +136,9 @@ export interface SQLiteThreadInfo {
   gmailMessageId: string | null;
   /** ISO date string of the latest message */
   date: string | null;
+  /** The canonical thread_id from SQLite (O365 Conversation ID). Use this for
+   *  inReplyToThreadId — it may differ from the inbox ID the user passed in. */
+  canonicalThreadId: string | null;
 }
 
 /**
@@ -157,16 +160,16 @@ export function lookupThreadInfoById(
     const db = new Database(tmpPath, { readonly: true });
     try {
       // 1. Exact match on thread_id (conversation ID)
-      let row = db.query<{ json: string }>(
-        "SELECT json FROM threads WHERE thread_id = ?"
+      let row = db.query<{ thread_id: string; json: string }>(
+        "SELECT thread_id, json FROM threads WHERE thread_id = ?"
       ).get(threadId);
 
       // 2. Fallback: search by message ID inside the JSON blob.
       // Inbox returns message-level IDs (O365 Item IDs) which differ from
       // the thread_id (O365 Conversation ID) stored as the primary key.
       if (!row) {
-        row = db.query<{ json: string }>(
-          "SELECT t.json FROM threads t WHERE t.json LIKE ? LIMIT 1"
+        row = db.query<{ thread_id: string; json: string }>(
+          "SELECT t.thread_id, t.json FROM threads t WHERE t.json LIKE ? LIMIT 1"
         ).get(`%"id":"${threadId}"%`);
       }
 
@@ -214,6 +217,7 @@ export function lookupThreadInfoById(
         references: Array.isArray(latest.references) ? latest.references : [],
         gmailMessageId: latest.id || null,
         date: latest.date || null,
+        canonicalThreadId: row.thread_id,
       };
     } finally {
       db.close();
@@ -428,6 +432,9 @@ export function readThreadFromDB(
         ? Object.values(rawMessages)
         : [];
       json.messages = messages;
+      // Attach the canonical thread_id from the DB row so callers can use the
+      // correct conversation ID (may differ from the message-level ID passed in).
+      json._canonicalThreadId = row.thread_id;
 
       return json;
     } finally {

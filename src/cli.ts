@@ -1933,6 +1933,11 @@ async function cmdReply(options: CliOptions) {
         process.exit(1);
       }
 
+      // Use the canonical thread ID from SQLite (O365 Conversation ID) rather
+      // than the user-provided inbox ID (O365 Item ID). The draft must be
+      // created on the correct conversation thread for proper sync.
+      const canonicalThreadId = (threadInfo as any).canonicalThreadId || options.threadId;
+
       const userInfo = getUserInfoFromCache(token.userId, token.email, token.idToken, undefined, token.userExternalId, token.deviceId);
       const subject = threadInfo.subject.startsWith("Re:") ? threadInfo.subject : `Re: ${threadInfo.subject}`;
       const htmlBody = textToHtml(body);
@@ -1952,7 +1957,7 @@ async function cmdReply(options: CliOptions) {
         subject,
         body: htmlBody,
         action: "reply",
-        inReplyToThreadId: options.threadId,
+        inReplyToThreadId: canonicalThreadId,
         inReplyToRfc822Id: threadInfo.messageId || undefined,
         references: threadInfo.references,
       });

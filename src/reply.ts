@@ -83,17 +83,17 @@ async function replyImpl(
 function fetchThreadReplyMeta(
   accountEmail: string,
   threadId: string
-): { messageId: string | null; references: string[] } {
+): { messageId: string | null; references: string[]; canonicalThreadId: string | null } {
   try {
     const threadJson = _testHooks.getThreadData(accountEmail, threadId);
-    if (!threadJson) return { messageId: null, references: [] };
+    if (!threadJson) return { messageId: null, references: [], canonicalThreadId: null };
 
     const messages: any[] = Array.isArray(threadJson.messages)
       ? threadJson.messages
       : typeof threadJson.messages === "object" && threadJson.messages !== null
       ? Object.values(threadJson.messages as Record<string, unknown>)
       : [];
-    if (messages.length === 0) return { messageId: null, references: [] };
+    if (messages.length === 0) return { messageId: null, references: [], canonicalThreadId: null };
 
     // Sort ascending by date to get the last (most recent) message
     messages.sort((a, b) => new Date(a.date ?? 0).getTime() - new Date(b.date ?? 0).getTime());
@@ -101,9 +101,10 @@ function fetchThreadReplyMeta(
     return {
       messageId: last.rfc822Id || last.messageId || null,
       references: Array.isArray(last.references) ? last.references : [],
+      canonicalThreadId: (threadJson as any)._canonicalThreadId || null,
     };
   } catch {
-    return { messageId: null, references: [] };
+    return { messageId: null, references: [], canonicalThreadId: null };
   }
 }
 
@@ -129,10 +130,14 @@ async function replyViaSuperhuman(
   // Fetch original thread's last message ID and references for threading headers.
   // Without these, the sent email has no In-Reply-To / References headers and
   // mail clients create a new thread instead of threading with the original.
-  const { messageId: inReplyTo, references } = fetchThreadReplyMeta(
+  const { messageId: inReplyTo, references, canonicalThreadId } = fetchThreadReplyMeta(
     email,
     threadId
   );
+
+  // Use the canonical thread ID from SQLite (O365 Conversation ID) rather
+  // than the user-provided inbox ID (O365 Item ID).
+  const resolvedThreadId = canonicalThreadId || threadId;
 
   const htmlBody = textToHtml(body);
 
@@ -140,7 +145,7 @@ async function replyViaSuperhuman(
   const draftResult = await createDraftWithUserInfo(userInfo, {
     body: htmlBody,
     action: "reply",
-    inReplyToThreadId: threadId,
+    inReplyToThreadId: resolvedThreadId,
     inReplyToRfc822Id: inReplyTo || undefined,
     references,
   });
