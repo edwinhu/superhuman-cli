@@ -7,14 +7,14 @@
  * clients start a new thread instead of threading with the original.
  *
  * Fix: Fetch the original thread's last message RFC822 ID and references chain
- * before creating the draft, and pass them through to both `createDraftWithUserInfo`
- * and `sendDraftSuperhuman`.
+ * from local SQLite before creating the draft, and pass them through to both
+ * `createDraftWithUserInfo` and `sendDraftSuperhuman`.
  */
 
 import { test, expect, describe, beforeEach, afterEach } from "bun:test";
 import { SuperhumanProvider } from "../superhuman-provider";
 import type { SuperhumanTokenInfo } from "../superhuman-provider";
-import { replyToThread, replyAllToThread } from "../reply";
+import { replyToThread, replyAllToThread, _testHooks } from "../reply";
 
 const sampleToken: SuperhumanTokenInfo = {
   token: "test-jwt-token",
@@ -29,17 +29,41 @@ const ORIGINAL_REFERENCES = [
   "<second-msg@mail.example.com>",
 ];
 
+/** SQLite thread data matching what readThreadFromDB returns. */
+function makeSQLiteThread() {
+  return {
+    messages: [
+      {
+        id: "msg1",
+        subject: "Original Subject",
+        from: "sender@example.com",
+        to: ["user@example.com"],
+        rfc822Id: ORIGINAL_MESSAGE_ID,
+        messageId: ORIGINAL_MESSAGE_ID,
+        references: ORIGINAL_REFERENCES,
+        date: "2026-03-20T12:00:00Z",
+        snippet: "Original message content",
+      },
+    ],
+  };
+}
+
 describe("reply threading headers (regression: replies must thread with original)", () => {
   let originalFetch: typeof globalThis.fetch;
+  let originalGetThreadData: typeof _testHooks.getThreadData;
   let capturedSendBodies: any[];
 
   beforeEach(() => {
     originalFetch = globalThis.fetch;
+    originalGetThreadData = _testHooks.getThreadData;
     capturedSendBodies = [];
+    // Override the thread data fetcher to return mock data (no mock.module needed)
+    _testHooks.getThreadData = () => makeSQLiteThread();
   });
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    _testHooks.getThreadData = originalGetThreadData;
   });
 
   function setupMockFetch() {
@@ -50,34 +74,6 @@ describe("reply threading headers (regression: replies must thread with original
           : url instanceof URL
           ? url.toString()
           : (url as Request).url;
-
-      // Thread lookup — return a thread with a known messageId and references
-      if (urlStr.includes("userdata.getThreads")) {
-        return new Response(
-          JSON.stringify({
-            threadList: [
-              {
-                thread: {
-                  messages: {
-                    msg1: {
-                      id: "msg1",
-                      subject: "Original Subject",
-                      from: "sender@example.com",
-                      to: ["user@example.com"],
-                      rfc822Id: ORIGINAL_MESSAGE_ID,
-                      messageId: ORIGINAL_MESSAGE_ID,
-                      references: ORIGINAL_REFERENCES,
-                      date: "2026-03-20T12:00:00Z",
-                      snippet: "Original message content",
-                    },
-                  },
-                },
-              },
-            ],
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
-        );
-      }
 
       // Draft write — succeed silently
       if (urlStr.includes("userdata.writeMessage")) {
@@ -182,31 +178,6 @@ describe("reply threading headers (regression: replies must thread with original
           : url instanceof URL
           ? url.toString()
           : (url as Request).url;
-
-      if (urlStr.includes("userdata.getThreads")) {
-        return new Response(
-          JSON.stringify({
-            threadList: [
-              {
-                thread: {
-                  messages: {
-                    msg1: {
-                      id: "msg1",
-                      subject: "Original Subject",
-                      from: "sender@example.com",
-                      rfc822Id: ORIGINAL_MESSAGE_ID,
-                      messageId: ORIGINAL_MESSAGE_ID,
-                      references: ORIGINAL_REFERENCES,
-                      date: "2026-03-20T12:00:00Z",
-                    },
-                  },
-                },
-              },
-            ],
-          }),
-          { status: 200, headers: { "Content-Type": "application/json" } }
-        );
-      }
 
       if (urlStr.includes("userdata.writeMessage")) {
         if (init?.body) {

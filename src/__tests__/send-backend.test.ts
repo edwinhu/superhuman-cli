@@ -12,7 +12,7 @@ import {
   createDraftViaProvider,
   sendDraftByIdViaProvider,
 } from "../send-api";
-import { replyToThread, replyAllToThread, forwardThread } from "../reply";
+import { replyToThread, replyAllToThread, forwardThread, _testHooks } from "../reply";
 
 const sampleToken: SuperhumanTokenInfo = {
   token: "test-jwt-token",
@@ -173,13 +173,31 @@ describe("send-api with SuperhumanProvider", () => {
 
 describe("reply.ts with SuperhumanProvider", () => {
   let originalFetch: typeof globalThis.fetch;
+  let originalGetThreadData: typeof _testHooks.getThreadData;
 
   beforeEach(() => {
     originalFetch = globalThis.fetch;
+    originalGetThreadData = _testHooks.getThreadData;
+    // Override thread data fetcher — reply/forward now use SQLite, not backend API
+    _testHooks.getThreadData = () => ({
+      messages: [
+        {
+          id: "msg1",
+          subject: "Original Subject",
+          from: "sender@example.com",
+          to: ["user@example.com"],
+          date: "2026-03-20T12:00:00Z",
+          snippet: "Original message content",
+          rfc822Id: "<msg1@example.com>",
+          references: [],
+        },
+      ],
+    });
   });
 
   afterEach(() => {
     globalThis.fetch = originalFetch;
+    _testHooks.getThreadData = originalGetThreadData;
   });
 
   function setupMockFetch() {
@@ -293,10 +311,8 @@ describe("reply.ts with SuperhumanProvider", () => {
 
     expect(result.success).toBe(true);
     expect(result.draftId).toBeDefined();
-    // Should read thread via getThreads, then create draft
-    const getCall = calls.find((c) => c.includes("userdata.getThreads"));
+    // Thread data comes from SQLite (mocked above), draft is created via fetch
     const writeCall = calls.find((c) => c.includes("userdata.writeMessage"));
-    expect(getCall).toBeDefined();
     expect(writeCall).toBeDefined();
   });
 

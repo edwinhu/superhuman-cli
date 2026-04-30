@@ -13,6 +13,15 @@ import {
   createDraftWithUserInfo,
   sendDraftSuperhuman,
 } from "./draft-api";
+import { readThreadFromDB } from "./sqlite-search";
+
+/**
+ * Overridable thread data fetcher — tests can swap via `_testHooks.getThreadData`.
+ * Using an object property avoids ES module read-only export issues.
+ */
+export const _testHooks = {
+  getThreadData: readThreadFromDB as (email: string, threadId: string) => Record<string, unknown> | null,
+};
 
 export interface ReplyResult {
   success: boolean;
@@ -67,32 +76,31 @@ async function replyImpl(
 /**
  * Fetch the last message's RFC822 ID and references from a thread.
  * Used to populate In-Reply-To / References threading headers.
+ *
+ * Uses local SQLite (OPFS blob) — the backend `userdata.getThreads` endpoint
+ * does not support `threadIds` filter and silently returns empty results.
  */
-async function fetchThreadReplyMeta(
-  provider: SuperhumanProvider,
+function fetchThreadReplyMeta(
+  accountEmail: string,
   threadId: string
-): Promise<{ messageId: string | null; references: string[] }> {
+): { messageId: string | null; references: string[] } {
   try {
-    const data = await provider.backendFetch("/v3/userdata.getThreads", {
-      method: "POST",
-      body: JSON.stringify({
-        filter: { threadIds: [threadId] },
-        offset: 0,
-        limit: 1,
-      }),
-    });
-    if (!data?.threadList?.[0]?.thread?.messages) {
-      return { messageId: null, references: [] };
-    }
-    const msgs = Object.values(data.threadList[0].thread.messages) as any[];
-    if (msgs.length === 0) return { messageId: null, references: [] };
+    const threadJson = _testHooks.getThreadData(accountEmail, threadId);
+    if (!threadJson) return { messageId: null, references: [] };
+
+    const messages: any[] = Array.isArray(threadJson.messages)
+      ? threadJson.messages
+      : typeof threadJson.messages === "object" && threadJson.messages !== null
+      ? Object.values(threadJson.messages as Record<string, unknown>)
+      : [];
+    if (messages.length === 0) return { messageId: null, references: [] };
+
     // Sort ascending by date to get the last (most recent) message
-    msgs.sort((a: any, b: any) => new Date(a.date ?? 0).getTime() - new Date(b.date ?? 0).getTime());
-    const last = msgs[msgs.length - 1];
-    const msg = last.message || last.draft || last;
+    messages.sort((a, b) => new Date(a.date ?? 0).getTime() - new Date(b.date ?? 0).getTime());
+    const last = messages[messages.length - 1];
     return {
-      messageId: msg.rfc822Id || msg.messageId || null,
-      references: Array.isArray(msg.references) ? msg.references : [],
+      messageId: last.rfc822Id || last.messageId || null,
+      references: Array.isArray(last.references) ? last.references : [],
     };
   } catch {
     return { messageId: null, references: [] };
@@ -121,8 +129,8 @@ async function replyViaSuperhuman(
   // Fetch original thread's last message ID and references for threading headers.
   // Without these, the sent email has no In-Reply-To / References headers and
   // mail clients create a new thread instead of threading with the original.
-  const { messageId: inReplyTo, references } = await fetchThreadReplyMeta(
-    provider,
+  const { messageId: inReplyTo, references } = fetchThreadReplyMeta(
+    email,
     threadId
   );
 
@@ -215,23 +223,19 @@ async function forwardViaSuperhuman(
     email.split("@")[0]
   );
 
-  // Read thread via backend to get subject/snippet for forward header
-  const data = await provider.backendFetch("/v3/userdata.getThreads", {
-    method: "POST",
-    body: JSON.stringify({
-      filter: { threadIds: [threadId] },
-      offset: 0,
-      limit: 1,
-    }),
-  });
-
-  // Extract last message info from the thread
+  // Read thread from local SQLite to get subject/snippet for forward header.
+  // The backend `userdata.getThreads` does not support `threadIds` filter.
   let subject = "(no subject)";
   let snippet = "";
-  if (data?.threadList?.[0]?.thread?.messages) {
-    const msgs = Object.values(data.threadList[0].thread.messages) as any[];
+  const threadJson = readThreadFromDB(email, threadId);
+  if (threadJson) {
+    const msgs: any[] = Array.isArray(threadJson.messages)
+      ? threadJson.messages
+      : typeof threadJson.messages === "object" && threadJson.messages !== null
+      ? Object.values(threadJson.messages as Record<string, unknown>)
+      : [];
     // Sort by date to get the last message
-    msgs.sort((a: any, b: any) => new Date(a.date).getTime() - new Date(b.date).getTime());
+    msgs.sort((a, b) => new Date(a.date ?? 0).getTime() - new Date(b.date ?? 0).getTime());
     const last = msgs[msgs.length - 1];
     if (last) {
       subject = last.subject || "(no subject)";
