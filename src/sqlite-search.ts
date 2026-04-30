@@ -139,6 +139,8 @@ export interface SQLiteThreadInfo {
   /** The canonical thread_id from SQLite (O365 Conversation ID). Use this for
    *  inReplyToThreadId — it may differ from the inbox ID the user passed in. */
   canonicalThreadId: string | null;
+  /** All unique participants across the thread (for reply-to-self fallback) */
+  allParticipants?: string[];
 }
 
 /**
@@ -208,6 +210,16 @@ export function lookupThreadInfoById(
       const ccList = Array.isArray(latest.cc) ? latest.cc.map(formatAddr).filter(Boolean)
         : latest.cc ? [formatAddr(latest.cc)] : [];
 
+      // Collect all unique participants across the thread for reply-to-self fallback
+      const participantSet = new Set<string>();
+      for (const m of messages) {
+        if (m.from) participantSet.add(formatAddr(m.from));
+        const addrs = Array.isArray(m.to) ? m.to : m.to ? [m.to] : [];
+        for (const a of addrs) participantSet.add(formatAddr(a));
+        const ccs = Array.isArray(m.cc) ? m.cc : m.cc ? [m.cc] : [];
+        for (const a of ccs) participantSet.add(formatAddr(a));
+      }
+
       return {
         subject: latest.subject || json.subject || "",
         from: formatAddr(latest.from),
@@ -218,6 +230,7 @@ export function lookupThreadInfoById(
         gmailMessageId: latest.id || null,
         date: latest.date || null,
         canonicalThreadId: row.thread_id,
+        allParticipants: [...participantSet].filter(Boolean),
       };
     } finally {
       db.close();

@@ -1955,12 +1955,37 @@ async function cmdReply(options: CliOptions) {
       const canonicalThreadId = (threadInfo as any).canonicalThreadId || options.threadId;
 
       const userInfo = buildUserInfo(token, options?.account);
+      const accountEmail = (token.email || options.account || "").toLowerCase();
       const subject = threadInfo.subject.startsWith("Re:") ? threadInfo.subject : `Re: ${threadInfo.subject}`;
       const htmlBody = textToHtml(body);
       const parseAddr = (s: string) => {
         const m = s.match(/^(.+?)\s*<(.+?)>$/);
         return m ? { name: m[1].trim(), email: m[2].trim() } : { name: "", email: s };
       };
+
+      // When the last message is from ourselves, reply to the original
+      // recipients instead of to ourselves.
+      const fromEmail = parseAddr(threadInfo.from).email.toLowerCase();
+      let replyTo: string[];
+      if (fromEmail === accountEmail) {
+        // Self-sent: reply to the to/cc recipients, filtering out self
+        const nonSelf = threadInfo.to.filter(
+          (addr) => parseAddr(addr).email.toLowerCase() !== accountEmail
+        );
+        if (nonSelf.length > 0) {
+          replyTo = nonSelf;
+        } else {
+          // All to-recipients are also self (self-reply chain). Use
+          // allParticipants from the full thread to find someone else.
+          const allParts: string[] = (threadInfo as any).allParticipants || [];
+          const external = allParts.filter(
+            (addr) => parseAddr(addr).email.toLowerCase() !== accountEmail
+          );
+          replyTo = external.length > 0 ? external : [threadInfo.from];
+        }
+      } else {
+        replyTo = [threadInfo.from];
+      }
 
       if (options.send) {
         info(`Sending reply${attachLabel} via Superhuman API...`);
@@ -1969,7 +1994,7 @@ async function cmdReply(options: CliOptions) {
       }
 
       const result = await createDraftWithUserInfo(userInfo, {
-        to: [threadInfo.from],
+        to: replyTo,
         subject,
         body: htmlBody,
         action: "reply",
@@ -1987,7 +2012,7 @@ async function cmdReply(options: CliOptions) {
       saveDraftMeta({
         draftId: result.draftId!,
         threadId: result.threadId!,
-        to: [threadInfo.from],
+        to: replyTo,
         subject,
         htmlBody,
         inReplyTo: threadInfo.messageId || undefined,
@@ -2016,7 +2041,7 @@ async function cmdReply(options: CliOptions) {
         const sent = await sendDraftSuperhuman(userInfo, {
           draftId: result.draftId!,
           threadId: result.threadId!,
-          to: [parseAddr(threadInfo.from)],
+          to: replyTo.map(parseAddr),
           subject,
           htmlBody,
           inReplyTo: threadInfo.messageId || undefined,
@@ -2093,13 +2118,15 @@ async function cmdReplyAll(options: CliOptions) {
         : `Re: ${threadInfo.subject}`;
 
       // Build reply-all recipients (all participants except self)
+      const accountEmail = (token.email || options.account || "").toLowerCase();
       const allRecipients = [
         threadInfo.from,
         ...threadInfo.to,
         ...threadInfo.cc,
-      ].filter(email => email && email.toLowerCase() !== token.email.toLowerCase());
+      ].filter(email => email && email.toLowerCase() !== accountEmail);
       const uniqueRecipients = [...new Set(allRecipients.map(e => e.toLowerCase()))];
 
+      const canonicalThreadId = (threadInfo as any).canonicalThreadId || options.threadId;
       const userInfo = buildUserInfo(token, options?.account);
       const htmlBody = textToHtml(body);
 
@@ -2112,7 +2139,7 @@ async function cmdReplyAll(options: CliOptions) {
       const result = await createDraftWithUserInfo(userInfo, {
         to: uniqueRecipients, subject, body: htmlBody,
         action: "reply" as const,
-        inReplyToThreadId: options.threadId,
+        inReplyToThreadId: canonicalThreadId,
         inReplyToRfc822Id: threadInfo.messageId || undefined,
         references: threadInfo.references,
       });
