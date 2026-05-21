@@ -5,13 +5,15 @@
  * Supports both Microsoft/Outlook and Gmail accounts.
  *
  * Uses direct API calls via superhumanFetch (no CDP/browser connection needed).
- * Thread message IDs are resolved via portal RPC.
+ * Thread message IDs are resolved from local SQLite first, then portal RPC
+ * (`threadInternal.listAsync`) as a fallback.
  */
 
 import type { SuperhumanTokenInfo } from "./token-api";
 import { superhumanFetch } from "./token-api";
 import type { ConnectionProvider } from "./connection-provider";
 import { SuperhumanProvider } from "./superhuman-provider";
+import { readThreadFromDB } from "./sqlite-search";
 
 export interface SnoozeResult {
   success: boolean;
@@ -224,12 +226,20 @@ export async function listSnoozedDirect(
 // ============================================================================
 
 /**
- * Get message IDs for a thread using SuperhumanProvider portal RPC.
+ * Resolve a thread's canonical thread ID and the list of message IDs it
+ * contains. Tries local SQLite first (works without a CDP connection), and
+ * falls back to portal RPC `threadInternal.listAsync` (same path as
+ * `superhuman read`). Errors from both paths are surfaced rather than
+ * swallowed so callers can see auth/network/shape failures.
+ *
+ * Note: `threadInternal.getAsync` does NOT exist on the Superhuman portal;
+ * the previous implementation that called it always failed silently. See
+ * `src/read.ts` (`readThreadPortal`) for the working pattern this mirrors.
  */
-async function getThreadMessageIds(
+async function resolveThreadForSnooze(
   provider: ConnectionProvider,
   threadId: string
-): Promise<string[]> {
+): Promise<{ canonicalThreadId: string; messageIds: string[] }> {
   if (!(provider instanceof SuperhumanProvider)) {
     throw new Error(
       "SuperhumanProvider required to resolve thread message IDs. " +
@@ -237,19 +247,104 @@ async function getThreadMessageIds(
     );
   }
 
-  try {
-    const result = await provider.portalInvoke("threadInternal", "getAsync", [
-      threadId,
-      { format: "minimal" },
-    ]);
-
-    if (!result || !result.messages) return [];
-
-    const messages = Object.values(result.messages) as any[];
-    return messages.map((m: any) => m.id || m.message_id).filter(Boolean);
-  } catch {
-    return [];
+  // 1. Try local SQLite (OPFS blob) — no CDP needed, matches read.ts path.
+  // `readThreadFromDB` looks up by exact thread_id first, then falls back
+  // to searching for a message ID inside the thread JSON, and tags the
+  // result with `_canonicalThreadId` so we can use the right ID for the
+  // reminders API.
+  const accountEmail = await provider.getCurrentEmail();
+  if (accountEmail) {
+    try {
+      const json = readThreadFromDB(accountEmail, threadId);
+      if (json) {
+        const rawMessages = Array.isArray((json as any).messages)
+          ? ((json as any).messages as any[])
+          : typeof (json as any).messages === "object" && (json as any).messages !== null
+          ? (Object.values((json as any).messages) as any[])
+          : [];
+        const messageIds = rawMessages
+          .map((m: any) => m?.id || m?.message_id)
+          .filter(Boolean);
+        if (messageIds.length > 0) {
+          const canonicalThreadId =
+            (json as any)._canonicalThreadId ||
+            (json as any).id ||
+            threadId;
+          return { canonicalThreadId, messageIds };
+        }
+      }
+    } catch (e) {
+      // SQLite read failed — fall through to portal RPC. Don't hide it
+      // entirely; the portal fallback may still succeed and the user will
+      // get a real error if it doesn't.
+      console.error(
+        `[snooze] SQLite lookup for ${threadId} failed: ${(e as Error).message}`
+      );
+    }
   }
+
+  // 2. Fall back to portal `threadInternal.listAsync` (same as read.ts).
+  if (!provider.hasPortal()) {
+    throw new Error(
+      `Thread ${threadId} not found in local SQLite cache, and no CDP ` +
+      `connection is available to query the Superhuman portal. ` +
+      `Open Superhuman in Chrome (with --remote-debugging-port=9400) or ` +
+      `sync the thread by visiting it in the app, then retry.`
+    );
+  }
+
+  const BATCH_SIZE = 200;
+  const result = await provider.portalInvoke("threadInternal", "listAsync", [
+    "INBOX",
+    { limit: BATCH_SIZE, query: "" },
+  ]);
+
+  const rawThreads: any[] = Array.isArray(result)
+    ? result
+    : Array.isArray(result?.threads)
+    ? result.threads
+    : [];
+
+  for (const item of rawThreads) {
+    const json = item?.json;
+    if (!json) continue;
+
+    const messages: any[] = Array.isArray(json.messages)
+      ? json.messages
+      : typeof json.messages === "object" && json.messages !== null
+      ? Object.values(json.messages)
+      : [];
+
+    const threadInternalId: string = json.id || "";
+    const isMatch =
+      threadInternalId === threadId ||
+      messages.some((m: any) => m?.id === threadId);
+
+    if (!isMatch) continue;
+
+    const messageIds = messages
+      .map((m: any) => m?.id || m?.message_id)
+      .filter(Boolean);
+
+    if (messageIds.length === 0) {
+      throw new Error(
+        `Portal returned thread ${threadInternalId} for ${threadId} ` +
+        `but its messages list was empty.`
+      );
+    }
+
+    return {
+      canonicalThreadId: threadInternalId || threadId,
+      messageIds,
+    };
+  }
+
+  throw new Error(
+    `Thread ${threadId} not found via portal listAsync (searched ` +
+    `${rawThreads.length} INBOX threads) or local SQLite. The portal RPC ` +
+    `currently only enumerates INBOX; archived/snoozed threads cannot be ` +
+    `resolved this way.`
+  );
 }
 
 /**
@@ -278,14 +373,24 @@ export async function snoozeThreadViaProvider(
   const results: SnoozeResult[] = [];
 
   for (const threadId of threadIds) {
-    // Get message IDs for the thread via MCP
-    const messageIds = await getThreadMessageIds(provider, threadId);
-    if (messageIds.length === 0) {
-      results.push({ success: false, error: "No messages found in thread" });
+    let canonicalThreadId: string;
+    let messageIds: string[];
+    try {
+      ({ canonicalThreadId, messageIds } = await resolveThreadForSnooze(
+        provider,
+        threadId
+      ));
+    } catch (e) {
+      results.push({ success: false, error: (e as Error).message });
       continue;
     }
 
-    const result = await snoozeThreadDirect(superhumanToken, threadId, messageIds, triggerAt);
+    const result = await snoozeThreadDirect(
+      superhumanToken,
+      canonicalThreadId,
+      messageIds,
+      triggerAt
+    );
     results.push(result);
   }
 
