@@ -7,11 +7,34 @@
 
 import type { ConnectionProvider } from "./connection-provider";
 import { SuperhumanProvider } from "./superhuman-provider";
+import { listInboxFromDB } from "./sqlite-search";
 
 export interface Label {
   id: string;
   name: string;
   type?: string;
+}
+
+export interface StarredThread {
+  id: string;
+  subject?: string;
+  from?: { email: string; name: string };
+  date?: string;
+  snippet?: string;
+  labelIds?: string[];
+}
+
+function parseFromField(from: any): { email: string; name: string } {
+  if (!from) return { email: "", name: "" };
+  if (typeof from === "string") {
+    const m = from.match(/^(.+?)\s*<(.+?)>$/);
+    if (m) return { name: m[1].trim(), email: m[2].trim() };
+    return { email: from, name: from };
+  }
+  return {
+    email: from.email || from.attributes?.email || "",
+    name: from.name || "",
+  };
 }
 
 export interface LabelResult {
@@ -206,34 +229,124 @@ export async function unstarThread(
 }
 
 /**
- * List all starred threads
+ * List all starred threads.
+ *
+ * Reads the local SQLite cache (OPFS blob) first — STARRED is just another
+ * list_id in the threads.list_ids table, and the cache already has full
+ * subject/from/date metadata. Falls back to portal RPC `threadInternal.listAsync`
+ * only when SQLite is unavailable (no blob found, no app installed).
+ *
+ * The previous implementation called `portalInvoke("threadInternal","listAsync",["STARRED",...])`
+ * but: (a) the portal returns a `{threads:[...]}` wrapper that was rejected by
+ * the `Array.isArray` shape check, and (b) the cache is authoritative anyway.
  *
  * @param provider - The connection provider
  * @param limit - Maximum number of threads to return (default: 50)
- * @returns Array of starred threads with their IDs
+ * @returns Array of starred threads with id and (when available) subject/from/date.
  */
 export async function listStarred(
   provider: ConnectionProvider,
   limit: number = 50
-): Promise<Array<{ id: string }>> {
-  if (provider instanceof SuperhumanProvider) {
-    if (!provider.hasPortal()) {
-      throw new Error(
-        "Starred listing requires running Superhuman app (portal RPC). " +
-          "Run 'superhuman account auth' with the app open."
-      );
-    }
-    const result = await provider.portalInvoke("threadInternal", "listAsync", [
-      "STARRED",
-      { limit, query: "" },
-    ]);
-    if (!Array.isArray(result)) return [];
-    return result.map((item: any) => ({
-      id: item.id || item.threadId || "",
-    }));
+): Promise<StarredThread[]> {
+  if (!(provider instanceof SuperhumanProvider)) {
+    throw new Error(
+      "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
+    );
   }
 
-  throw new Error(
-    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
-  );
+  // 1. SQLite path (preferred): STARRED is a list_id with full message metadata.
+  try {
+    const accountEmail = await provider.getCurrentEmail();
+    if (accountEmail) {
+      const rows = listInboxFromDB(accountEmail, "STARRED", limit);
+      if (rows && rows.length > 0) {
+        return rows
+          .map((row): StarredThread | null => {
+            let json: any;
+            try {
+              json = typeof row.json === "string" ? JSON.parse(row.json) : row.json;
+            } catch {
+              return { id: row.threadId, labelIds: row.labelIds };
+            }
+            const messages: any[] = Array.isArray(json.messages)
+              ? json.messages
+              : typeof json.messages === "object" && json.messages !== null
+              ? Object.values(json.messages)
+              : [];
+            if (messages.length === 0) {
+              return { id: row.threadId, labelIds: row.labelIds };
+            }
+            messages.sort(
+              (a: any, b: any) =>
+                new Date(a.date || 0).getTime() - new Date(b.date || 0).getTime()
+            );
+            const latest = messages[messages.length - 1];
+            return {
+              id: latest.id || row.threadId,
+              subject: latest.subject || "",
+              from: parseFromField(latest.from),
+              date: latest.date || "",
+              snippet: latest.snippet || "",
+              labelIds: row.labelIds,
+            };
+          })
+          .filter((t): t is StarredThread => t !== null);
+      }
+      // rows === [] means SQLite was readable but no STARRED threads exist.
+      // Treat as authoritative and return empty rather than falling back.
+      if (rows && rows.length === 0) return [];
+      // rows === null means the OPFS blob wasn't found; fall through.
+    }
+  } catch (e) {
+    // Surface SQLite errors but still attempt portal fallback.
+    console.error(
+      `[listStarred] SQLite lookup failed: ${(e as Error).message}`
+    );
+  }
+
+  // 2. Portal RPC fallback (requires CDP-connected app).
+  if (!provider.hasPortal()) {
+    throw new Error(
+      "Starred listing requires either a local Superhuman SQLite cache " +
+        "or a running Superhuman app (portal RPC). " +
+        "Run 'superhuman account auth' with the app open to populate the cache."
+    );
+  }
+  const result = await provider.portalInvoke("threadInternal", "listAsync", [
+    "STARRED",
+    { limit, query: "" },
+  ]);
+  const rawThreads: any[] = Array.isArray(result)
+    ? result
+    : Array.isArray(result?.threads)
+    ? result.threads
+    : [];
+  return rawThreads.map((item: any): StarredThread => {
+    if (item.json) {
+      const json = item.json;
+      const threadId: string = json.id || item.id || item.threadId || "";
+      const messages: any[] = Array.isArray(json.messages)
+        ? json.messages
+        : typeof json.messages === "object" && json.messages !== null
+        ? Object.values(json.messages)
+        : [];
+      if (messages.length === 0) {
+        return { id: threadId, labelIds: item.listIds || [] };
+      }
+      messages.sort(
+        (a: any, b: any) =>
+          new Date(a.date || 0).getTime() - new Date(b.date || 0).getTime()
+      );
+      const latest = messages[messages.length - 1];
+      return {
+        id: latest.id || threadId,
+        subject: latest.subject || "",
+        from: parseFromField(latest.from),
+        date: latest.date || "",
+        snippet: latest.snippet || "",
+        labelIds: item.listIds || latest.labelIds || [],
+      };
+    }
+    return { id: item.id || item.threadId || "" };
+  });
 }

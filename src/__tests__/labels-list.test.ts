@@ -2,11 +2,12 @@
  * Tests for listLabels() and listStarred() in labels.ts
  */
 
-import { test, expect, describe, mock } from "bun:test";
+import { test, expect, describe, mock, beforeEach, afterAll } from "bun:test";
 import { SuperhumanProvider } from "../superhuman-provider";
 import type { SuperhumanTokenInfo } from "../superhuman-provider";
 import type { SuperhumanConnection } from "../superhuman-api";
 import { listLabels, listStarred } from "../labels";
+import * as sqliteSearch from "../sqlite-search";
 
 const sampleToken: SuperhumanTokenInfo = {
   token: "test-jwt-token",
@@ -91,6 +92,20 @@ describe("listLabels", () => {
 // listStarred
 // -------------------------------------------------------------------------
 describe("listStarred", () => {
+  // listStarred now reads SQLite first; force the SQLite path to return null
+  // so the test exercises the portal RPC fallback. Other test files in the
+  // suite may mock `../sqlite-search` and leave residual state, so we set the
+  // override explicitly before each test here.
+  beforeEach(() => {
+    mock.module("../sqlite-search", () => ({
+      ...sqliteSearch,
+      listInboxFromDB: () => null,
+    }));
+  });
+  afterAll(() => {
+    mock.module("../sqlite-search", () => sqliteSearch);
+  });
+
   test("calls portalInvoke with STARRED listId", async () => {
     const { provider, portalMock } = createMockPortalProvider();
 

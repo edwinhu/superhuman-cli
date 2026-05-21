@@ -66,7 +66,7 @@ import { SuperhumanProvider } from "./superhuman-provider";
 import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.28.2";
+const VERSION = "0.28.3";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9250", 10);
 
 /**
@@ -2700,7 +2700,15 @@ async function cmdStarred(options: CliOptions) {
     } else {
       console.log(`${colors.bold}Starred threads:${colors.reset}\n`);
       for (const thread of threads) {
-        console.log(`  ${thread.id}`);
+        const subject = (thread.subject || "(no subject)").slice(0, 60).padEnd(60);
+        const fromName = thread.from?.name || thread.from?.email || "";
+        const from = fromName.slice(0, 25).padEnd(25);
+        const date = thread.date
+          ? new Date(thread.date).toISOString().slice(0, 10)
+          : "          ";
+        console.log(
+          `  ${colors.yellow}★${colors.reset} ${date}  ${colors.dim}${from}${colors.reset}  ${subject}  ${colors.dim}${thread.id}${colors.reset}`
+        );
       }
     }
   }
