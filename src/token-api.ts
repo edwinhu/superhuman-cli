@@ -9,6 +9,10 @@
 import type { SuperhumanConnection, ChromeExtConnection } from "./superhuman-api";
 import { connectToSuperhuman, getCDPPort, getCDPHost, disconnect } from "./superhuman-api";
 import { listAccounts, switchAccount } from "./accounts";
+import {
+  refreshAllViaBackgroundPage,
+  refreshOneViaBackgroundPage,
+} from "./background-page-refresh";
 
 /**
  * Full token info stored in the token cache.
@@ -585,31 +589,52 @@ async function extractAndCache(conn: SuperhumanConnection, email: string): Promi
   return token;
 }
 
+/**
+ * Refresh a single account's token.
+ *
+ * Preferred path: the Electron background_page iframe context — silent,
+ * no UI navigation, no focus stealing. Tried first.
+ *
+ * Fallback: the legacy navigation-based path via the visible mail page.
+ * Only invoked when the background_page target isn't reachable (e.g.
+ * Superhuman.app not running with --remote-debugging-port). The
+ * navigation path stays as a last resort because it brings the
+ * Electron window to the foreground.
+ *
+ * Returns the updated TokenInfo, or undefined if refresh failed.
+ */
 export async function refreshTokenViaCDP(email: string): Promise<TokenInfo | undefined> {
-  // Only attempt CDP refresh if the account was previously cached.
-  // Accounts that have never been authenticated cannot be refreshed via CDP —
-  // the user must run 'superhuman account auth' first.
-  // This also prevents hanging in test environments where Chrome CDP is
-  // reachable but the test email doesn't exist in the Superhuman session.
+  // Only attempt refresh if the account was previously cached.
+  // Accounts that have never been authenticated cannot be refreshed —
+  // the user must run 'superhuman account auth' first. This also
+  // prevents hanging in test environments where CDP is reachable but
+  // the test email doesn't exist in the Superhuman session.
   if (!tokenCache.has(email)) return undefined;
 
-  // Apply a 4-second timeout to the entire CDP refresh operation.
-  // The Superhuman page's JS context can become frozen (e.g. DevTools open
-  // with a breakpoint), which causes Runtime.evaluate to hang indefinitely.
-  // Returning undefined on timeout is safe — the caller falls back gracefully.
+  // ---- Preferred path: iframe context on background_page ----
+  // No navigation, no focus stealing. Returns null if the bg page
+  // isn't reachable or this email's iframe isn't loaded.
+  try {
+    const iframeRefreshed = await refreshOneViaBackgroundPage(email, getCDPPort());
+    if (iframeRefreshed) {
+      tokenCache.set(iframeRefreshed.email, iframeRefreshed);
+      await saveTokensToDisk();
+      return iframeRefreshed;
+    }
+  } catch {
+    // Fall through to legacy path.
+  }
+
+  // ---- Fallback: legacy navigation-based path ----
+  // 2-second timeout to bound CDP hangs (frozen JS context, devtools
+  // breakpoint, etc.). Connection is forcefully closed on timeout to
+  // unblock pending Runtime.evaluate calls.
   const CDP_REFRESH_TIMEOUT_MS = 2000;
-
   let conn: SuperhumanConnection | null = null;
-
-  // Apply timeout: if CDP operations don't complete in time, forcefully close
-  // the connection (to unblock any pending Runtime.evaluate) and return undefined.
-  // The Superhuman page's JS context can become frozen (e.g. DevTools open with
-  // a breakpoint), causing Runtime.evaluate to hang indefinitely.
   let timeoutHandle: ReturnType<typeof setTimeout>;
 
   const timeoutPromise = new Promise<undefined>((resolve) => {
     timeoutHandle = setTimeout(async () => {
-      // Forcefully close the connection to unblock any pending CDP calls
       if (conn) {
         try { await disconnect(conn); } catch {}
         conn = null;
@@ -636,6 +661,41 @@ export async function refreshTokenViaCDP(email: string): Promise<TokenInfo | und
   const result = await Promise.race([refreshPromise, timeoutPromise]);
   clearTimeout(timeoutHandle!);
   return result;
+}
+
+/**
+ * Bulk-refresh every cached account via the background_page iframe path
+ * in a single CDP connection. Faster than calling refreshTokenViaCDP per
+ * account (one connect/disconnect instead of N), and silent.
+ *
+ * Returns the number of accounts successfully refreshed, or null if the
+ * background_page wasn't reachable at all.
+ */
+export async function refreshAllTokens(): Promise<number | null> {
+  const cachedEmails = Array.from(tokenCache.keys());
+  if (cachedEmails.length === 0) return 0;
+  const refreshed = await refreshAllViaBackgroundPage(cachedEmails, getCDPPort());
+  if (!refreshed) return null;
+  await persistRefreshedTokens(refreshed);
+  return refreshed.length;
+}
+
+/**
+ * Insert pre-extracted TokenInfo records into the cache and flush to disk.
+ *
+ * Used by `account auth` to seed the cache from a fresh background_page
+ * extraction, where the caller already has the TokenInfo list and just
+ * needs persistence.
+ */
+export async function persistRefreshedTokens(tokens: TokenInfo[]): Promise<void> {
+  if (tokens.length === 0) return;
+  for (const t of tokens) {
+    if (t.idToken && !t.superhumanToken) {
+      t.superhumanToken = { token: t.idToken, expires: t.idTokenExpires ?? t.expires };
+    }
+    tokenCache.set(t.email, t);
+  }
+  await saveTokensToDisk();
 }
 
 /**
@@ -737,14 +797,37 @@ export async function resolveToken(email?: string): Promise<TokenInfo | null> {
     }
   }
 
-  // 3. Cold-start: connect to CDP to extract a fresh token.
-  //    - If a specific email was requested and is a known-but-expired account,
-  //      extract a fresh token for that account.
-  //    - If no email was specified and no cached tokens are valid, bootstrap
-  //      from whatever account is currently active in Superhuman.
+  // 3a. Cold-start via background_page iframes (silent, no focus steal).
+  //     If bg page is reachable, bulk-refresh all accounts in one shot
+  //     and return the requested (or any valid) token.
+  try {
+    const iframeResults = await refreshAllViaBackgroundPage(
+      email ? [email] : undefined,
+      getCDPPort(),
+    );
+    if (iframeResults && iframeResults.length > 0) {
+      for (const t of iframeResults) {
+        if (t.idToken) {
+          t.superhumanToken = { token: t.idToken, expires: t.idTokenExpires ?? t.expires };
+        }
+        tokenCache.set(t.email, t);
+      }
+      await saveTokensToDisk();
+      const picked = email
+        ? iframeResults.find((t) => t.email === email)
+        : iframeResults.find((t) => t.idToken && t.userId);
+      if (picked && picked.idToken && picked.userId) return picked;
+    }
+  } catch {
+    // Fall through to legacy nav-based cold-start.
+  }
+
+  // 3b. Legacy cold-start: connect to the visible mail page and extract
+  //     (uses switchAccount → Page.navigate → focus steal). Only used
+  //     when the background_page target isn't reachable.
   //
-  //    Apply a timeout: Runtime.evaluate can hang indefinitely if the JS context
-  //    is frozen (DevTools open with a breakpoint, or getIDTokenAsync stalls).
+  //     Apply a timeout: Runtime.evaluate can hang indefinitely if the JS
+  //     context is frozen (DevTools open with a breakpoint).
   const CDP_COLDSTART_TIMEOUT_MS = 8000;
   let coldConn: SuperhumanConnection | null = null;
   let coldTimeoutHandle: ReturnType<typeof setTimeout>;

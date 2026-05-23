@@ -58,8 +58,12 @@ import {
   getThreadInfoMsGraph,
   extractTokenChrome,
   resolveToken,
+  refreshAllTokens,
+  loadTokensFromDisk,
+  persistRefreshedTokens,
   type TokenInfo,
 } from "./token-api";
+import { refreshAllViaBackgroundPage } from "./background-page-refresh";
 import type { ConnectionProvider } from "./connection-provider";
 import { CachedTokenProvider, CDPConnectionProvider, resolveProvider } from "./connection-provider";
 import { SuperhumanProvider } from "./superhuman-provider";
@@ -2948,7 +2952,27 @@ async function cmdDownload(options: CliOptions) {
  * as long as tokens haven't expired (typically ~1 hour).
  */
 async function cmdAuth(options: CliOptions) {
-  log("Connecting to Superhuman...");
+  // Preferred path: silent extraction via the Electron background_page
+  // iframes. No window navigation, no focus stealing. Loads existing
+  // tokens.json first so refreshAllTokens can iterate the cached emails.
+  log("Connecting to Superhuman (background_page iframe path)...");
+  await loadTokensFromDisk();
+  const tokens = await refreshAllViaBackgroundPage(undefined, options.port);
+  if (tokens && tokens.length > 0) {
+    log(`Refreshed ${tokens.length} account(s) via iframe path`);
+    for (const t of tokens) success(`  ${t.email} OK`);
+    await persistRefreshedTokens(tokens);
+    success(`Tokens saved to ${getTokensFilePath()}`);
+    log("");
+    info("You can now use superhuman-cli without Superhuman running.");
+    info("Tokens are valid for ~1 hour. Run 'superhuman account auth' again to refresh.");
+    return;
+  }
+
+  // Fallback: legacy navigation-based path. Used when the Electron app
+  // isn't launched with --remote-debugging-port, or the bg page target
+  // isn't present. Steals focus per account.
+  log("Background page unreachable — falling back to navigation path (will steal focus)");
   const conn = await checkConnection(options.port);
 
   if (conn) {
