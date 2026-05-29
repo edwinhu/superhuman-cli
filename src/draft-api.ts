@@ -9,6 +9,56 @@ import type { SuperhumanConnection } from "./superhuman-api";
 const SUPERHUMAN_BACKEND = "https://mail.superhuman.com/~backend";
 
 /**
+ * POST to the Superhuman backend with automatic id-token refresh + retry.
+ *
+ * The stored bearer (`userInfo.token`) is the provider (Google/Microsoft) ID
+ * token Superhuman's backend accepts directly — a JWT with a ~1h TTL. Once it
+ * expires, write/AI calls fail with `401 invalid-id-token` until something
+ * re-initialises auth. There is NO Firebase refresh token stored and the token
+ * is NOT a securetoken JWT, so the only refresh path is the desktop app's
+ * `credential.getIDTokenAsync()` reached over CDP via `refreshTokenViaCDP()`.
+ *
+ * On a 401/403 we refresh once, mutate `userInfo.token` in place (so later
+ * calls in the same operation reuse the fresh token), and retry the request
+ * a single time. The Authorization header is (re)built here from the current
+ * token, so callers may omit it. Imported lazily to avoid a circular import
+ * with token-api.
+ */
+async function backendFetchWithRetry(
+  url: string,
+  init: RequestInit,
+  userInfo: UserInfo
+): Promise<Response> {
+  const withToken = (token: string): RequestInit => ({
+    ...init,
+    headers: {
+      ...(init.headers as Record<string, string> | undefined),
+      Authorization: `Bearer ${token}`,
+    },
+  });
+
+  let response = await fetch(url, withToken(userInfo.token));
+
+  if (response.status === 401 || response.status === 403) {
+    try {
+      const { refreshTokenViaCDP } = await import("./token-api");
+      const refreshed = await refreshTokenViaCDP(userInfo.email);
+      const newToken = refreshed?.superhumanToken?.token || refreshed?.idToken;
+      if (newToken && newToken !== userInfo.token) {
+        userInfo.token = newToken;
+        response = await fetch(url, withToken(newToken));
+      }
+    } catch {
+      // Refresh unavailable (e.g. the Superhuman desktop app isn't running
+      // with --remote-debugging-port). Fall through and let the caller
+      // surface the original 401.
+    }
+  }
+
+  return response;
+}
+
+/**
  * Generate a draft ID in Superhuman's format: "draft00" + 14 hex chars
  */
 function generateDraftId(): string {
@@ -187,14 +237,13 @@ export async function createDraftWithUserInfo(
       ],
     };
 
-    const response = await fetch(`${SUPERHUMAN_BACKEND}/v3/userdata.writeMessage`, {
+    const response = await backendFetchWithRetry(`${SUPERHUMAN_BACKEND}/v3/userdata.writeMessage`, {
       method: "POST",
       headers: {
         "Content-Type": "text/plain;charset=UTF-8",
-        Authorization: `Bearer ${userInfo.token}`,
       },
       body: JSON.stringify(requestBody),
-    });
+    }, userInfo);
 
     if (!response.ok) {
       const text = await response.text();
@@ -284,14 +333,13 @@ export async function updateDraftDirect(
       ],
     };
 
-    const response = await fetch(`${SUPERHUMAN_BACKEND}/v3/userdata.writeMessage`, {
+    const response = await backendFetchWithRetry(`${SUPERHUMAN_BACKEND}/v3/userdata.writeMessage`, {
       method: "POST",
       headers: {
         "Content-Type": "text/plain;charset=UTF-8",
-        Authorization: `Bearer ${userInfo.token}`,
       },
       body: JSON.stringify(requestBody),
-    });
+    }, userInfo);
 
     if (!response.ok) {
       const text = await response.text();
@@ -438,14 +486,13 @@ export async function updateDraftWithUserInfo(
       ],
     };
 
-    const response = await fetch(`${SUPERHUMAN_BACKEND}/v3/userdata.writeMessage`, {
+    const response = await backendFetchWithRetry(`${SUPERHUMAN_BACKEND}/v3/userdata.writeMessage`, {
       method: "POST",
       headers: {
         "Content-Type": "text/plain;charset=UTF-8",
-        Authorization: `Bearer ${userInfo.token}`,
       },
       body: JSON.stringify(requestBody),
-    });
+    }, userInfo);
 
     if (!response.ok) {
       const text = await response.text();
@@ -482,14 +529,13 @@ export async function deleteDraftWithUserInfo(
       ],
     };
 
-    const response = await fetch(`${SUPERHUMAN_BACKEND}/v3/userdata.writeMessage`, {
+    const response = await backendFetchWithRetry(`${SUPERHUMAN_BACKEND}/v3/userdata.writeMessage`, {
       method: "POST",
       headers: {
         "Content-Type": "text/plain;charset=UTF-8",
-        Authorization: `Bearer ${userInfo.token}`,
       },
       body: JSON.stringify(requestBody),
-    });
+    }, userInfo);
 
     if (!response.ok) {
       const text = await response.text();
@@ -549,14 +595,13 @@ export async function uploadAttachmentSuperhuman(
     content: base64Content,
   };
 
-  const response = await fetch(`${SUPERHUMAN_BACKEND}/v3/attachments.upload`, {
+  const response = await backendFetchWithRetry(`${SUPERHUMAN_BACKEND}/v3/attachments.upload`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${userInfo.token}`,
     },
     body: JSON.stringify(payload),
-  });
+  }, userInfo);
 
   if (!response.ok) {
     const text = await response.text();
@@ -599,14 +644,13 @@ export async function uploadAttachmentSuperhuman(
     console.error("DEBUG attachment metadata write:", JSON.stringify(metadataBody, null, 2));
   }
 
-  const metaResp = await fetch(`${SUPERHUMAN_BACKEND}/v3/userdata.writeMessage`, {
+  const metaResp = await backendFetchWithRetry(`${SUPERHUMAN_BACKEND}/v3/userdata.writeMessage`, {
     method: "POST",
     headers: {
       "Content-Type": "text/plain;charset=UTF-8",
-      Authorization: `Bearer ${userInfo.token}`,
     },
     body: JSON.stringify(metadataBody),
-  });
+  }, userInfo);
 
   if (!metaResp.ok) {
     const metaText = await metaResp.text();
@@ -742,11 +786,11 @@ export async function sendDraftSuperhuman(
       console.error("DEBUG send body:", JSON.stringify(requestBody, null, 2));
     }
 
-    const response = await fetch(`${SUPERHUMAN_BACKEND}/messages/send`, {
+    const response = await backendFetchWithRetry(`${SUPERHUMAN_BACKEND}/messages/send`, {
       method: "POST",
       headers: { ...shHeaders, "x-superhuman-request-id": crypto.randomUUID() },
       body: JSON.stringify(requestBody),
-    });
+    }, userInfo);
 
     if (!response.ok) {
       const text = await response.text();

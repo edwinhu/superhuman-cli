@@ -1551,14 +1551,26 @@ export async function askAISearch(
 
   const url = `${SUPERHUMAN_BACKEND_BASE}/v3/ai.askAIProxy`;
 
-  const fetchResponse = await fetch(url, {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${superhumanToken}`,
-      "Content-Type": "text/plain;charset=UTF-8",
-    },
-    body: JSON.stringify(payload),
-  });
+  const doFetch = (token: string) =>
+    fetch(url, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "text/plain;charset=UTF-8",
+      },
+      body: JSON.stringify(payload),
+    });
+
+  let fetchResponse = await doFetch(superhumanToken);
+
+  // The id-token (~1h TTL) may have expired; refresh once via CDP and retry.
+  if ((fetchResponse.status === 401 || fetchResponse.status === 403) && options?.email) {
+    const refreshed = await refreshTokenViaCDP(options.email);
+    const newToken = refreshed?.superhumanToken?.token || refreshed?.idToken;
+    if (newToken && newToken !== superhumanToken) {
+      fetchResponse = await doFetch(newToken);
+    }
+  }
 
   if (fetchResponse.status === 401 || fetchResponse.status === 403) {
     throw new Error("AI query failed - authentication error");

@@ -139,7 +139,7 @@ export async function snoozeThreadDirect(
         moveToInbox: false,
         poll: true,
       }),
-    });
+    }, token.email);
 
     if (result === null) {
       return { success: false, error: "Authentication failed" };
@@ -173,7 +173,7 @@ export async function unsnoozeThreadDirect(
         moveToInbox: true,
         poll: true,
       }),
-    });
+    }, token.email);
 
     if (result === null) {
       return { success: false, error: "Authentication failed" };
@@ -204,7 +204,7 @@ export async function listSnoozedDirect(
         offset: 0,
         limit,
       }),
-    });
+    }, token.email);
 
     if (result === null || !result.threadList) {
       return [];
