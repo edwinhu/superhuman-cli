@@ -70,7 +70,7 @@ import { SuperhumanProvider } from "./superhuman-provider";
 import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.28.3";
+const VERSION = "0.29.1";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9250", 10);
 
 /**
