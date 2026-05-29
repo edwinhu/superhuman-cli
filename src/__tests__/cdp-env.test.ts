@@ -1,5 +1,5 @@
 import { test, expect, describe, afterEach, beforeEach, mock } from "bun:test";
-import { getCDPHost, getCDPPort } from "../superhuman-api";
+import { getCDPHost, getCDPPort, discoverSuperhumanPort } from "../superhuman-api";
 import {
   getCachedToken,
   getCachedTokenRaw,
@@ -47,6 +47,14 @@ describe("getCDPPort", () => {
   test("returns custom port when set", () => {
     process.env.CDP_PORT = "9400";
     expect(getCDPPort()).toBe(9400);
+  });
+});
+
+describe("discoverSuperhumanPort", () => {
+  test("honors explicit CDP_PORT without probing", async () => {
+    process.env.CDP_PORT = "9400";
+    // Explicit override must win and short-circuit any CDP probing.
+    expect(await discoverSuperhumanPort()).toBe(9400);
   });
 });
 

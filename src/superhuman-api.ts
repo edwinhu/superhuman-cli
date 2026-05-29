@@ -33,6 +33,69 @@ export function getCDPPort(): number {
 }
 
 /**
+ * Candidate CDP ports to probe when CDP_PORT isn't explicitly set.
+ * 9250 = Chrome-tab mode (extension service worker); 9252 = the Superhuman
+ * desktop (Electron) app; 9222 = generic Chromium default. The desktop app
+ * is the one that exposes `background_page.html` — the target token refresh
+ * needs — so it must be discoverable even though the documented default
+ * (9250) points elsewhere.
+ */
+const CDP_PORT_CANDIDATES = [9250, 9252, 9222];
+
+// Cache the discovered port for the process lifetime to avoid re-probing.
+let discoveredPort: number | null = null;
+
+/**
+ * Resolve the CDP port that actually hosts a Superhuman target.
+ *
+ * An explicit `CDP_PORT` env var always wins. Otherwise probe the candidate
+ * ports and prefer one exposing the Electron `background_page.html` (required
+ * for silent token refresh); fall back to any port with a `mail.superhuman.com`
+ * page, then to the static default. Result is cached.
+ *
+ * Reads use local SQLite and don't need this; it matters for CDP paths —
+ * chiefly token refresh — which previously failed when the app ran on a
+ * non-default port (e.g. the desktop app on 9252).
+ */
+export async function discoverSuperhumanPort(): Promise<number> {
+  if (process.env.CDP_PORT) return parseInt(process.env.CDP_PORT, 10);
+  if (discoveredPort !== null) return discoveredPort;
+
+  const host = getCDPHost();
+  let pageFallback: number | null = null;
+
+  for (const port of CDP_PORT_CANDIDATES) {
+    let targets: any[];
+    try {
+      targets = await CDP.List({ host, port });
+    } catch {
+      continue; // port not listening
+    }
+    const hasBgPage = targets.some(
+      (t: any) =>
+        t.type === "page" &&
+        t.url.includes("background_page.html") &&
+        t.url.includes("superhuman")
+    );
+    if (hasBgPage) {
+      discoveredPort = port;
+      return port;
+    }
+    if (
+      pageFallback === null &&
+      targets.some(
+        (t: any) => t.type === "page" && t.url.includes("mail.superhuman.com")
+      )
+    ) {
+      pageFallback = port;
+    }
+  }
+
+  discoveredPort = pageFallback ?? getCDPPort();
+  return discoveredPort;
+}
+
+/**
  * Check if Superhuman is running with CDP enabled
  */
 export async function isSuperhumanRunning(port = getCDPPort()): Promise<boolean> {

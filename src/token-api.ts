@@ -7,7 +7,7 @@
  */
 
 import type { SuperhumanConnection, ChromeExtConnection } from "./superhuman-api";
-import { connectToSuperhuman, getCDPPort, getCDPHost, disconnect } from "./superhuman-api";
+import { connectToSuperhuman, getCDPPort, getCDPHost, disconnect, discoverSuperhumanPort } from "./superhuman-api";
 import { listAccounts, switchAccount } from "./accounts";
 import {
   refreshAllViaBackgroundPage,
@@ -611,11 +611,16 @@ export async function refreshTokenViaCDP(email: string): Promise<TokenInfo | und
   // the test email doesn't exist in the Superhuman session.
   if (!tokenCache.has(email)) return undefined;
 
+  // Resolve the port that actually hosts a Superhuman target. The desktop
+  // app's background_page (needed below) often runs on a non-default port
+  // (e.g. 9252), so we can't rely on the static getCDPPort() default.
+  const port = await discoverSuperhumanPort();
+
   // ---- Preferred path: iframe context on background_page ----
   // No navigation, no focus stealing. Returns null if the bg page
   // isn't reachable or this email's iframe isn't loaded.
   try {
-    const iframeRefreshed = await refreshOneViaBackgroundPage(email, getCDPPort());
+    const iframeRefreshed = await refreshOneViaBackgroundPage(email, port);
     if (iframeRefreshed) {
       tokenCache.set(iframeRefreshed.email, iframeRefreshed);
       await saveTokensToDisk();
@@ -645,7 +650,7 @@ export async function refreshTokenViaCDP(email: string): Promise<TokenInfo | und
 
   const refreshPromise = (async () => {
     try {
-      conn = await connectToSuperhuman(getCDPPort(), false);
+      conn = await connectToSuperhuman(port, false);
       if (!conn) return undefined;
       return await extractAndCache(conn, email);
     } catch {
@@ -674,7 +679,7 @@ export async function refreshTokenViaCDP(email: string): Promise<TokenInfo | und
 export async function refreshAllTokens(): Promise<number | null> {
   const cachedEmails = Array.from(tokenCache.keys());
   if (cachedEmails.length === 0) return 0;
-  const refreshed = await refreshAllViaBackgroundPage(cachedEmails, getCDPPort());
+  const refreshed = await refreshAllViaBackgroundPage(cachedEmails, await discoverSuperhumanPort());
   if (!refreshed) return null;
   await persistRefreshedTokens(refreshed);
   return refreshed.length;
