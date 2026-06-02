@@ -118,21 +118,21 @@ export class SuperhumanDraftProvider implements IDraftProvider {
       this.token.email.split("@")[0] // Use email prefix as display name
     );
 
-    // 3. Merge updates with existing draft
-    const mergedDraft = {
-      to: updates.to || existingDraft.to,
-      subject: updates.subject || existingDraft.subject,
-      body: updates.preview || existingDraft.preview, // preview maps to body
-    };
-
-    // 4. Use the threadId from the existing draft (critical for correct path!)
+    // 3. Use the threadId from the existing draft (critical for correct path!)
     const threadId = existingDraft.threadId;
     if (!threadId) {
       throw new Error(`Draft ${draftId} missing threadId - cannot update`);
     }
 
-    // 5. Call updateDraftWithUserInfo (reuses existing IDs - same endpoint as CREATE!)
-    await updateDraftWithUserInfo(userInfo, threadId, draftId, mergedDraft);
+    // 4. Forward ONLY the fields the caller actually changed. updateDraftWithUserInfo
+    //    merges against the live draft, so unspecified fields are preserved there.
+    //    NOTE: Draft.preview is a truncated snippet, NOT the full body — never send
+    //    it as the body (doing so would overwrite the real body with a 100-char
+    //    excerpt). Body edits must go through updateDraftWithUserInfo directly.
+    await updateDraftWithUserInfo(userInfo, threadId, draftId, {
+      to: updates.to,
+      subject: updates.subject,
+    });
 
     // 6. Update cache with merged draft
     this.draftCache.set(draftId, {

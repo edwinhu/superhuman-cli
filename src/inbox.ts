@@ -7,7 +7,7 @@
 
 import type { ConnectionProvider } from "./connection-provider";
 import { SuperhumanProvider } from "./superhuman-provider";
-import { listInboxFromDB } from "./sqlite-search";
+import { listInboxFromDB, buildFtsMatchExpr } from "./sqlite-search";
 
 export interface InboxThread {
   id: string;
@@ -362,17 +362,13 @@ async function listInboxSuperhuman(
 }
 
 /**
- * Escape a search term for SQLite FTS3 MATCH expressions.
- * Wraps in double-quotes and escapes any internal double-quotes.
- */
-function escapeFtsToken(term: string): string {
-  return `"${term.replace(/"/g, '""')}"`;
-}
-
-/**
  * Build the FTS3 SQL fragment and params for a keyword query.
  * The fragment is the SELECT...FROM...WHERE part (no ORDER BY) that
  * SearchTable.query() wraps in: WITH search AS ({fragment} ORDER BY rowid DESC LIMIT ?)
+ *
+ * The MATCH expression is built by the shared `buildFtsMatchExpr` parser so the
+ * portal FTS path honors the same Gmail-style operators (subject:/from:/to:/
+ * is:starred/in:sent/-negation) as the direct SQLite path.
  */
 function buildFtsQuery(queryStr: string): { sql: string; params: string[] } {
   const ellipsis = "\u2026";
@@ -384,11 +380,7 @@ function buildFtsQuery(queryStr: string): { sql: string; params: string[] } {
     "WHERE thread_search MATCH ?",
   ].join(" ");
 
-  // Build FTS MATCH expression: each word as a quoted token, joined with AND
-  const words = queryStr.trim().split(/\s+/).filter(Boolean);
-  const matchExpr = words.map(escapeFtsToken).join(" ");
-
-  return { sql, params: [matchExpr] };
+  return { sql, params: [buildFtsMatchExpr(queryStr)] };
 }
 
 async function searchInboxSuperhuman(

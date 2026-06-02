@@ -246,14 +246,25 @@ export interface DirectSearchOptions {
   accountEmail: string;
 }
 
+export interface DirectSearchResult {
+  /** The ranked page of results (length <= limit). */
+  threads: InboxThread[];
+  /** Number of matched threads considered for ranking (may exceed threads.length). */
+  total: number;
+  /** True when matches were capped at MAX_RANK_CANDIDATES, so `total` is a floor. */
+  capped: boolean;
+}
+
 /**
  * Search the Superhuman SQLite FTS3 index directly from the OPFS blob on disk.
  * No CDP or browser connection required.
  *
- * Returns InboxThread[] sorted by message date descending, or null if the
- * OPFS blob cannot be found for this account.
+ * Returns the ranked page plus the total match count, or null if the OPFS blob
+ * cannot be found for this account. Results are ranked by column-weighted
+ * relevance (subject/sender matches outrank body matches), with recency as the
+ * tie-breaker — NOT pure recency, which previously buried older-but-exact hits.
  */
-export async function searchDirect(options: DirectSearchOptions): Promise<InboxThread[] | null> {
+export async function searchDirect(options: DirectSearchOptions): Promise<DirectSearchResult | null> {
   const blobPath = findOPFSBlob(options.accountEmail);
   if (!blobPath) return null;
 
@@ -287,23 +298,251 @@ export function listLocalAccounts(): string[] {
 }
 
 // ---------------------------------------------------------------------------
-// FTS query helpers
+// FTS query parsing (Gmail-style operators -> native FTS3)
 // ---------------------------------------------------------------------------
 
+/** Wrap a bare term/phrase as an FTS3 phrase token. */
 function escapeFtsToken(term: string): string {
   return `"${term.replace(/"/g, '""')}"`;
 }
 
-function buildMatchExpr(queryStr: string): string {
-  const words = queryStr.trim().split(/\s+/).filter(Boolean);
-  return words.map(escapeFtsToken).join(" ");
+/**
+ * Split a query into tokens, keeping `"quoted phrases"` and `field:"quoted
+ * values"` intact, and preserving a leading `-` negation marker.
+ */
+function tokenizeQuery(queryStr: string): string[] {
+  const tokens: string[] = [];
+  const re = /-?(?:[a-zA-Z]+:)?"[^"]*"|\S+/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(queryStr)) !== null) tokens.push(m[0]);
+  return tokens;
 }
 
-function queryFTS(dbPath: string, queryStr: string, limit: number): InboxThread[] {
+// Gmail-style field operators -> FTS3 `thread_search` column names.
+const COLUMN_OPERATORS: Record<string, string> = {
+  subject: "subject",
+  from: "from",
+  to: "to",
+  cc: "cc",
+  bcc: "bcc",
+  body: "content",
+  replyto: "replyto",
+};
+
+// Gmail is:/in: tokens -> values stored in the FTS `labels` column.
+const LABEL_SYNONYMS: Record<string, string> = {
+  starred: "STARRED",
+  unread: "UNREAD",
+  important: "IMPORTANT",
+  flagged: "FLAGGED",
+  inbox: "INBOX",
+  sent: "SENT",
+  draft: "DRAFT",
+  drafts: "DRAFT",
+  spam: "SPAM",
+  trash: "TRASH",
+};
+
+/** Strip surrounding double-quotes from an operator value. */
+function unquote(v: string): string {
+  return v.length >= 2 && v.startsWith('"') && v.endsWith('"') ? v.slice(1, -1) : v;
+}
+
+/**
+ * Split an operator value into safe, bare FTS3 tokens. Column filters (`col:tok`)
+ * cannot be quoted, so any FTS3 metacharacter in the value — `" * ( ) : ^ -` or a
+ * bareword operator like OR/NOT/NEAR — would corrupt or break the MATCH expression
+ * (an unbalanced `(` or stray `"` makes SQLite throw "malformed MATCH expression").
+ * We replace all such metacharacters with spaces and keep only word runs, so e.g.
+ * `foo(bar` -> ["foo","bar"] and `a"b` -> ["a","b"]. The porter tokenizer already
+ * splits on punctuation, so this preserves matching while staying injection-safe.
+ */
+function sanitizeFtsTokens(value: string): string[] {
+  return value
+    .replace(/[^\p{L}\p{N}_]+/gu, " ")
+    .split(/\s+/)
+    .filter(Boolean)
+    // Bareword FTS operators are only special when standalone; column-scoped they
+    // are plain tokens, but drop them defensively to avoid any parser ambiguity.
+    .filter((t) => !/^(OR|AND|NOT|NEAR)$/i.test(t));
+}
+
+/**
+ * Translate one `field:value` operator into an FTS3 fragment, or null when the
+ * operator is unknown / unsupported (e.g. `has:`) so the caller can drop it.
+ */
+function mapOperator(field: string, rawValue: string): string | null {
+  const f = field.toLowerCase();
+  const value = unquote(rawValue).trim();
+  if (!value) return null;
+
+  const col = COLUMN_OPERATORS[f];
+  if (col) {
+    // FTS3 column filters bind to a single following token, so emit one
+    // `col:token` per sanitized word. Same-column tokens AND together.
+    const words = sanitizeFtsTokens(value);
+    return words.map((w) => `${col}:${w}`).join(" ") || null;
+  }
+
+  if (f === "is" || f === "in") {
+    const synonym = LABEL_SYNONYMS[value.toLowerCase()];
+    // Label values live in the labels column; keep only label-safe chars.
+    const label = synonym || value.toUpperCase().replace(/[^A-Z0-9_]/g, "");
+    return label ? `labels:${label}` : null;
+  }
+
+  if (f === "label") {
+    const label = value.toUpperCase().replace(/[^A-Z0-9_]/g, "");
+    return label ? `labels:${label}` : null;
+  }
+
+  // Unknown / unsupported operator -> signal "drop this token".
+  return null;
+}
+
+/**
+ * Build an FTS3 MATCH expression from a Gmail-style query.
+ *
+ * Supports: bare terms, `"quoted phrases"`, field operators
+ * (`subject:` `from:` `to:` `cc:` `bcc:` `body:` `replyto:`), `is:`/`in:`/
+ * `label:` (mapped to the `labels` column, e.g. `is:starred` -> `labels:STARRED`,
+ * `in:sent` -> `labels:SENT`), and leading `-` negation. Unknown operators
+ * (e.g. `has:`) are dropped.
+ *
+ * Exported so the portal FTS path (inbox.ts) shares identical semantics.
+ */
+export function buildFtsMatchExpr(queryStr: string): string {
+  const positives: string[] = [];
+  const negatives: string[] = [];
+
+  for (const tok of tokenizeQuery(queryStr)) {
+    let neg = false;
+    let s = tok;
+    if (s.startsWith("-") && s.length > 1) {
+      neg = true;
+      s = s.slice(1);
+    }
+
+    // field:value operator (field is letters only; value is the remainder)
+    const opMatch = s.match(/^([a-zA-Z]+):(.+)$/);
+    if (opMatch) {
+      const frag = mapOperator(opMatch[1] ?? "", opMatch[2] ?? "");
+      if (frag) (neg ? negatives : positives).push(frag);
+      // Unknown operator -> token dropped entirely.
+      continue;
+    }
+
+    // bare term or quoted phrase
+    (neg ? negatives : positives).push(escapeFtsToken(unquote(s)));
+  }
+
+  let expr = positives.join(" ");
+  // FTS3 NOT is binary; only apply negation when there is a positive side.
+  if (negatives.length && expr) {
+    for (const n of negatives) expr += ` NOT ${n}`;
+  }
+
+  if (expr) return expr;
+
+  // Nothing usable parsed (e.g. only unknown operators, or values that sanitized
+  // to nothing). Fall back to a SANITIZED keyword phrase search so the result can
+  // never contain raw FTS metacharacters that would break MATCH.
+  const fallback = sanitizeFtsTokens(queryStr).map(escapeFtsToken).join(" ");
+  return fallback || `""`;
+}
+
+// ---------------------------------------------------------------------------
+// FTS relevance ranking
+// ---------------------------------------------------------------------------
+
+// Per-column weights, indexed by FTS column position in `thread_search`:
+// 0 thread_id, 1 subject, 2 content, 3 from, 4 to, 5 cc, 6 bcc, 7 replyto,
+// 8 deliveredto, 9 attachments, 10 labels, 11 list, 12 rfc822msgid, 13 meta.
+// Subject and sender matches are weighted far above body matches so an exact
+// subject hit outranks newer threads that merely mention the term in the body.
+const COLUMN_WEIGHTS = [0, 10, 2, 6, 4, 2, 1, 1, 1, 1, 1, 1, 1, 1];
+
+// Upper bound on rows pulled into the in-memory relevance ranker. Far above any
+// realistic result set; protects against a pathological single-token query.
+const MAX_RANK_CANDIDATES = 5000;
+
+/**
+ * Compute a relevance score from an FTS3 `matchinfo(tbl, 'pcx')` blob.
+ * Layout: [p, c, then for each of p phrases x c columns: 3 uint32s, the first
+ * of which is the hit count for that phrase in that column in THIS row].
+ */
+function scoreMatchInfo(blob: Uint8Array | null): number {
+  if (!blob || blob.byteLength < 8) return 0;
+  const dv = new DataView(blob.buffer, blob.byteOffset, blob.byteLength);
+  const u = (i: number) => dv.getUint32(i * 4, true);
+  const p = u(0);
+  const c = u(1);
+  let score = 0;
+  for (let t = 0; t < p; t++) {
+    for (let col = 0; col < c; col++) {
+      const hits = u(2 + (t * c + col) * 3);
+      if (hits) score += hits * (COLUMN_WEIGHTS[col] ?? 1);
+    }
+  }
+  return score;
+}
+
+/**
+ * Run pass-1 candidate selection for a MATCH expression. Isolated so the caller
+ * can retry with a safe fallback expression if a hand-built expression turns out
+ * to be malformed (SQLite throws "malformed MATCH expression").
+ */
+function runCandidateQuery(
+  db: Database,
+  matchExpr: string
+): Array<{ thread_id: string; sort: number; mi: Uint8Array }> {
+  return db.query<{ thread_id: string; sort: number; mi: Uint8Array }>(`
+    SELECT ts.thread_id AS thread_id, t.sort AS sort,
+           matchinfo(thread_search, 'pcx') AS mi
+    FROM thread_search ts
+    JOIN threads t ON ts.thread_id = t.thread_id
+    WHERE thread_search MATCH ?
+    ORDER BY t.sort DESC
+    LIMIT ?
+  `).all(matchExpr, MAX_RANK_CANDIDATES);
+}
+
+function queryFTS(dbPath: string, queryStr: string, limit: number): DirectSearchResult {
   const db = new Database(dbPath, { readonly: true });
   try {
-    const matchExpr = buildMatchExpr(queryStr);
+    const matchExpr = buildFtsMatchExpr(queryStr);
 
+    // Pass 1: rank all matches by column-weighted relevance, tie-break recency.
+    // Backstop: if the parsed expression is somehow still malformed, retry with a
+    // plain fully-quoted token query so a bad query degrades to keyword search
+    // instead of crashing `superhuman search` with an unhandled SQLite error.
+    let candidates: Array<{ thread_id: string; sort: number; mi: Uint8Array }>;
+    try {
+      candidates = runCandidateQuery(db, matchExpr);
+    } catch {
+      const safeExpr = queryStr.trim().split(/\s+/).filter(Boolean)
+        .map(escapeFtsToken).join(" ") || escapeFtsToken(queryStr.trim());
+      try {
+        candidates = runCandidateQuery(db, safeExpr);
+      } catch {
+        return { threads: [], total: 0, capped: false };
+      }
+    }
+
+    const total = candidates.length;
+    const capped = total >= MAX_RANK_CANDIDATES;
+    if (total === 0) return { threads: [], total: 0, capped: false };
+
+    const scored = candidates.map((c) => ({
+      thread_id: c.thread_id,
+      sort: c.sort ?? 0,
+      score: scoreMatchInfo(c.mi),
+    }));
+    scored.sort((a, b) => (b.score - a.score) || (b.sort - a.sort));
+    const topIds = scored.slice(0, limit).map((s) => s.thread_id);
+
+    // Pass 2: fetch JSON + snippets for the selected page only.
+    const placeholders = topIds.map(() => "?").join(",");
     const rows = db.query<{
       thread_id: string;
       json: string;
@@ -317,19 +556,16 @@ function queryFTS(dbPath: string, queryStr: string, limit: number): InboxThread[
         snippet(thread_search, '<b>', '</b>', '…', 2, -15) AS body_snippet
       FROM thread_search ts
       JOIN threads t ON ts.thread_id = t.thread_id
-      WHERE thread_search MATCH ?
-      ORDER BY t.sort DESC
-      LIMIT ?
-    `).all(matchExpr, limit);
+      WHERE thread_search MATCH ? AND ts.thread_id IN (${placeholders})
+    `).all(matchExpr, ...topIds);
+    const rowMap = new Map(rows.map((r) => [r.thread_id, r]));
 
-    // Build a set of thread_ids for a single batch list_ids query
-    const threadIds = rows.map(r => r.thread_id);
+    // Batch list_ids query for the page's threads.
     const labelMap = new Map<string, string[]>();
-    if (threadIds.length > 0) {
-      const placeholders = threadIds.map(() => "?").join(",");
+    if (topIds.length > 0) {
       const labelRows = db.query<{ thread_id: string; list_id: string }>(
         `SELECT thread_id, list_id FROM list_ids WHERE thread_id IN (${placeholders})`
-      ).all(...threadIds);
+      ).all(...topIds);
       for (const lr of labelRows) {
         const arr = labelMap.get(lr.thread_id) ?? [];
         arr.push(lr.list_id);
@@ -337,7 +573,10 @@ function queryFTS(dbPath: string, queryStr: string, limit: number): InboxThread[
       }
     }
 
-    const threads = rows.map((row): InboxThread | null => {
+    // Build results in ranked order (topIds order), not pass-2 row order.
+    const threads = topIds.map((tid): InboxThread | null => {
+      const row = rowMap.get(tid);
+      if (!row) return null;
       let json: any;
       try {
         json = typeof row.json === "string" ? JSON.parse(row.json) : row.json;
@@ -375,12 +614,7 @@ function queryFTS(dbPath: string, queryStr: string, limit: number): InboxThread[
       };
     }).filter((t): t is InboxThread => t !== null);
 
-    // Sort by date descending
-    threads.sort(
-      (a, b) => new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime()
-    );
-
-    return threads;
+    return { threads, total, capped };
   } finally {
     db.close();
   }

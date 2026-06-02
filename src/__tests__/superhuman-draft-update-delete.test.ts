@@ -41,69 +41,54 @@ describe("SuperhumanDraftProvider update/delete", () => {
   });
 
   it("should update and delete native draft", async () => {
-    // Track API calls and created draft ID
+    // Track API calls; model the draft as mutable server state so the mock stays
+    // correct regardless of how many getThreads reads the merge path performs.
     const fetchCalls: Array<{ url: string; method: string; body?: any }> = [];
     let createdDraftId: string | null = null;
     let createdThreadId: string | null = null;
+    let deleted = false;
+    // The draft's current server-side value (full object, as getThreads returns it).
+    let serverDraft: Record<string, any> | null = null;
 
-    // Mock fetch to capture and respond to API calls
     globalThis.fetch = mock(async (url: string | URL, options?: RequestInit) => {
       const urlString = url.toString();
       const body = options?.body ? JSON.parse(options.body as string) : undefined;
+      fetchCalls.push({ url: urlString, method: options?.method || "GET", body });
 
-      fetchCalls.push({
-        url: urlString,
-        method: options?.method || "GET",
-        body,
-      });
-
-      // 1. Initial CREATE (setup) - capture draft ID from write request
       if (urlString.includes("userdata.writeMessage") && body?.writes?.[0]?.path) {
         const path = body.writes[0].path;
-        // Extract IDs from path: users/{userId}/threads/{threadId}/messages/{draftId}/draft
+        // Delete writes to the .../discardedAt path.
+        if (path.endsWith("/discardedAt")) {
+          deleted = true;
+          return new Response(JSON.stringify({ success: true }));
+        }
+        // Create/update write the full draft value to .../draft.
         const match = path.match(/threads\/([^/]+)\/messages\/([^/]+)\//);
         if (match && !createdDraftId) {
           createdThreadId = match[1];
           createdDraftId = match[2];
         }
+        // Reflect the written value as the new server state (what merge reads back).
+        serverDraft = body.writes[0].value;
         return new Response(JSON.stringify({ success: true }));
       }
 
-      // 2-4. LIST calls - return appropriate draft state
       if (urlString.includes("userdata.getThreads")) {
-        // After create/update: return the draft
-        if (fetchCalls.length <= 4 && createdDraftId) {
-          const subject = fetchCalls.length === 4 ? "Updated Subject" : "Original Subject";
-          return new Response(
-            JSON.stringify({
-              threadList: [
-                {
-                  id: createdThreadId, // threadId is at top level, not inside thread
-                  thread: {
-                    messages: {
-                      [createdDraftId]: {
-                        draft: {
-                          id: createdDraftId,
-                          subject,
-                          to: ["test@example.com"],
-                          from: "user@example.com",
-                          snippet: "Original content",
-                          date: "2026-02-08T12:00:00Z",
-                        },
-                      },
-                    },
-                  },
-                },
-              ],
-            })
-          );
+        if (deleted || !serverDraft || !createdDraftId) {
+          return new Response(JSON.stringify({ threadList: [] }));
         }
-
-        // After delete: return empty
-        return new Response(JSON.stringify({ threadList: [] }));
+        return new Response(
+          JSON.stringify({
+            threadList: [
+              {
+                id: createdThreadId, // threadId is at top level, not inside thread
+                thread: { messages: { [createdDraftId]: { draft: serverDraft } } },
+              },
+            ],
+          })
+        );
       }
 
-      // Fallback
       return new Response(JSON.stringify({}));
     }) as typeof fetch;
 
@@ -133,7 +118,7 @@ describe("SuperhumanDraftProvider update/delete", () => {
     expect(draftsAfterCreate).toHaveLength(1);
     expect(draftsAfterCreate[0].subject).toBe("Original Subject");
 
-    // 3. UPDATE - this will fail with "updateDraft is not a function"
+    // 3. UPDATE subject only — body/to must be preserved by the merge.
     const updateSuccess = await provider.updateDraft!(testDraftId, {
       subject: "Updated Subject",
     });
@@ -144,7 +129,7 @@ describe("SuperhumanDraftProvider update/delete", () => {
     expect(draftsAfterUpdate).toHaveLength(1);
     expect(draftsAfterUpdate[0].subject).toBe("Updated Subject");
 
-    // 5. DELETE - this will fail with "deleteDraft is not a function"
+    // 5. DELETE
     const deleteSuccess = await provider.deleteDraft!(testDraftId);
     expect(deleteSuccess).toBe(true);
 
@@ -152,30 +137,26 @@ describe("SuperhumanDraftProvider update/delete", () => {
     const draftsAfterDelete = await provider.listDrafts();
     expect(draftsAfterDelete).toHaveLength(0);
 
-    // === VERIFY API CALL SEQUENCE ===
-    expect(fetchCalls).toHaveLength(6);
+    // === VERIFY THE KEY CALLS HAPPENED (order-tolerant of merge reads) ===
+    const writes = fetchCalls.filter((c) => c.url.includes("userdata.writeMessage"));
 
-    // CREATE call
-    expect(fetchCalls[0].url).toContain("userdata.writeMessage");
-    expect(fetchCalls[0].body.writes[0].path).toContain("/draft");
+    // CREATE + UPDATE both write to the /draft path; DELETE writes /discardedAt.
+    const createWrite = writes.find((w) => w.body.writes[0].path.endsWith("/draft"));
+    expect(createWrite).toBeDefined();
 
-    // First LIST call
-    expect(fetchCalls[1].url).toContain("userdata.getThreads");
+    // The UPDATE write preserves body+to from the original (merge), changes subject.
+    const updateWrite = writes.find(
+      (w) =>
+        w.body.writes[0].path.endsWith("/draft") &&
+        w.body.writes[0].value.subject === "Updated Subject"
+    );
+    expect(updateWrite).toBeDefined();
+    expect(updateWrite!.body.writes[0].value.to).toEqual(["test@example.com"]);
+    expect(updateWrite!.body.writes[0].value.body).toBe("Original content");
 
-    // UPDATE call (reuses writeMessage)
-    expect(fetchCalls[2].url).toContain("userdata.writeMessage");
-    expect(fetchCalls[2].body.writes[0].value.subject).toBe("Updated Subject");
-
-    // Second LIST call
-    expect(fetchCalls[3].url).toContain("userdata.getThreads");
-
-    // DELETE call (writeMessage with discardedAt path)
-    expect(fetchCalls[4].url).toContain("userdata.writeMessage");
-    // The path should include /discardedAt
-    expect(fetchCalls[4].body.writes[0].path).toContain("/discardedAt");
-
-    // Final LIST call
-    expect(fetchCalls[5].url).toContain("userdata.getThreads");
+    // DELETE writes the discardedAt path.
+    const deleteWrite = writes.find((w) => w.body.writes[0].path.endsWith("/discardedAt"));
+    expect(deleteWrite).toBeDefined();
   });
 
   it("should handle update of non-existent draft", async () => {

@@ -22,6 +22,7 @@ import {
   type SuperhumanConnection,
 } from "./superhuman-api";
 import { listInbox, searchInbox, streamListInbox, streamSearchInbox } from "./inbox";
+import type { InboxThread } from "./inbox";
 import { searchDirect, listLocalAccounts, lookupThreadInfoById } from "./sqlite-search";
 import { saveDraftMeta, loadDraftMeta, deleteDraftMeta } from "./draft-cache";
 import { listAccounts, listAccountsChrome, switchAccount, type Account } from "./accounts";
@@ -70,7 +71,7 @@ import { SuperhumanProvider } from "./superhuman-provider";
 import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.29.2";
+const VERSION = "0.30.0";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9250", 10);
 
 /**
@@ -231,9 +232,12 @@ ${colors.bold}EXAMPLES${colors.reset}
   superhuman inbox --ai-label Respond --json
   superhuman inbox --label "AI/Respond" --label "AI/Meeting" --json
 
-  ${colors.dim}# Search emails${colors.reset}
+  ${colors.dim}# Search emails (keyword FTS + Gmail-style operators)${colors.reset}
+  ${colors.dim}# Operators: subject: from: to: cc: bcc: body: is:starred is:unread${colors.reset}
+  ${colors.dim}#            in:sent in:inbox label:<NAME>  -term (exclude)  "exact phrase"${colors.reset}
   superhuman search "from:john subject:meeting"
-  superhuman search "project update" --limit 20
+  superhuman search "subject:leak is:starred"
+  superhuman search "project update" -newsletter --limit 20
   superhuman search "from:anthropic" --include-done
 
   ${colors.dim}# Read an email thread${colors.reset}
@@ -1722,16 +1726,21 @@ async function cmdSearch(options: CliOptions) {
 
     if (!useAI) {
       // 1. Try direct SQLite FTS (reads OPFS blob from disk — no browser needed)
-      let threads = await searchDirect({
+      const directResult = await searchDirect({
         query: options.query,
         limit: searchOptions.limit,
         accountEmail,
       });
 
+      let threads: InboxThread[] | null = directResult?.threads ?? null;
+      let total: number = directResult?.total ?? 0;
+      const capped: boolean = directResult?.capped ?? false;
+
       // 2. Fall back to portal RPC FTS (requires CDP connection)
-      if (threads === null && provider.hasPortal()) {
+      if (directResult === null && provider.hasPortal()) {
         try {
           threads = await searchInbox(provider, searchOptions);
+          total = threads.length;
         } catch (e) {
           error(`Search failed: ${(e as Error).message}`);
           await provider.disconnect();
@@ -1739,32 +1748,50 @@ async function cmdSearch(options: CliOptions) {
         }
       }
 
-      if (threads !== null) {
+      // Only treat a NON-EMPTY local/portal result as terminal. An empty result
+      // (0 matches) falls through to AI/server-side search as a safety net —
+      // the local FTS index may simply not have the thread, or it may be stale.
+      if (threads !== null && threads.length > 0) {
         if (options.json) {
           for (const t of threads) console.log(JSON.stringify(t));
         } else {
-          if (threads.length === 0) {
-            info(`No results for "${options.query}"`);
-          } else {
-            info(`Found ${threads.length} result(s) for "${options.query}":\n`);
-            console.log(
-              `${colors.dim}${"  From".padEnd(27)} ${"Subject".padEnd(40)} ${"Date".padEnd(10)}${colors.reset}`
+          info(`Found ${total} result(s) for "${options.query}":\n`);
+          console.log(
+            `${colors.dim}${"  From".padEnd(27)} ${"Subject".padEnd(40)} ${"Date".padEnd(10)}${colors.reset}`
+          );
+          console.log(colors.dim + "─".repeat(80) + colors.reset);
+          for (const thread of threads) {
+            const starred = thread.labelIds.includes("STARRED") || thread.labelIds.includes("FLAGGED");
+            const star = starred ? `${colors.yellow}★${colors.reset} ` : "  ";
+            const from = truncate(thread.from.name || thread.from.email, 24);
+            const subject = truncate(thread.subject, 39);
+            const date = formatDate(thread.date);
+            console.log(`${star}${from.padEnd(25)} ${subject.padEnd(40)} ${date}`);
+          }
+          if (total > threads.length) {
+            const totalLabel = capped ? `${total}+` : `${total}`;
+            const more = capped
+              ? `refine your query to narrow results.`
+              : `use --limit ${Math.min(total, 50)} to see more.`;
+            info(
+              `\nShowing top ${threads.length} of ${totalLabel} by relevance — ${more}`
             );
-            console.log(colors.dim + "─".repeat(80) + colors.reset);
-            for (const thread of threads) {
-              const starred = thread.labelIds.includes("STARRED") || thread.labelIds.includes("FLAGGED");
-              const star = starred ? `${colors.yellow}★${colors.reset} ` : "  ";
-              const from = truncate(thread.from.name || thread.from.email, 24);
-              const subject = truncate(thread.subject, 39);
-              const date = formatDate(thread.date);
-              console.log(`${star}${from.padEnd(25)} ${subject.padEnd(40)} ${date}`);
-            }
           }
         }
         await provider.disconnect();
         return;
       }
-      // Fall through to AI search if no local SQLite blob found
+
+      // Empty result: announce the fall-through (non-JSON only) and continue to
+      // the AI search path below instead of declaring "No results".
+      if (!options.json) {
+        info(`No local matches for "${options.query}" — trying AI search…`);
+      }
+      // Drop any live CDP connection first: a connected Chrome intercepts Bun's
+      // fetch to mail.superhuman.com and makes the AI request hang. Token/email
+      // are cached on the provider, so AI search still works after disconnect.
+      await provider.disconnect();
+      // Fall through to AI search (also reached when no local SQLite blob found).
     }
 
     // AI search path (--ai flag or no CDP portal)
@@ -1795,6 +1822,17 @@ async function cmdSearch(options: CliOptions) {
         }
         // Final summary line (distinguishable by type field)
         console.log(JSON.stringify({ type: "ai_summary", query: options.query, response: aiResult.response }));
+      } else if (!aiResult.response.trim() && aiResult.retrievals.length === 0) {
+        // Guard against silent empty: an agentic AI response with no narrative
+        // and no retrievals must not look like a successful "nothing here".
+        info(`No results for "${options.query}".`);
+        console.log(
+          colors.dim +
+          "Tip: AI search interprets natural language, not Gmail operators. " +
+          "Try plain keywords (e.g. the sender's name or a distinctive word " +
+          "from the subject) rather than subject:/is:/in: syntax." +
+          colors.reset
+        );
       } else {
         info(`Search results for "${options.query}" (AI-powered):\n`);
         // Show the AI narrative first

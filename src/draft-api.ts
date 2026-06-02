@@ -77,6 +77,11 @@ function generateRfc822Id(): string {
   return `<${random}.${uuid}@we.are.superhuman.com>`;
 }
 
+/** Normalize a recipient list for a draft value (empty/undefined -> []). */
+function formatRecipients(emails?: string[]): string[] {
+  return !emails || emails.length === 0 ? [] : emails;
+}
+
 export interface DraftOptions {
   to?: string[];
   cc?: string[];
@@ -187,12 +192,6 @@ export async function createDraftWithUserInfo(
     // original thread's ID to keep the email in the same thread.
     const threadId = options.inReplyToThreadId || draftId;
     const now = new Date().toISOString();
-
-    // Format recipients
-    const formatRecipients = (emails?: string[]): string[] => {
-      if (!emails || emails.length === 0) return [];
-      return emails;
-    };
 
     const draftValue = {
       id: draftId,
@@ -428,6 +427,51 @@ export interface SendDraftResult {
  * Core function to update a draft with pre-extracted user info.
  * Can be used with cached credentials (no CDP needed).
  */
+/**
+ * Fetch the current stored value of a single draft from the backend.
+ *
+ * `userdata.writeMessage` replaces the WHOLE value at the draft path, so an
+ * update must merge against the existing draft — otherwise unspecified fields
+ * (To / Subject / CC / references / …) get blanked. Returns the raw draft
+ * object, or null if it genuinely can't be located or the backend was
+ * unreachable (the caller then REFUSES to overwrite rather than blanking).
+ *
+ * Draft IDs are globally unique, so we scan the draft set and match by id. The
+ * backend rejects limit > 100 with a 400, so we page through in 100s (up to a
+ * safety cap) instead of silently missing drafts beyond the first page.
+ */
+async function fetchDraftValue(
+  userInfo: UserInfo,
+  draftId: string
+): Promise<Record<string, any> | null> {
+  const PAGE = 100;
+  const MAX_DRAFTS = 1000; // safety cap on pagination
+  try {
+    for (let offset = 0; offset < MAX_DRAFTS; offset += PAGE) {
+      const response = await backendFetchWithRetry(
+        `${SUPERHUMAN_BACKEND}/v3/userdata.getThreads`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ filter: { type: "draft" }, offset, limit: PAGE }),
+        },
+        userInfo
+      );
+      if (!response.ok) return null;
+      const data: any = await response.json();
+      const list: any[] = data.threadList || [];
+      for (const th of list) {
+        const msg = th?.thread?.messages?.[draftId];
+        if (msg?.draft) return msg.draft as Record<string, any>;
+      }
+      if (list.length < PAGE) break; // last page reached
+    }
+    return null;
+  } catch {
+    return null;
+  }
+}
+
 export async function updateDraftWithUserInfo(
   userInfo: UserInfo,
   threadId: string,
@@ -437,44 +481,69 @@ export async function updateDraftWithUserInfo(
   try {
     const now = new Date().toISOString();
 
-    // Format recipients
-    const formatRecipients = (emails?: string[]): string[] => {
-      if (!emails || emails.length === 0) return [];
-      return emails;
-    };
+    // MERGE, don't replace: writeMessage overwrites the entire draft value, so
+    // we must preserve every field the caller did NOT explicitly pass. Fetch the
+    // current draft and use it as the base; only fields present in `options`
+    // (i.e. flags the user actually passed) override it.
+    const existing = await fetchDraftValue(userInfo, draftId);
+
+    // If we cannot read the current draft (not found in the draft set, or the
+    // backend was unreachable), REFUSE to write — a blind write here would blank
+    // To/Subject/body and silently destroy the draft (the bug this merge fixes).
+    if (!existing) {
+      throw new Error(
+        `Cannot read current state of draft ${draftId} (not found among drafts, ` +
+        `or backend unreachable). Refusing to overwrite to avoid blanking ` +
+        `To/Subject/body.`
+      );
+    }
+
+    const pick = <T>(opt: T | undefined, fallback: T): T =>
+      opt !== undefined ? opt : fallback;
+
+    const to = options.to !== undefined ? formatRecipients(options.to) : (existing.to ?? []);
+    const cc = options.cc !== undefined ? formatRecipients(options.cc) : (existing.cc ?? []);
+    const bcc = options.bcc !== undefined ? formatRecipients(options.bcc) : (existing.bcc ?? []);
+    const subject = pick(options.subject, existing.subject ?? "");
+    const body = pick(options.body, existing.body ?? "");
+    const snippet = body.replace(/<[^>]*>/g, "").substring(0, 100);
 
     const draftValue = {
+      // Carry forward any fields we don't explicitly manage (autoDraftKind,
+      // strippedAt, unread, quotedContentInlined, …) so an edit never drops them.
+      ...existing,
       id: draftId,
       threadId: threadId,
-      action: options.action || "compose",
-      name: null,
-      from: `${userInfo.email.split("@")[0]} <${userInfo.email}>`,
-      to: formatRecipients(options.to),
-      cc: formatRecipients(options.cc),
-      bcc: formatRecipients(options.bcc),
-      subject: options.subject || "",
-      body: options.body || "",
-      snippet: (options.body || "").replace(/<[^>]*>/g, "").substring(0, 100),
-      inReplyToRfc822Id: options.inReplyToRfc822Id || null,
-      labelIds: ["DRAFT"],
-      clientCreatedAt: now,
+      action: pick(options.action, existing.action ?? "compose"),
+      name: existing.name ?? null,
+      from: existing.from || `${userInfo.email.split("@")[0]} <${userInfo.email}>`,
+      to,
+      cc,
+      bcc,
+      subject,
+      body,
+      snippet,
+      inReplyToRfc822Id: pick(options.inReplyToRfc822Id, existing.inReplyToRfc822Id ?? null),
+      labelIds: existing.labelIds ?? ["DRAFT"],
+      clientCreatedAt: existing.clientCreatedAt ?? now,
       date: now,
       fingerprint: {
-        to: (options.to || []).join(","),
-        cc: (options.cc || []).join(","),
-        attachments: "",
+        to: to.join(","),
+        cc: cc.join(","),
+        attachments: existing.fingerprint?.attachments ?? "",
       },
       lastSessionId: crypto.randomUUID(),
-      quotedContent: "",
-      quotedContentInlined: false,
-      references: [],
-      reminder: null,
-      rfc822Id: generateRfc822Id(),
-      scheduledFor: null,
-      scheduledReplyInterruptedAt: null,
-      schemaVersion: 3,
-      totalComposeSeconds: 0,
-      timeZone: userInfo.timeZone,
+      quotedContent: existing.quotedContent ?? "",
+      quotedContentInlined: existing.quotedContentInlined ?? false,
+      references: pick(options.references, existing.references ?? []),
+      reminder: existing.reminder ?? null,
+      // Preserve the message-id across edits (the old code regenerated it).
+      rfc822Id: existing.rfc822Id || generateRfc822Id(),
+      scheduledFor: existing.scheduledFor ?? null,
+      scheduledReplyInterruptedAt: existing.scheduledReplyInterruptedAt ?? null,
+      schemaVersion: existing.schemaVersion ?? 3,
+      totalComposeSeconds: existing.totalComposeSeconds ?? 0,
+      timeZone: existing.timeZone || userInfo.timeZone,
     };
 
     const requestBody = {
