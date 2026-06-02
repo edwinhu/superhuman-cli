@@ -17,6 +17,40 @@ bun install
 /Applications/Superhuman.app/Contents/MacOS/Superhuman --remote-debugging-port=9250
 ```
 
+## Building & Installing
+
+Compile a standalone binary and put it on your `PATH`:
+
+```bash
+# Compile to ./superhuman
+bun run build   # bun build --compile src/cli.ts --outfile superhuman
+
+# Install to ~/.local/bin (or anywhere on your PATH)
+cp superhuman ~/.local/bin/superhuman
+```
+
+### macOS gotcha: re-sign after copying (exit 137 / SIGKILL)
+
+On macOS, copying a freshly `--compile`d Bun binary **invalidates its code
+signature**, and Gatekeeper then `SIGKILL`s it on launch. The symptom is
+confusing: the binary exits with code **137** and **zero output**, which looks
+like a broken build but isn't. Re-sign the installed copy after every rebuild:
+
+```bash
+xattr -c ~/.local/bin/superhuman                       # strip quarantine/extended attrs
+codesign --force --sign - ~/.local/bin/superhuman      # ad-hoc re-sign
+```
+
+Tip: fold this into your install step so future rebuilds don't trip on it:
+
+```bash
+bun run build \
+  && cp superhuman ~/.local/bin/superhuman \
+  && xattr -c ~/.local/bin/superhuman \
+  && codesign --force --sign - ~/.local/bin/superhuman \
+  && superhuman --version   # confirm it runs
+```
+
 ## CLI Usage
 
 ```bash
