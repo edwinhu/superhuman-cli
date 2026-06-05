@@ -71,7 +71,7 @@ import { SuperhumanProvider } from "./superhuman-provider";
 import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.30.1";
+const VERSION = "0.30.2";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9250", 10);
 
 /**
@@ -83,6 +83,23 @@ function buildUserInfo(token: any, accountEmail?: string): UserInfo {
   const authToken = token.superhumanToken?.token || token.idToken || token.accessToken;
   const email = token.email || accountEmail || "";
   return getUserInfoFromCache(token.userId, email, authToken, undefined, token.userExternalId, token.deviceId);
+}
+
+/**
+ * Resolve the provider message item-id of the message being replied to, used for
+ * outgoing_message.in_reply_to and current_message_ids when sending a reply.
+ *
+ * The Superhuman send endpoint is provider-agnostic, but these id VALUES are
+ * provider-native (the backend forwards them to Gmail/Graph to thread the send).
+ * The inbox id the user passes (`threadId`) means different things per provider:
+ * for Microsoft it already IS the message item-id, but for Gmail it's a THREAD
+ * id and the message id lives in `threadInfo.gmailMessageId`. Resolve here so the
+ * reply paths stay provider-blind. Mirrors the `!token.isMicrosoft` convention
+ * used elsewhere (e.g. the Gmail message-HTML fetch).
+ */
+function resolveReplyItemId(token: any, threadInfo: any, threadId: string): string {
+  if (!token?.isMicrosoft && threadInfo?.gmailMessageId) return threadInfo.gmailMessageId;
+  return threadId;
 }
 
 /**
@@ -2110,6 +2127,10 @@ async function cmdReply(options: CliOptions) {
         return;
       }
 
+      // Provider message item-id of the message being replied to (Gmail: the
+      // message id, not the thread id the user passed).
+      const replyMsgId = resolveReplyItemId(token, threadInfo, options.threadId);
+
       // Cache metadata so `draft send <id>` works without --to/--subject/--body
       saveDraftMeta({
         draftId: result.draftId!,
@@ -2118,8 +2139,8 @@ async function cmdReply(options: CliOptions) {
         subject,
         htmlBody,
         inReplyTo: threadInfo.messageId || undefined,
-        inReplyToItemId: options.threadId,
-        replyItemIds: [options.threadId],
+        inReplyToItemId: replyMsgId,
+        replyItemIds: [replyMsgId],
         references: threadInfo.references,
         createdAt: new Date().toISOString(),
       });
@@ -2152,9 +2173,9 @@ async function cmdReply(options: CliOptions) {
           subject,
           htmlBody,
           inReplyTo: threadInfo.messageId || undefined,
-          inReplyToItemId: options.threadId,
+          inReplyToItemId: replyMsgId,
           references: threadInfo.references,
-          currentMessageIds: [options.threadId, result.draftId!],
+          currentMessageIds: [replyMsgId, result.draftId!],
           attachments: uploadedAttachments.length > 0 ? uploadedAttachments : undefined,
         });
         if (sent.success) {
@@ -2258,6 +2279,10 @@ async function cmdReplyAll(options: CliOptions) {
         return;
       }
 
+      // Provider message item-id of the message being replied to (Gmail: the
+      // message id, not the thread id the user passed).
+      const replyMsgId = resolveReplyItemId(token, threadInfo, options.threadId);
+
       // Cache metadata so `draft send <id>` works without --to/--subject/--body
       saveDraftMeta({
         draftId: result.draftId!,
@@ -2266,8 +2291,8 @@ async function cmdReplyAll(options: CliOptions) {
         subject,
         htmlBody,
         inReplyTo: threadInfo.messageId || undefined,
-        inReplyToItemId: options.threadId,
-        replyItemIds: [options.threadId],
+        inReplyToItemId: replyMsgId,
+        replyItemIds: [replyMsgId],
         references: threadInfo.references,
         createdAt: new Date().toISOString(),
       });
@@ -2301,9 +2326,9 @@ async function cmdReplyAll(options: CliOptions) {
           subject,
           htmlBody,
           inReplyTo: threadInfo.messageId || undefined,
-          inReplyToItemId: options.threadId,
+          inReplyToItemId: replyMsgId,
           references: threadInfo.references,
-          currentMessageIds: [options.threadId, result.draftId!],
+          currentMessageIds: [replyMsgId, result.draftId!],
           attachments: uploadedAttachments.length > 0 ? uploadedAttachments : undefined,
         });
         if (sent.success) {
