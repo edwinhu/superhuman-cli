@@ -107,11 +107,19 @@ export interface ThreadInfoForReply {
 async function userInfoFromProvider(provider: SuperhumanProvider) {
   const token = await provider.getToken();
   const email = await provider.getCurrentEmail();
+  // The Superhuman backend bearer is the Superhuman-issued token (or a raw
+  // Google/MS *ID* token) — NOT the provider access token. For Microsoft
+  // accounts `accessToken` is an MS Graph token, which the backend rejects with
+  // 403. Mirror buildUserInfo()'s selection and forward the external-id/device
+  // headers so compose `send` and `send --draft` authenticate like `draft send`.
+  const authToken = token.superhumanToken?.token || token.idToken || token.accessToken;
   return getUserInfoFromCache(
-    token.superhumanToken?.token || token.accessToken,
+    token.userId || "",
     email,
-    token.accessToken,
-    email.split("@")[0]
+    authToken,
+    email.split("@")[0],
+    token.userExternalId,
+    token.deviceId
   );
 }
 

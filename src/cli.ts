@@ -85,6 +85,33 @@ function buildUserInfo(token: any, accountEmail?: string): UserInfo {
   return getUserInfoFromCache(token.userId, email, authToken, undefined, token.userExternalId, token.deviceId);
 }
 
+/**
+ * Persist attachments uploaded against a draft into its local cache entry, so a
+ * later `draft send <id>` re-includes them in the outgoing_message. Drafts
+ * created with `--attach` but sent in a separate step would otherwise drop the
+ * attachment (the cache only stored to/subject/body), making Superhuman's
+ * backend silently fail the queued send.
+ */
+function cacheDraftAttachments(draftId: string, atts: SuperhumanAttachment[]): void {
+  if (atts.length === 0) return;
+  const meta = loadDraftMeta(draftId);
+  if (!meta) return;
+  meta.attachments = atts.map((a) => ({
+    uuid: a.uuid,
+    cid: a.cid,
+    name: a.name,
+    type: a.type,
+    inline: a.inline,
+    downloadUrl: a.downloadUrl,
+    threadId: a.threadId,
+    messageId: a.messageId,
+    size: a.size,
+    fixedPartId: a.fixedPartId,
+    attachmentId: a.attachmentId,
+  }));
+  saveDraftMeta(meta);
+}
+
 // ANSI colors
 const colors = {
   reset: "\x1b[0m",
@@ -1449,8 +1476,27 @@ async function cmdSendDraft(options: CliOptions) {
   const bccRecipients: Recipient[] | undefined =
     options.bcc.length > 0 ? options.bcc.map(parseRecipient) : undefined;
 
+  // Re-include any attachments uploaded when the draft was created. Without
+  // this the queued send carries `attachments: []`, and Superhuman's backend
+  // fails delivery silently (the draft still has the blob recorded server-side,
+  // but the outgoing_message doesn't reference it).
+  const draftAttachments: SuperhumanAttachment[] = (cachedMeta?.attachments ?? []).map((a) => ({
+    uuid: a.uuid,
+    name: a.name,
+    type: a.type,
+    inline: a.inline,
+    downloadUrl: a.downloadUrl,
+    cid: a.cid,
+    threadId: a.threadId,
+    messageId: a.messageId,
+    size: a.size,
+    fixedPartId: a.fixedPartId ?? "0",
+    attachmentId: a.attachmentId ?? null,
+  }));
+
   if (cachedMeta) {
-    info(`Sending draft ${draftId.slice(-15)} to ${resolvedTo.join(", ")}...`);
+    const attachNote = draftAttachments.length > 0 ? ` with ${draftAttachments.length} attachment(s)` : "";
+    info(`Sending draft ${draftId.slice(-15)}${attachNote} to ${resolvedTo.join(", ")}...`);
   } else {
     info(`Sending draft ${draftId.slice(-15)}...`);
   }
@@ -1464,17 +1510,31 @@ async function cmdSendDraft(options: CliOptions) {
     subject: resolvedSubject,
     htmlBody: resolvedHtmlBody,
     inReplyTo: cachedMeta?.inReplyTo,
+    inReplyToItemId: cachedMeta?.inReplyToItemId,
     references: cachedMeta?.references,
+    // Replies need the prior thread message ids in current_message_ids (+ this
+    // draft) or the MS-account send fails silently. Compose drafts have none.
+    currentMessageIds: cachedMeta?.replyItemIds && cachedMeta.replyItemIds.length > 0
+      ? [...cachedMeta.replyItemIds, draftId]
+      : undefined,
     delay: options.sendDraftDelay,
+    attachments: draftAttachments.length > 0 ? draftAttachments : undefined,
   });
 
   if (result.success) {
-    success("Draft sent!");
+    // The /messages/send 200 means Superhuman ACCEPTED the message into its
+    // scheduled-send queue — it is NOT a delivery confirmation. Actual provider
+    // delivery happens after the undo window and can still fail (Superhuman
+    // injects a "failed to send" notice up to ~10 min later). Report accurately
+    // so the ✓ is never mistaken for guaranteed delivery.
     if (result.sendAt) {
       const sendTime = new Date(result.sendAt);
-      log(`  ${colors.dim}Scheduled for: ${sendTime.toLocaleString()}${colors.reset}`);
+      success(`Draft queued — dispatching at ${sendTime.toLocaleString()}`);
+    } else {
+      success("Draft queued for send");
     }
     log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
+    log(`  ${colors.dim}Delivery confirms after the undo window; a failure would surface in your inbox.${colors.reset}`);
 
     // Clean up local cache entry
     deleteDraftMeta(draftId);
@@ -2058,6 +2118,8 @@ async function cmdReply(options: CliOptions) {
         subject,
         htmlBody,
         inReplyTo: threadInfo.messageId || undefined,
+        inReplyToItemId: options.threadId,
+        replyItemIds: [options.threadId],
         references: threadInfo.references,
         createdAt: new Date().toISOString(),
       });
@@ -2078,6 +2140,9 @@ async function cmdReply(options: CliOptions) {
         }
       }
 
+      // Persist uploads to the cache so a later `draft send <id>` re-includes them.
+      cacheDraftAttachments(result.draftId!, uploadedAttachments);
+
       // Send if requested
       if (options.send) {
         const sent = await sendDraftSuperhuman(userInfo, {
@@ -2087,7 +2152,9 @@ async function cmdReply(options: CliOptions) {
           subject,
           htmlBody,
           inReplyTo: threadInfo.messageId || undefined,
+          inReplyToItemId: options.threadId,
           references: threadInfo.references,
+          currentMessageIds: [options.threadId, result.draftId!],
           attachments: uploadedAttachments.length > 0 ? uploadedAttachments : undefined,
         });
         if (sent.success) {
@@ -2199,6 +2266,8 @@ async function cmdReplyAll(options: CliOptions) {
         subject,
         htmlBody,
         inReplyTo: threadInfo.messageId || undefined,
+        inReplyToItemId: options.threadId,
+        replyItemIds: [options.threadId],
         references: threadInfo.references,
         createdAt: new Date().toISOString(),
       });
@@ -2219,6 +2288,9 @@ async function cmdReplyAll(options: CliOptions) {
         }
       }
 
+      // Persist uploads to the cache so a later `draft send <id>` re-includes them.
+      cacheDraftAttachments(result.draftId!, uploadedAttachments);
+
       // Send if requested
       if (options.send) {
         const toRecipients = uniqueRecipients.map(e => ({ email: e, name: "" }));
@@ -2229,7 +2301,9 @@ async function cmdReplyAll(options: CliOptions) {
           subject,
           htmlBody,
           inReplyTo: threadInfo.messageId || undefined,
+          inReplyToItemId: options.threadId,
           references: threadInfo.references,
+          currentMessageIds: [options.threadId, result.draftId!],
           attachments: uploadedAttachments.length > 0 ? uploadedAttachments : undefined,
         });
         if (sent.success) {
@@ -2364,6 +2438,9 @@ async function cmdForward(options: CliOptions) {
           }
         }
       }
+
+      // Persist uploads to the cache so a later `draft send <id>` re-includes them.
+      cacheDraftAttachments(result.draftId!, uploadedAttachments);
 
       // Send if requested
       if (options.send) {

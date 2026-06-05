@@ -9,6 +9,26 @@ import { readFileSync, writeFileSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
 
+/**
+ * A previously-uploaded attachment, persisted so `draft send <id>` can include
+ * it in the outgoing_message. Without this, a draft created with `--attach`
+ * (reply/forward) and sent later via `draft send` would drop the attachment,
+ * which makes Superhuman's backend fail the queued send silently.
+ */
+export interface DraftMetaAttachment {
+  uuid: string;
+  cid: string;
+  name: string;
+  type: string;
+  inline: boolean;
+  downloadUrl: string;
+  threadId: string;
+  messageId: string;
+  size: number;
+  fixedPartId: string;
+  attachmentId: string | null;
+}
+
 export interface DraftMeta {
   draftId: string;
   threadId: string;
@@ -20,6 +40,20 @@ export interface DraftMeta {
   inReplyTo?: string;
   references?: string[];
   createdAt: string;
+  /** Attachments uploaded against this draft (so `draft send` can re-include them) */
+  attachments?: DraftMetaAttachment[];
+  /**
+   * Provider (MS Graph item / Gmail) message id of the message being replied to.
+   * Goes into outgoing_message.in_reply_to at send time (distinct from the rfc822
+   * In-Reply-To header). Needed for the backend to thread + send a reply.
+   */
+  inReplyToItemId?: string;
+  /**
+   * Provider message ids of the prior messages in the thread. At send time the
+   * draft id is appended to form outgoing_message.current_message_ids. Without
+   * this a reply sent via `draft send` carries only [draftId] and fails delivery.
+   */
+  replyItemIds?: string[];
 }
 
 function getCacheFile(): string {

@@ -395,10 +395,23 @@ export interface SendDraftOptions {
   delay?: number;
   /** Attachments uploaded via uploadAttachmentSuperhuman() */
   attachments?: SuperhumanAttachment[];
-  /** RFC822 Message-ID to reply to */
+  /** RFC822 Message-ID to reply to (used for the In-Reply-To MIME header) */
   inReplyTo?: string;
   /** Reference chain for threading */
   references?: string[];
+  /**
+   * Provider (MS Graph item / Gmail) message id of the message being replied to.
+   * The app puts this in outgoing_message.in_reply_to (NOT the rfc822 id, which
+   * goes in the In-Reply-To header). Required for the backend to thread + send a
+   * reply on Microsoft accounts.
+   */
+  inReplyToItemId?: string;
+  /**
+   * Provider message ids that make up the thread, plus this draft id. The app
+   * sends `current_message_ids: [...priorItemIds, draftId]` for a reply; sending
+   * only [draftId] (the default) makes the MS-account reply send fail silently.
+   */
+  currentMessageIds?: string[];
 }
 
 /**
@@ -410,6 +423,18 @@ export interface SuperhumanAttachment {
   type: string; // MIME type
   inline: boolean;
   downloadUrl: string;
+  /** Separate content-id UUID (distinct from uuid), required in outgoing_message.attachments[].cid */
+  cid: string;
+  /** Thread the attachment was uploaded against — needed for source.thread_id at send time */
+  threadId: string;
+  /** Draft/message the attachment was uploaded against — needed for source.message_id at send time */
+  messageId: string;
+  /** Decoded byte size of the attachment (used for the userdata metadata write) */
+  size: number;
+  /** MIME part id; the app uses "0" for a single uploaded attachment (source.fixed_part_id) */
+  fixedPartId: string;
+  /** Provider attachment id — null for a not-yet-sent firebase upload (source.attachment_id) */
+  attachmentId: string | null;
 }
 
 /**
@@ -681,6 +706,7 @@ export async function uploadAttachmentSuperhuman(
 
   // Write attachment metadata so the draft shows the attachment in Superhuman UI
   const cid = crypto.randomUUID();
+  const size = Buffer.from(base64Content, "base64").length;
   const metadataBody = {
     writes: [
       {
@@ -703,7 +729,7 @@ export async function uploadAttachmentSuperhuman(
           },
           discardedAt: null,
           createdAt: new Date().toISOString(),
-          size: Buffer.from(base64Content, "base64").length,
+          size,
         },
       },
     ],
@@ -737,6 +763,12 @@ export async function uploadAttachmentSuperhuman(
     type: mimeType,
     inline: false,
     downloadUrl: data.downloadUrl,
+    cid,
+    threadId,
+    messageId: draftId,
+    size,
+    fixedPartId: "0",
+    attachmentId: null,
   };
 }
 
@@ -790,26 +822,41 @@ export async function sendDraftSuperhuman(
       rfc822_id: rfc822Id,
       thread_id: options.threadId,
       message_id: options.draftId,
-      in_reply_to: options.inReplyTo || null,
+      in_reply_to: options.inReplyToItemId || options.inReplyTo || null,
       from: { email: userInfo.email, name: fromName },
       to: formatRecipientForSend(options.to),
       cc: formatRecipientForSend(options.cc || []),
       bcc: formatRecipientForSend(options.bcc || []),
       subject: options.subject,
       html_body: options.htmlBody,
+      // outgoing_message.attachments[] must match BYTE-FOR-BYTE what Superhuman's
+      // own app sends (captured via CDP network monitoring of a real attachment
+      // send). For an upload-firebase attachment the `source` carries ONLY
+      // {type, thread_id, message_id, uuid} — the app's serializer also lists
+      // attachment_id/fixed_part_id/cid but they are `undefined` for an upload so
+      // JSON.stringify omits them; including them (e.g. attachment_id:null) makes
+      // the backend reject the reference, so the queued send is accepted (HTTP 200)
+      // but later fails delivery — the silent "failed to send" notice ~10 min later.
+      // The backend resolves the blob from the userdata attachment metadata (which
+      // carries the firebase url) by joining on thread_id/message_id/uuid.
       attachments: (options.attachments || []).map((att) => ({
         uuid: att.uuid,
+        cid: att.cid ?? att.uuid,
         name: att.name,
         type: att.type,
         inline: att.inline,
         source: {
-          type: "upload",
+          type: "upload-firebase",
+          thread_id: att.threadId ?? options.threadId,
+          message_id: att.messageId ?? options.draftId,
           uuid: att.uuid,
         },
       })),
       scheduled_for: null,
       abort_on_reply: false,
-      current_message_ids: [options.draftId],
+      current_message_ids: options.currentMessageIds && options.currentMessageIds.length > 0
+        ? options.currentMessageIds
+        : [options.draftId],
       mail_merge_recipients: [],
     };
 
