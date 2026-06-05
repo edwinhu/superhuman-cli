@@ -8,26 +8,14 @@
 import { readFileSync, writeFileSync, mkdirSync } from "fs";
 import { join, dirname } from "path";
 import { homedir } from "os";
+import type { SuperhumanAttachment } from "./draft-api";
 
 /**
- * A previously-uploaded attachment, persisted so `draft send <id>` can include
- * it in the outgoing_message. Without this, a draft created with `--attach`
- * (reply/forward) and sent later via `draft send` would drop the attachment,
- * which makes Superhuman's backend fail the queued send silently.
+ * A previously-uploaded attachment, persisted so `draft send <id>` can re-include
+ * it in the outgoing_message. It is the same shape `sendDraftSuperhuman` consumes
+ * — sharing the type keeps the cache and send payload from drifting apart.
  */
-export interface DraftMetaAttachment {
-  uuid: string;
-  cid: string;
-  name: string;
-  type: string;
-  inline: boolean;
-  downloadUrl: string;
-  threadId: string;
-  messageId: string;
-  size: number;
-  fixedPartId: string;
-  attachmentId: string | null;
-}
+export type DraftMetaAttachment = SuperhumanAttachment;
 
 export interface DraftMeta {
   draftId: string;

@@ -113,19 +113,8 @@ function cacheDraftAttachments(draftId: string, atts: SuperhumanAttachment[]): v
   if (atts.length === 0) return;
   const meta = loadDraftMeta(draftId);
   if (!meta) return;
-  meta.attachments = atts.map((a) => ({
-    uuid: a.uuid,
-    cid: a.cid,
-    name: a.name,
-    type: a.type,
-    inline: a.inline,
-    downloadUrl: a.downloadUrl,
-    threadId: a.threadId,
-    messageId: a.messageId,
-    size: a.size,
-    fixedPartId: a.fixedPartId,
-    attachmentId: a.attachmentId,
-  }));
+  // DraftMetaAttachment is an alias of SuperhumanAttachment — store as-is.
+  meta.attachments = atts;
   saveDraftMeta(meta);
 }
 
@@ -1496,20 +1485,9 @@ async function cmdSendDraft(options: CliOptions) {
   // Re-include any attachments uploaded when the draft was created. Without
   // this the queued send carries `attachments: []`, and Superhuman's backend
   // fails delivery silently (the draft still has the blob recorded server-side,
-  // but the outgoing_message doesn't reference it).
-  const draftAttachments: SuperhumanAttachment[] = (cachedMeta?.attachments ?? []).map((a) => ({
-    uuid: a.uuid,
-    name: a.name,
-    type: a.type,
-    inline: a.inline,
-    downloadUrl: a.downloadUrl,
-    cid: a.cid,
-    threadId: a.threadId,
-    messageId: a.messageId,
-    size: a.size,
-    fixedPartId: a.fixedPartId ?? "0",
-    attachmentId: a.attachmentId ?? null,
-  }));
+  // but the outgoing_message doesn't reference it). DraftMetaAttachment is an
+  // alias of SuperhumanAttachment, so the cached entries are used directly.
+  const draftAttachments: SuperhumanAttachment[] = cachedMeta?.attachments ?? [];
 
   if (cachedMeta) {
     const attachNote = draftAttachments.length > 0 ? ` with ${draftAttachments.length} attachment(s)` : "";

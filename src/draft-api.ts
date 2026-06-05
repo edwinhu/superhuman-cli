@@ -429,12 +429,8 @@ export interface SuperhumanAttachment {
   threadId: string;
   /** Draft/message the attachment was uploaded against — needed for source.message_id at send time */
   messageId: string;
-  /** Decoded byte size of the attachment (used for the userdata metadata write) */
+  /** Decoded byte size of the attachment (recorded in the userdata metadata write) */
   size: number;
-  /** MIME part id; the app uses "0" for a single uploaded attachment (source.fixed_part_id) */
-  fixedPartId: string;
-  /** Provider attachment id — null for a not-yet-sent firebase upload (source.attachment_id) */
-  attachmentId: string | null;
 }
 
 /**
@@ -767,8 +763,6 @@ export async function uploadAttachmentSuperhuman(
     threadId,
     messageId: draftId,
     size,
-    fixedPartId: "0",
-    attachmentId: null,
   };
 }
 
@@ -854,9 +848,7 @@ export async function sendDraftSuperhuman(
       })),
       scheduled_for: null,
       abort_on_reply: false,
-      current_message_ids: options.currentMessageIds && options.currentMessageIds.length > 0
-        ? options.currentMessageIds
-        : [options.draftId],
+      current_message_ids: options.currentMessageIds ?? [options.draftId],
       mail_merge_recipients: [],
     };
 

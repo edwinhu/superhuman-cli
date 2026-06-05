@@ -33,8 +33,6 @@ const attachment: SuperhumanAttachment = {
   threadId: "thread-abc",
   messageId: "draft00deadbeef",
   size: 4096,
-  fixedPartId: "0",
-  attachmentId: null,
 };
 
 describe("sendDraftSuperhuman outgoing attachment schema", () => {
