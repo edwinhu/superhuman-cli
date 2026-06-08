@@ -45,7 +45,7 @@ import {
   type UpdateEventInput,
 } from "./calendar";
 import { sendEmailViaProvider, createDraftViaProvider, updateDraftViaProvider, deleteDraftViaProvider } from "./send-api";
-import { createDraftWithUserInfo, getUserInfo, getUserInfoFromCache, sendDraftSuperhuman, fetchGmailMessageHtml, buildForwardBody, updateDraftWithUserInfo, deleteDraftWithUserInfo, uploadAttachmentSuperhuman, type Recipient, type UserInfo, type SuperhumanAttachment } from "./draft-api";
+import { createDraftWithUserInfo, getUserInfo, getUserInfoFromCache, sendDraftSuperhuman, buildSendDraftOptions, fetchGmailMessageHtml, buildForwardBody, updateDraftWithUserInfo, deleteDraftWithUserInfo, uploadAttachmentSuperhuman, type Recipient, type UserInfo, type SuperhumanAttachment } from "./draft-api";
 import { searchContacts, resolveRecipient, type Contact } from "./contacts";
 import { listSnippets, findSnippet, applyVars, parseVars } from "./snippets";
 import {
@@ -234,7 +234,7 @@ ${colors.bold}COMMANDS${colors.reset}
   ${colors.cyan}forward${colors.reset} <id>        Forward an email thread
   ${colors.cyan}archive${colors.reset} <id>        Archive email thread(s)
   ${colors.cyan}delete${colors.reset} <id>         Delete (trash) email thread(s)
-  ${colors.cyan}send${colors.reset}                Compose and send, or send an existing draft
+  ${colors.cyan}send${colors.reset}                Compose and send a new email (to send a saved draft, use 'draft send')
   ${colors.cyan}ai${colors.reset} <query>          Ask AI to search, compose, or answer questions
   ${colors.cyan}ai${colors.reset} <id> <query>     Ask AI about a specific email thread
   ${colors.cyan}status${colors.reset}              Check Superhuman connection status
@@ -265,7 +265,6 @@ ${colors.bold}OPTIONS${colors.reset}
   --vars <pairs>     Template variable substitution: "key1=val1,key2=val2" (for snippet use)
   --provider <type>  Draft API: "superhuman" (default), "gmail", or "outlook"
   --native           Use native Superhuman API for draft update (auto-detected for draft00... IDs)
-  --draft <id>       Draft ID to send (for send command)
   --thread <id>      Thread ID for reply/forward drafts (for draft send)
   --delay <seconds>  Delay before sending in seconds (for draft send, default: 20)
   --label <name|id>  Label name or ID (for label add/remove, or inbox filter; repeatable)
@@ -412,7 +411,7 @@ ${colors.bold}EXAMPLES${colors.reset}
   superhuman send --to user@example.com --subject "Quick note" --body "FYI"
 
   ${colors.dim}# Send an existing draft by ID${colors.reset}
-  superhuman send --draft <draft-id>
+  superhuman draft send <draft-id>
 
 ${colors.bold}REQUIREMENTS${colors.reset}
   Superhuman must be running with remote debugging enabled:
@@ -453,8 +452,6 @@ interface CliOptions {
   send: boolean; // send immediately instead of saving as draft
   // draft update option
   updateDraftId: string; // draft ID to update (for draft command)
-  // send draft option
-  sendDraftId: string; // draft ID to send (for send command)
   // send-draft command options
   sendDraftDraftId: string; // draft ID for send-draft command
   sendDraftThreadId: string; // thread ID for reply/forward drafts (optional)
@@ -530,7 +527,6 @@ function parseArgs(args: string[]): CliOptions {
     accountArg: "",
     send: false,
     updateDraftId: "",
-    sendDraftId: "",
     sendDraftDraftId: "",
     sendDraftThreadId: "",
     sendDraftDelay: 20,
@@ -657,10 +653,6 @@ function parseArgs(args: string[]): CliOptions {
           break;
         case "update":
           options.updateDraftId = unescapeString(value);
-          i += inc;
-          break;
-        case "draft":
-          options.sendDraftId = unescapeString(value);
           i += inc;
           break;
         case "label":
@@ -1532,27 +1524,8 @@ async function cmdSendDraft(options: CliOptions) {
   // alias of SuperhumanAttachment, so the cached entries are used directly.
   const draftAttachments: SuperhumanAttachment[] = cachedMeta?.attachments ?? [];
 
-  // Guard: a reply whose only cached message id is the conversation/thread id was
-  // built from the MS-Graph/no-cache fallback and would be silently dropped by the
-  // backend (it returns 200 but never delivers). Refuse rather than send blind.
-  const replyIds = cachedMeta?.replyItemIds ?? [];
-  if (replyIds.length === 1 && replyIds[0] === resolvedThreadId) {
-    error(
-      "Refusing to send: this draft's thread message ids aren't available locally, so " +
-      "the reply would be accepted by the server but silently NOT delivered. Open the " +
-      "thread in the Superhuman app to sync it, recreate the reply, then retry."
-    );
-    process.exit(1);
-  }
-
-  if (cachedMeta) {
-    const attachNote = draftAttachments.length > 0 ? ` with ${draftAttachments.length} attachment(s)` : "";
-    info(`Sending draft ${draftId.slice(-15)}${attachNote} to ${resolvedTo.join(", ")}...`);
-  } else {
-    info(`Sending draft ${draftId.slice(-15)}...`);
-  }
-
-  const result = await sendDraftSuperhuman(userInfo, {
+  // Assemble the payload (and apply the silent-delivery guard) in one place.
+  const build = buildSendDraftOptions({
     draftId,
     threadId: resolvedThreadId,
     to: toRecipients,
@@ -1563,14 +1536,23 @@ async function cmdSendDraft(options: CliOptions) {
     inReplyTo: cachedMeta?.inReplyTo,
     inReplyToItemId: cachedMeta?.inReplyToItemId,
     references: cachedMeta?.references,
-    // Replies need the prior thread message ids in current_message_ids (+ this
-    // draft) or the MS-account send fails silently. Compose drafts have none.
-    currentMessageIds: cachedMeta?.replyItemIds && cachedMeta.replyItemIds.length > 0
-      ? [...cachedMeta.replyItemIds, draftId]
-      : undefined,
-    delay: options.sendDraftDelay,
+    replyItemIds: cachedMeta?.replyItemIds,
     attachments: draftAttachments.length > 0 ? draftAttachments : undefined,
+    delay: options.sendDraftDelay,
   });
+  if (!build.ok) {
+    error(build.error);
+    process.exit(1);
+  }
+
+  if (cachedMeta) {
+    const attachNote = draftAttachments.length > 0 ? ` with ${draftAttachments.length} attachment(s)` : "";
+    info(`Sending draft ${draftId.slice(-15)}${attachNote} to ${resolvedTo.join(", ")}...`);
+  } else {
+    info(`Sending draft ${draftId.slice(-15)}...`);
+  }
+
+  const result = await sendDraftSuperhuman(userInfo, build.options);
 
   if (result.success) {
     // The /messages/send 200 means Superhuman ACCEPTED the message into its
@@ -1674,19 +1656,8 @@ async function cmdListDrafts(options: CliOptions) {
 }
 
 async function cmdSend(options: CliOptions) {
-  // If sending an existing draft by ID, `send --draft <id>` is an alias for
-  // `draft send <id>`. Delegate so both paths share one implementation: the
-  // cached-metadata send (recipients/body/threading/attachments + the silent-
-  // -delivery-failure guard + accurate "queued, not delivered" messaging).
-  // The old inline path sent an empty outgoing_message (to:[], body:""), which
-  // the backend accepted with 200 but never delivered.
-  if (options.sendDraftId) {
-    options.sendDraftDraftId = options.sendDraftId;
-    await cmdSendDraft(options);
-    return;
-  }
-
-  // Composing and sending a new email - requires at least one recipient
+  // `send` composes and sends a new email. To send an existing saved draft,
+  // use `draft send <id>` (cmdSendDraft) — the single code path for that.
   requireAnyRecipient(options);
 
   const provider = await getProvider(options);

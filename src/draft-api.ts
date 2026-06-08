@@ -766,6 +766,82 @@ export async function uploadAttachmentSuperhuman(
   };
 }
 
+/** Inputs for assembling a send from an existing (cached) draft. */
+export interface BuildSendDraftInput {
+  draftId: string;
+  threadId: string;
+  to: Recipient[];
+  cc?: Recipient[];
+  bcc?: Recipient[];
+  subject: string;
+  htmlBody: string;
+  inReplyTo?: string;
+  inReplyToItemId?: string;
+  references?: string[];
+  /** Provider message ids of the prior thread messages (reply only). */
+  replyItemIds?: string[];
+  attachments?: SuperhumanAttachment[];
+  delay?: number;
+}
+
+export type BuildSendDraftResult =
+  | { ok: true; options: SendDraftOptions }
+  | { ok: false; error: string };
+
+/**
+ * Pure assembly of the {@link SendDraftOptions} for sending an existing draft,
+ * with the two checks that decide whether the send can actually be delivered:
+ *
+ *  - Empty recipients → refuse (the backend accepts an empty `to` with HTTP 200
+ *    then silently never delivers).
+ *  - A reply whose only thread message id is the conversation/thread id itself
+ *    (the MS-Graph/no-per-message-id fallback) → refuse: the backend accepts it
+ *    (200) but silently drops it. Open the thread in the app to sync real ids.
+ *
+ * `current_message_ids` is derived as `[...replyItemIds, draftId]` for replies
+ * (compose drafts have none). No I/O — returns a discriminated result so the
+ * caller decides how to surface a refusal. This is the single source of truth
+ * for the send-an-existing-draft payload; `cmdSendDraft` is its only caller.
+ */
+export function buildSendDraftOptions(input: BuildSendDraftInput): BuildSendDraftResult {
+  const { draftId, threadId, replyItemIds = [] } = input;
+
+  if (input.to.length === 0) {
+    return { ok: false, error: "Draft has no recipients to send to." };
+  }
+
+  if (replyItemIds.length === 1 && replyItemIds[0] === threadId) {
+    return {
+      ok: false,
+      error:
+        "Refusing to send: this draft's thread message ids aren't available locally, so " +
+        "the reply would be accepted by the server but silently NOT delivered. Open the " +
+        "thread in the Superhuman app to sync it, recreate the reply, then retry.",
+    };
+  }
+
+  return {
+    ok: true,
+    options: {
+      draftId,
+      threadId,
+      to: input.to,
+      cc: input.cc && input.cc.length > 0 ? input.cc : undefined,
+      bcc: input.bcc && input.bcc.length > 0 ? input.bcc : undefined,
+      subject: input.subject,
+      htmlBody: input.htmlBody,
+      inReplyTo: input.inReplyTo,
+      inReplyToItemId: input.inReplyToItemId,
+      references: input.references,
+      // Replies need the prior thread message ids in current_message_ids (+ this
+      // draft) or the MS-account send fails silently. Compose drafts have none.
+      currentMessageIds: replyItemIds.length > 0 ? [...replyItemIds, draftId] : undefined,
+      attachments: input.attachments && input.attachments.length > 0 ? input.attachments : undefined,
+      delay: input.delay,
+    },
+  };
+}
+
 /**
  * Send a draft via Superhuman's native /messages/send endpoint.
  *

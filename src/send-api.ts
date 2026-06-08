@@ -14,20 +14,6 @@ import {
   type Recipient,
 } from "./draft-api";
 import { textToHtml } from "./superhuman-api.js";
-import { loadDraftMeta } from "./draft-cache";
-
-/**
- * Parse a "Name <email>" or bare "email" string into a Recipient.
- */
-function parseRecipientString(s: string): Recipient {
-  const m = s.match(/^\s*(.*?)\s*<([^>]+)>\s*$/);
-  if (m) {
-    const email = (m[2] ?? "").trim();
-    const name = (m[1] ?? "").replace(/^"|"$/g, "").trim();
-    return name ? { email, name } : { email };
-  }
-  return { email: s.trim() };
-}
 
 /**
  * Options for sending an email
@@ -244,79 +230,6 @@ export async function updateDraftViaProvider(
       body: htmlBody,
     });
     return { success: ok, draftId };
-  }
-
-  throw new Error(
-    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
-  );
-}
-
-/**
- * Send a draft by ID using a ConnectionProvider.
- * Routes through SuperhumanProvider (direct backend) or MCP.
- */
-export async function sendDraftByIdViaProvider(
-  provider: ConnectionProvider,
-  draftId: string
-): Promise<SendResult> {
-  if (provider instanceof SuperhumanProvider) {
-    const userInfo = await userInfoFromProvider(provider);
-
-    // Load the metadata persisted when the draft was created. It holds the real
-    // threadId, recipients, subject, body, reply-threading ids and attachments —
-    // everything /messages/send needs to actually deliver. The previous
-    // behavior (to:[], subject:"", htmlBody:"", threadId=draftId) made the
-    // backend return 200 but silently never deliver: the outgoing_message had no
-    // recipients and pointed at a thread id that doesn't exist.
-    const meta = loadDraftMeta(draftId);
-    if (!meta) {
-      return {
-        success: false,
-        error:
-          `No cached metadata for ${draftId}; cannot reconstruct the message to send. ` +
-          `Recreate it with the CLI (draft create / reply / forward) before sending.`,
-      };
-    }
-
-    // Guard: a reply whose only cached thread message id is the conversation /
-    // thread id was built from the MS-Graph/no-cache fallback and would be
-    // accepted by the backend (200) but silently NOT delivered. Refuse rather
-    // than send blind. (Mirrors cmdSendDraft.)
-    const replyIds = meta.replyItemIds ?? [];
-    if (replyIds.length === 1 && replyIds[0] === meta.threadId) {
-      return {
-        success: false,
-        error:
-          "Refusing to send: this draft's thread message ids aren't available " +
-          "locally, so the reply would be accepted by the server but silently " +
-          "NOT delivered. Open the thread in the Superhuman app to sync it, " +
-          "recreate the reply, then retry.",
-      };
-    }
-
-    const attachments =
-      meta.attachments && meta.attachments.length > 0 ? meta.attachments : undefined;
-
-    const sendResult = await sendDraftSuperhuman(userInfo, {
-      draftId,
-      threadId: meta.threadId,
-      to: meta.to.map(parseRecipientString),
-      cc: meta.cc && meta.cc.length > 0 ? meta.cc.map(parseRecipientString) : undefined,
-      bcc: meta.bcc && meta.bcc.length > 0 ? meta.bcc.map(parseRecipientString) : undefined,
-      subject: meta.subject,
-      htmlBody: meta.htmlBody,
-      inReplyTo: meta.inReplyTo,
-      inReplyToItemId: meta.inReplyToItemId,
-      references: meta.references,
-      // Replies need the prior thread message ids in current_message_ids (+ this
-      // draft) or the MS-account send fails silently. Compose drafts have none.
-      currentMessageIds: replyIds.length > 0 ? [...replyIds, draftId] : undefined,
-      attachments,
-    });
-    if (!sendResult.success) {
-      return { success: false, error: sendResult.error };
-    }
-    return { success: true, messageId: draftId };
   }
 
   throw new Error(
