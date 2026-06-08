@@ -16,6 +16,7 @@ import {
   disconnect,
   disconnectChrome,
   connectToSuperhumanChrome,
+  discoverSuperhumanPort,
   textToHtml,
   htmlToText,
   unescapeString,
@@ -71,8 +72,8 @@ import { SuperhumanProvider } from "./superhuman-provider";
 import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.30.2";
-const CDP_PORT = parseInt(process.env.CDP_PORT || "9250", 10);
+const VERSION = "0.30.3";
+const CDP_PORT = parseInt(process.env.CDP_PORT || "9252", 10);
 
 /**
  * Build UserInfo from a resolved token. Handles O365 accounts where
@@ -391,6 +392,7 @@ interface CliOptions {
   body: string;
   html: string;
   port: number;
+  portExplicit?: boolean; // true when the user passed --port (skips auto-discovery)
   // inbox/search/read options
   limit: number;
   offset: number;
@@ -577,6 +579,7 @@ function parseArgs(args: string[]): CliOptions {
           break;
         case "port":
           options.port = parseInt(value, 10);
+          options.portExplicit = true;
           i += inc;
           break;
         case "help":
@@ -3892,6 +3895,19 @@ async function main() {
   }
 
   const options = parseArgs(args);
+
+  // Resolve the CDP port that actually hosts a Superhuman target. The static
+  // default (9250) is a stale assumption from the old Chrome-tab mode — the
+  // desktop Electron app listens on 9252, and 9250 is often occupied by an
+  // unrelated Chrome instance. Probe the candidate ports unless the user
+  // pinned one explicitly via --port or CDP_PORT.
+  if (!options.portExplicit && !process.env.CDP_PORT) {
+    try {
+      options.port = await discoverSuperhumanPort();
+    } catch {
+      // Discovery best-effort; fall back to the parsed default.
+    }
+  }
 
   switch (options.command) {
     case "help":

@@ -808,7 +808,7 @@ export async function resolveToken(email?: string): Promise<TokenInfo | null> {
   try {
     const iframeResults = await refreshAllViaBackgroundPage(
       email ? [email] : undefined,
-      getCDPPort(),
+      await discoverSuperhumanPort(),
     );
     if (iframeResults && iframeResults.length > 0) {
       for (const t of iframeResults) {
@@ -849,7 +849,7 @@ export async function resolveToken(email?: string): Promise<TokenInfo | null> {
 
   const coldStartPromise = (async (): Promise<TokenInfo | null> => {
     try {
-      coldConn = await connectToSuperhuman(getCDPPort(), false);
+      coldConn = await connectToSuperhuman(await discoverSuperhumanPort(), false);
       if (!coldConn) return null;
 
       if (email) {

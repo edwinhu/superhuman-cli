@@ -39,9 +39,9 @@ describe("getCDPHost", () => {
 });
 
 describe("getCDPPort", () => {
-  test("returns 9250 by default", () => {
+  test("returns 9252 by default", () => {
     delete process.env.CDP_PORT;
-    expect(getCDPPort()).toBe(9250);
+    expect(getCDPPort()).toBe(9252);
   });
 
   test("returns custom port when set", () => {

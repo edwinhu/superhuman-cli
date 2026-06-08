@@ -23,24 +23,25 @@ export function getCDPHost(): string {
 }
 
 /**
- * Get CDP port from environment or default to 9250.
- * Note: 9250 is used as the default — Chrome is launched with --remote-debugging-port=9250
- * to avoid conflicts with VS Code / Cursor which bind 9222 for their Electron CDP.
+ * Get CDP port from environment or default to 9252.
+ * Note: 9252 is the port the Superhuman desktop (Electron) app listens on —
+ * it's what the `com.user.superhuman-cdp` LaunchAgent passes via
+ * `--remote-debugging-port=9252`, and the only target exposing
+ * `background_page.html` for token refresh. (9250 was the old Chrome-tab-mode
+ * default and is often occupied by an unrelated Chrome instance.)
  */
 export function getCDPPort(): number {
   const envPort = process.env.CDP_PORT;
-  return envPort ? parseInt(envPort, 10) : 9250;
+  return envPort ? parseInt(envPort, 10) : 9252;
 }
 
 /**
  * Candidate CDP ports to probe when CDP_PORT isn't explicitly set.
- * 9250 = Chrome-tab mode (extension service worker); 9252 = the Superhuman
- * desktop (Electron) app; 9222 = generic Chromium default. The desktop app
- * is the one that exposes `background_page.html` — the target token refresh
- * needs — so it must be discoverable even though the documented default
- * (9250) points elsewhere.
+ * 9252 = the Superhuman desktop (Electron) app — the one exposing
+ * `background_page.html`, so it's tried first; 9250 = legacy Chrome-tab mode
+ * (extension service worker); 9222 = generic Chromium default.
  */
-const CDP_PORT_CANDIDATES = [9250, 9252, 9222];
+const CDP_PORT_CANDIDATES = [9252, 9250, 9222];
 
 // Cache the discovered port for the process lifetime to avoid re-probing.
 let discoveredPort: number | null = null;
@@ -119,7 +120,10 @@ export async function ensureSuperhuman(port = getCDPPort()): Promise<boolean> {
   const host = getCDPHost();
   console.error(
     `Superhuman not reachable at ${host}:${port}.\n` +
-    `Ensure Chrome is running with --remote-debugging-port=${port} and mail.superhuman.com is open.`
+    `Probed ports ${CDP_PORT_CANDIDATES.join(", ")} for a Superhuman target and found none.\n` +
+    `Launch the desktop app with remote debugging, e.g.:\n` +
+    `  /Applications/Superhuman.app/Contents/MacOS/Superhuman --remote-debugging-port=9252\n` +
+    `If it is running on a different port, pass --port <n> or set CDP_PORT.`
   );
   return false;
 }

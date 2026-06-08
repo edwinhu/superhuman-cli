@@ -1,6 +1,6 @@
 // src/__tests__/attachment-e2e.test.ts
 // E2E tests for attachment upload across all --attach paths.
-// Requires Superhuman running with --remote-debugging-port=9250.
+// Requires Superhuman running with --remote-debugging-port=9252.
 // Skipped when CDP is unavailable or no valid token exists.
 import { test, expect, describe, beforeAll, afterAll, afterEach } from "bun:test";
 import CDP from "chrome-remote-interface";
@@ -16,7 +16,7 @@ import { resolveToken } from "../token-api";
 import { join } from "path";
 import { tmpdir } from "os";
 
-const CDP_PORT = 9250;
+const CDP_PORT = 9252;
 const TEST_FILE_PATH = join(tmpdir(), "e2e-test-attach.txt");
 const TEST_RECIPIENT = "xz2uy@virginia.edu";
 const ACCOUNT_EMAIL = "ehu@law.virginia.edu";
