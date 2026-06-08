@@ -236,7 +236,7 @@ export function lookupThreadInfoById(
         references: Array.isArray(latest.references) ? latest.references : [],
         gmailMessageId: latest.id || null,
         messageIds: messages
-          .filter((m: any) => !m.draft && !(m.labelIds || []).includes?.("DRAFT") && m.id)
+          .filter((m: any) => !m.draft && !(m.labelIds || []).includes("DRAFT") && m.id)
           .map((m: any) => m.id as string),
         date: latest.date || null,
         canonicalThreadId: row.thread_id,

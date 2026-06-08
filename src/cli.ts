@@ -72,7 +72,7 @@ import { SuperhumanProvider } from "./superhuman-provider";
 import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.30.4";
+const VERSION = "0.30.5";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9252", 10);
 
 /**
@@ -112,6 +112,28 @@ function resolveReplyItemId(token: any, threadInfo: any, threadId: string): stri
 function resolveThreadMessageIds(threadInfo: any, fallbackId: string): string[] {
   const ids: string[] = ((threadInfo?.messageIds as string[]) || []).filter(Boolean);
   return ids.length > 0 ? ids : [fallbackId];
+}
+
+/**
+ * Guard a reply send against silent non-delivery. A reply needs the thread's real
+ * provider message ids in `current_message_ids`; when they're unavailable (e.g. the
+ * thread isn't in the local SQLite cache and we fell back to MS Graph, which only
+ * yields the conversation id), the backend accepts the send (HTTP 200) then silently
+ * drops it. Refuse to send rather than queue a doomed reply. `threadId` is the
+ * conversation/inbox id the user passed; if the only id we have equals it, we don't
+ * have a real per-message id.
+ */
+function ensureReplyDeliverableOrExit(threadInfo: any, threadId: string): void {
+  const ids: string[] = ((threadInfo?.messageIds as string[]) || []).filter(Boolean);
+  const haveRealIds = ids.length > 0 && !(ids.length === 1 && ids[0] === threadId);
+  if (!haveRealIds) {
+    error(
+      "Refusing to send: this thread's message ids aren't available locally, so the " +
+      "reply would be accepted by the server but silently NOT delivered. Open the " +
+      "thread once in the Superhuman app to sync it to the local cache, then retry."
+    );
+    process.exit(1);
+  }
 }
 
 /**
@@ -1497,15 +1519,11 @@ async function cmdSendDraft(options: CliOptions) {
   const userInfo = buildUserInfo(token, options?.account);
 
   // Build recipients — parse "Name <email>" format into {email, name} objects
-  const parseRecipient = (s: string): Recipient => {
-    const m = s.match(/^(.+?)\s*<(.+?)>$/);
-    return m ? { name: m[1].trim(), email: m[2].trim() } : { email: s };
-  };
-  const toRecipients: Recipient[] = resolvedTo.map(parseRecipient);
+  const toRecipients: Recipient[] = resolvedTo.map(parseRecipientStr);
   const ccRecipients: Recipient[] | undefined =
-    options.cc.length > 0 ? options.cc.map(parseRecipient) : undefined;
+    options.cc.length > 0 ? options.cc.map(parseRecipientStr) : undefined;
   const bccRecipients: Recipient[] | undefined =
-    options.bcc.length > 0 ? options.bcc.map(parseRecipient) : undefined;
+    options.bcc.length > 0 ? options.bcc.map(parseRecipientStr) : undefined;
 
   // Re-include any attachments uploaded when the draft was created. Without
   // this the queued send carries `attachments: []`, and Superhuman's backend
@@ -1513,6 +1531,19 @@ async function cmdSendDraft(options: CliOptions) {
   // but the outgoing_message doesn't reference it). DraftMetaAttachment is an
   // alias of SuperhumanAttachment, so the cached entries are used directly.
   const draftAttachments: SuperhumanAttachment[] = cachedMeta?.attachments ?? [];
+
+  // Guard: a reply whose only cached message id is the conversation/thread id was
+  // built from the MS-Graph/no-cache fallback and would be silently dropped by the
+  // backend (it returns 200 but never delivers). Refuse rather than send blind.
+  const replyIds = cachedMeta?.replyItemIds ?? [];
+  if (replyIds.length === 1 && replyIds[0] === resolvedThreadId) {
+    error(
+      "Refusing to send: this draft's thread message ids aren't available locally, so " +
+      "the reply would be accepted by the server but silently NOT delivered. Open the " +
+      "thread in the Superhuman app to sync it, recreate the reply, then retry."
+    );
+    process.exit(1);
+  }
 
   if (cachedMeta) {
     const attachNote = draftAttachments.length > 0 ? ` with ${draftAttachments.length} attachment(s)` : "";
@@ -2080,19 +2111,15 @@ async function cmdReply(options: CliOptions) {
       const accountEmail = (token.email || options.account || "").toLowerCase();
       const subject = threadInfo.subject.startsWith("Re:") ? threadInfo.subject : `Re: ${threadInfo.subject}`;
       const htmlBody = textToHtml(body);
-      const parseAddr = (s: string) => {
-        const m = s.match(/^(.+?)\s*<(.+?)>$/);
-        return m ? { name: m[1].trim(), email: m[2].trim() } : { name: "", email: s };
-      };
 
       // When the last message is from ourselves, reply to the original
       // recipients instead of to ourselves.
-      const fromEmail = parseAddr(threadInfo.from).email.toLowerCase();
+      const fromEmail = parseRecipientStr(threadInfo.from).email.toLowerCase();
       let replyTo: string[];
       if (fromEmail === accountEmail) {
         // Self-sent: reply to the to/cc recipients, filtering out self
         const nonSelf = threadInfo.to.filter(
-          (addr) => parseAddr(addr).email.toLowerCase() !== accountEmail
+          (addr) => parseRecipientStr(addr).email.toLowerCase() !== accountEmail
         );
         if (nonSelf.length > 0) {
           replyTo = nonSelf;
@@ -2101,7 +2128,7 @@ async function cmdReply(options: CliOptions) {
           // allParticipants from the full thread to find someone else.
           const allParts: string[] = (threadInfo as any).allParticipants || [];
           const external = allParts.filter(
-            (addr) => parseAddr(addr).email.toLowerCase() !== accountEmail
+            (addr) => parseRecipientStr(addr).email.toLowerCase() !== accountEmail
           );
           replyTo = external.length > 0 ? external : [threadInfo.from];
         }
@@ -2169,10 +2196,11 @@ async function cmdReply(options: CliOptions) {
 
       // Send if requested
       if (options.send) {
+        ensureReplyDeliverableOrExit(threadInfo, options.threadId);
         const sent = await sendDraftSuperhuman(userInfo, {
           draftId: result.draftId!,
           threadId: result.threadId!,
-          to: replyTo.map(parseAddr),
+          to: replyTo.map(parseRecipientStr),
           subject,
           htmlBody,
           inReplyTo: threadInfo.messageId || undefined,
@@ -2321,6 +2349,7 @@ async function cmdReplyAll(options: CliOptions) {
 
       // Send if requested
       if (options.send) {
+        ensureReplyDeliverableOrExit(threadInfo, options.threadId);
         const toRecipients = uniqueRecipients.map(parseRecipientStr);
         const sent = await sendDraftSuperhuman(userInfo, {
           draftId: result.draftId!,

@@ -1157,14 +1157,20 @@ export async function getThreadInfoSuperhuman(
     }
 
     const messages = threadData.thread?.messages || {};
-    const messageEntries = Object.values(messages) as any[];
+    const entries = Object.entries(messages) as [string, any][];
 
-    if (messageEntries.length === 0) {
+    if (entries.length === 0) {
       return null;
     }
 
+    // Sort oldest→newest by message date so both "last message" selection and the
+    // messageIds order are deterministic (the message map's key order is arbitrary).
+    const dateOf = (m: any) =>
+      new Date((m?.message || m?.draft || m)?.date || 0).getTime();
+    entries.sort(([, a], [, b]) => dateOf(a) - dateOf(b));
+
     // Get the last message (most recent) for reply metadata
-    const lastMsg = messageEntries[messageEntries.length - 1];
+    const lastMsg = entries[entries.length - 1][1];
     const msg = lastMsg.message || lastMsg.draft || lastMsg;
 
     return {
@@ -1174,9 +1180,10 @@ export async function getThreadInfoSuperhuman(
       cc: Array.isArray(msg.cc) ? msg.cc : msg.cc ? [msg.cc] : [],
       messageId: msg.messageId || msg.rfc822Id || null,
       references: Array.isArray(msg.references) ? msg.references : [],
-      // Message-map keys are the Superhuman provider message ids; exclude drafts.
-      messageIds: Object.entries(messages)
-        .filter(([, m]: [string, any]) => !(m?.draft) && !((m?.labelIds || []).includes?.("DRAFT")))
+      // Message-map keys are the Superhuman provider message ids; exclude drafts,
+      // oldest→newest to match the app's current_message_ids ordering.
+      messageIds: entries
+        .filter(([, m]: [string, any]) => !m?.draft && !(m?.labelIds || []).includes("DRAFT"))
         .map(([id]) => id),
     };
   } catch (_e) {
