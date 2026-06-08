@@ -32,6 +32,21 @@ Known confirmed exceptions:
 
 **Resolved (2026-04-07):** `messages/send` now works natively with JWT only. The fix was using object format `{email, name}` for `from`/`to`/`cc`/`bcc` fields in the `outgoing_message` payload (not string format `"Name <email>"`). Gmail API send (`sendViaGmailApi`) is no longer needed for Gmail accounts — `sendDraftSuperhuman` works for both Gmail and MS accounts.
 
+### Debugging send-delivery failures (process)
+
+`messages/send` returning HTTP 200 means **queue-accepted, NOT delivered.** A reply can be accepted then silently dropped by the provider. Follow this process before concluding a send "worked" or diagnosing why it didn't:
+
+1. **Verify delivery against the provider's Sent folder — the only ground truth.** NOT the CLI's `✓ queued` (queue-accept ≠ delivery), NOT the local SQLite `read`/`inbox` (the OPFS blob lags a just-sent message by minutes). Use MS Graph `GET /me/mailFolders/SentItems/messages?$top=6&$orderby=sentDateTime desc` (Microsoft) or the Gmail Sent label, with the stored OAuth `accessToken` from tokens.json. If the message isn't there, it did not send.
+2. **Check the inbox for Superhuman's failure notice.** A failed queued send injects an email from `meagan@superhuman.com` (subject "An email failed to send from Superhuman") ~10 min later, with a link to the affected thread. Its body is a generic customer notice (no protocol error), but its presence + timestamp confirm which send failed.
+3. **Capture the exact wire payload.** `SH_DEBUG=1` dumps the `messages/send` request body (`outgoing_message`) right before the POST — inspect `from`/`to`/`cc`, `in_reply_to`, `current_message_ids`, `thread_id`, `attachments[].source`.
+
+**There are THREE distinct send code paths — do not assume a fix to one covers the others:**
+- `draft send <id>` / `reply --send` / `reply-all --send` → native `sendDraftSuperhuman` (`draft-api.ts`). Two-step `draft send` parses recipients correctly via `parseRecipient`; the **one-step `reply-all/forward --send` paths build `{email: "Name <addr>"}` (the whole formatted string in the `email` field) → mangled to/cc → silent non-delivery** (`cli.ts` ~2302/2453). Fix: use `parseRecipient` everywhere.
+- `superhuman send` (compose) → **legacy provider abstraction** `getProvider()`/`sendEmailViaProvider` (`cli.ts:1658`), a *different* path that can fail independently (observed HTTP 400).
+- **MS replies:** `in_reply_to` and `current_message_ids` must be real **message item-ids**, not the conversation/thread id. `resolveReplyItemId` (`cli.ts`) returns `gmailMessageId` for Gmail (correct) but falls back to the conversation `threadId` for Microsoft → the backend accepts (200) then silently fails to deliver. The correct value must be **captured from the app**, not guessed (Graph item-id formats differ from Superhuman's stored ids).
+
+**Capturing the app's correct send payload (capture-don't-guess):** monitor `messages/send` on the `background_page` target while the app sends, then diff against the CLI's `SH_DEBUG` payload. **Blind CDP keystroke automation (`Input.dispatchKeyEvent`) does NOT work — Electron ignores synthetic key events unless the window is focused**, so you cannot drive a send headlessly. To capture safely without a human at the keyboard, draft **self-addressed** test emails (to the user's own address) so a driven/triggered send has zero outward risk — but the actual send still needs the app window focused (i.e. the user present), so for an away user the capture must wait until they're at a desktop. `switchAccount()` (account switch via `Page.navigate`) DOES work headlessly and is needed first when the target draft is on a non-current account (`ViewState.account` is single-account per page).
+
 **Do NOT:**
 - Automate browser UI clicks to perform actions
 - Use Playwright/Puppeteer/CDP `Runtime.evaluate` to trigger Superhuman app functions
