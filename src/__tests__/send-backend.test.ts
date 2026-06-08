@@ -255,6 +255,53 @@ describe("send-api with SuperhumanProvider", () => {
     }
   });
 
+  test("sendDraftByIdViaProvider sends a Gmail reply with real per-message ids (guard does not misfire)", async () => {
+    // Gmail regression: a Gmail reply's replyItemIds are real per-message ids,
+    // DISTINCT from the (hex) threadId. The silent-delivery guard refuses only
+    // when replyItemIds === [threadId] (the MS no-per-message-id fallback), so
+    // it must NOT block a valid Gmail reply. Guards against a provider-specific
+    // regression where Gmail sends get wrongly refused or sent without threading.
+    const tmp = mkdtempSync(join(tmpdir(), "sh-cli-draft-"));
+    const prevCfg = process.env.SUPERHUMAN_CLI_CONFIG_DIR;
+    process.env.SUPERHUMAN_CLI_CONFIG_DIR = tmp;
+    try {
+      const draftId = "draft00gmailrep";
+      const meta = {
+        draftId,
+        threadId: "19e944aeb93de925", // Gmail thread id (hex)
+        to: ["Nadya Malenko <malenko@bc.edu>"],
+        subject: "Re: paper",
+        htmlBody: "<p>Thanks!</p>",
+        inReplyTo: "<CABc123@mail.gmail.com>",
+        inReplyToItemId: "19e951ed105d2b06", // Gmail message id, != threadId
+        references: ["<CABc000@mail.gmail.com>"],
+        createdAt: new Date().toISOString(),
+        replyItemIds: ["19e951ed105d2b06"],
+      };
+      writeFileSync(join(tmp, "draft-cache.json"), JSON.stringify({ [draftId]: meta }));
+
+      const { calls, getSendBody } = setupCapturingMockFetch();
+      const provider = new SuperhumanProvider(sampleToken);
+
+      const result = await sendDraftByIdViaProvider(provider, draftId);
+
+      expect(result.success).toBe(true);
+      expect(calls.find((c) => c.includes("messages/send"))).toBeDefined();
+
+      const om = getSendBody()?.outgoing_message;
+      expect(om).toBeTruthy();
+      expect(om.thread_id).toBe("19e944aeb93de925");
+      expect(om.to).toEqual([{ email: "malenko@bc.edu", name: "Nadya Malenko" }]);
+      expect(om.in_reply_to).toBe("19e951ed105d2b06");
+      // Real per-message id + draft id — the guard let it through (threadId not appended).
+      expect(om.current_message_ids).toEqual(["19e951ed105d2b06", draftId]);
+    } finally {
+      if (prevCfg === undefined) delete process.env.SUPERHUMAN_CLI_CONFIG_DIR;
+      else process.env.SUPERHUMAN_CLI_CONFIG_DIR = prevCfg;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   test("sendDraftByIdViaProvider refuses when no cached metadata exists (no blind empty send)", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "sh-cli-draft-"));
     const prevCfg = process.env.SUPERHUMAN_CLI_CONFIG_DIR;
