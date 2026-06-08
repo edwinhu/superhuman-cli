@@ -87,20 +87,42 @@ function buildUserInfo(token: any, accountEmail?: string): UserInfo {
 }
 
 /**
- * Resolve the provider message item-id of the message being replied to, used for
- * outgoing_message.in_reply_to and current_message_ids when sending a reply.
+ * Resolve the provider message item-id of the LATEST message in the thread (the
+ * one being replied to), used for outgoing_message.in_reply_to.
  *
- * The Superhuman send endpoint is provider-agnostic, but these id VALUES are
- * provider-native (the backend forwards them to Gmail/Graph to thread the send).
- * The inbox id the user passes (`threadId`) means different things per provider:
- * for Microsoft it already IS the message item-id, but for Gmail it's a THREAD
- * id and the message id lives in `threadInfo.gmailMessageId`. Resolve here so the
- * reply paths stay provider-blind. Mirrors the `!token.isMicrosoft` convention
- * used elsewhere (e.g. the Gmail message-HTML fetch).
+ * `threadInfo.gmailMessageId` holds the latest message's provider id for BOTH
+ * providers (it's `messages[last].id` from SQLite / the backend thread) — for
+ * Gmail a hex message id, for Microsoft the `AAkALgAA…` message item-id. It is
+ * NOT the conversation/thread id. The earlier code returned the conversation
+ * `threadId` for Microsoft, which the backend accepts (HTTP 200) then silently
+ * fails to deliver — the real send needs a per-message id. Fall back to the
+ * passed threadId only when no message id is known.
  */
 function resolveReplyItemId(token: any, threadInfo: any, threadId: string): string {
-  if (!token?.isMicrosoft && threadInfo?.gmailMessageId) return threadInfo.gmailMessageId;
-  return threadId;
+  return threadInfo?.gmailMessageId || threadId;
+}
+
+/**
+ * The provider message ids that go in outgoing_message.current_message_ids for a
+ * reply: ALL non-draft messages currently in the thread (this is exactly what the
+ * Superhuman app sends — verified byte-for-byte). The caller appends the draft id.
+ * Falls back to the single replied-to message id when the thread's message list
+ * isn't available (e.g. the MS Graph fallback path, which lacks Superhuman ids).
+ */
+function resolveThreadMessageIds(threadInfo: any, fallbackId: string): string[] {
+  const ids: string[] = ((threadInfo?.messageIds as string[]) || []).filter(Boolean);
+  return ids.length > 0 ? ids : [fallbackId];
+}
+
+/**
+ * Parse a "Name <email>" recipient string into {name, email}. A bare address (no
+ * angle brackets) becomes {email}. Used by the one-step --send paths; sending the
+ * whole formatted string as the `email` field (the old bug) mangles to/cc and the
+ * provider silently drops the message.
+ */
+function parseRecipientStr(s: string): Recipient {
+  const m = s.match(/^(.+?)\s*<(.+?)>$/);
+  return m ? { name: m[1].trim(), email: m[2].trim() } : { email: s };
 }
 
 /**
@@ -1062,9 +1084,9 @@ async function cmdSnippet(options: CliOptions) {
       process.exit(1);
     }
 
-    const toRecipients = to.map((email: string) => ({ email }));
-    const ccRecipients = cc?.map((email: string) => ({ email }));
-    const bccRecipients = bcc?.map((email: string) => ({ email }));
+    const toRecipients = to.map(parseRecipientStr);
+    const ccRecipients = cc?.map(parseRecipientStr);
+    const bccRecipients = bcc?.map(parseRecipientStr);
 
     // Create draft first, then send
     const draftResult = await createDraftWithUserInfo(userInfo, {
@@ -2121,7 +2143,7 @@ async function cmdReply(options: CliOptions) {
         htmlBody,
         inReplyTo: threadInfo.messageId || undefined,
         inReplyToItemId: replyMsgId,
-        replyItemIds: [replyMsgId],
+        replyItemIds: resolveThreadMessageIds(threadInfo, replyMsgId),
         references: threadInfo.references,
         createdAt: new Date().toISOString(),
       });
@@ -2156,7 +2178,7 @@ async function cmdReply(options: CliOptions) {
           inReplyTo: threadInfo.messageId || undefined,
           inReplyToItemId: replyMsgId,
           references: threadInfo.references,
-          currentMessageIds: [replyMsgId, result.draftId!],
+          currentMessageIds: [...resolveThreadMessageIds(threadInfo, replyMsgId), result.draftId!],
           attachments: uploadedAttachments.length > 0 ? uploadedAttachments : undefined,
         });
         if (sent.success) {
@@ -2273,7 +2295,7 @@ async function cmdReplyAll(options: CliOptions) {
         htmlBody,
         inReplyTo: threadInfo.messageId || undefined,
         inReplyToItemId: replyMsgId,
-        replyItemIds: [replyMsgId],
+        replyItemIds: resolveThreadMessageIds(threadInfo, replyMsgId),
         references: threadInfo.references,
         createdAt: new Date().toISOString(),
       });
@@ -2299,7 +2321,7 @@ async function cmdReplyAll(options: CliOptions) {
 
       // Send if requested
       if (options.send) {
-        const toRecipients = uniqueRecipients.map(e => ({ email: e, name: "" }));
+        const toRecipients = uniqueRecipients.map(parseRecipientStr);
         const sent = await sendDraftSuperhuman(userInfo, {
           draftId: result.draftId!,
           threadId: result.threadId!,
@@ -2309,7 +2331,7 @@ async function cmdReplyAll(options: CliOptions) {
           inReplyTo: threadInfo.messageId || undefined,
           inReplyToItemId: replyMsgId,
           references: threadInfo.references,
-          currentMessageIds: [replyMsgId, result.draftId!],
+          currentMessageIds: [...resolveThreadMessageIds(threadInfo, replyMsgId), result.draftId!],
           attachments: uploadedAttachments.length > 0 ? uploadedAttachments : undefined,
         });
         if (sent.success) {
@@ -2450,7 +2472,7 @@ async function cmdForward(options: CliOptions) {
 
       // Send if requested
       if (options.send) {
-        const toRecipients = options.to.map((e: string) => ({ email: e, name: "" }));
+        const toRecipients = options.to.map(parseRecipientStr);
         info(`Sending forward${attachLabel} via Superhuman API...`);
         const sent = await sendDraftSuperhuman(userInfo, {
           draftId: result.draftId!,

@@ -134,6 +134,13 @@ export interface SQLiteThreadInfo {
   references: string[];
   /** Gmail API message ID (hex, e.g. "19d3fa80bff87ca3") of the latest message */
   gmailMessageId: string | null;
+  /** Provider message ids of ALL non-draft messages in the thread, oldest→newest.
+   *  These are exactly what the Superhuman app puts in
+   *  outgoing_message.current_message_ids when sending a reply (verified: they
+   *  match the app byte-for-byte). Using the conversation/thread id instead — as
+   *  the old MS path did — makes the backend accept the send (200) then silently
+   *  fail to deliver. */
+  messageIds: string[];
   /** ISO date string of the latest message */
   date: string | null;
   /** The canonical thread_id from SQLite (O365 Conversation ID). Use this for
@@ -228,6 +235,9 @@ export function lookupThreadInfoById(
         messageId: latest.rfc822Id || latest.messageId || null,
         references: Array.isArray(latest.references) ? latest.references : [],
         gmailMessageId: latest.id || null,
+        messageIds: messages
+          .filter((m: any) => !m.draft && !(m.labelIds || []).includes?.("DRAFT") && m.id)
+          .map((m: any) => m.id as string),
         date: latest.date || null,
         canonicalThreadId: row.thread_id,
         allParticipants: [...participantSet].filter(Boolean),

@@ -1091,6 +1091,10 @@ export interface ThreadInfoDirect {
   cc: string[];
   messageId: string | null;
   references: string[];
+  /** Provider message ids of all non-draft messages (for outgoing_message.current_message_ids).
+   *  Populated from the Superhuman backend thread (correct ids); left empty on the MS Graph
+   *  fallback because Graph item-ids differ from Superhuman's internal message ids. */
+  messageIds?: string[];
 }
 
 /**
@@ -1170,6 +1174,10 @@ export async function getThreadInfoSuperhuman(
       cc: Array.isArray(msg.cc) ? msg.cc : msg.cc ? [msg.cc] : [],
       messageId: msg.messageId || msg.rfc822Id || null,
       references: Array.isArray(msg.references) ? msg.references : [],
+      // Message-map keys are the Superhuman provider message ids; exclude drafts.
+      messageIds: Object.entries(messages)
+        .filter(([, m]: [string, any]) => !(m?.draft) && !((m?.labelIds || []).includes?.("DRAFT")))
+        .map(([id]) => id),
     };
   } catch (_e) {
     return null;
