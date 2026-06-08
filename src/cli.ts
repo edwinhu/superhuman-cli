@@ -44,7 +44,7 @@ import {
   type CreateEventInput,
   type UpdateEventInput,
 } from "./calendar";
-import { sendEmailViaProvider, createDraftViaProvider, updateDraftViaProvider, sendDraftByIdViaProvider, deleteDraftViaProvider } from "./send-api";
+import { sendEmailViaProvider, createDraftViaProvider, updateDraftViaProvider, deleteDraftViaProvider } from "./send-api";
 import { createDraftWithUserInfo, getUserInfo, getUserInfoFromCache, sendDraftSuperhuman, fetchGmailMessageHtml, buildForwardBody, updateDraftWithUserInfo, deleteDraftWithUserInfo, uploadAttachmentSuperhuman, type Recipient, type UserInfo, type SuperhumanAttachment } from "./draft-api";
 import { searchContacts, resolveRecipient, type Contact } from "./contacts";
 import { listSnippets, findSnippet, applyVars, parseVars } from "./snippets";
@@ -72,7 +72,7 @@ import { SuperhumanProvider } from "./superhuman-provider";
 import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.30.5";
+const VERSION = "0.30.6";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9252", 10);
 
 /**
@@ -1644,7 +1644,7 @@ async function cmdListDrafts(options: CliOptions) {
     }
 
     if (drafts.length === 0) {
-      log(`${colors.dim}No drafts found in ${email}.${colors.reset}`);
+      log(`${colors.dim}No drafts found in ${token.email}.${colors.reset}`);
       return;
     }
 
@@ -1674,23 +1674,15 @@ async function cmdListDrafts(options: CliOptions) {
 }
 
 async function cmdSend(options: CliOptions) {
-  // If sending an existing draft by ID
+  // If sending an existing draft by ID, `send --draft <id>` is an alias for
+  // `draft send <id>`. Delegate so both paths share one implementation: the
+  // cached-metadata send (recipients/body/threading/attachments + the silent-
+  // -delivery-failure guard + accurate "queued, not delivered" messaging).
+  // The old inline path sent an empty outgoing_message (to:[], body:""), which
+  // the backend accepted with 200 but never delivered.
   if (options.sendDraftId) {
-    const provider = await getProvider(options);
-
-    info(`Sending draft ${options.sendDraftId}...`);
-    const result = await sendDraftByIdViaProvider(provider, options.sendDraftId);
-
-    if (result.success) {
-      success("Draft sent!");
-      if (result.messageId) {
-        log(`  ${colors.dim}Message ID: ${result.messageId}${colors.reset}`);
-      }
-    } else {
-      error(`Failed to send draft: ${result.error}`);
-    }
-
-    await provider.disconnect();
+    options.sendDraftDraftId = options.sendDraftId;
+    await cmdSendDraft(options);
     return;
   }
 

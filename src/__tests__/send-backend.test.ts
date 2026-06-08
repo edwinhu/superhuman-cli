@@ -13,6 +13,9 @@ import {
   sendDraftByIdViaProvider,
 } from "../send-api";
 import { replyToThread, replyAllToThread, forwardThread, _testHooks } from "../reply";
+import { mkdtempSync, writeFileSync, rmSync } from "fs";
+import { tmpdir } from "os";
+import { join } from "path";
 
 const sampleToken: SuperhumanTokenInfo = {
   token: "test-jwt-token",
@@ -158,16 +161,154 @@ describe("send-api with SuperhumanProvider", () => {
 
   // ---- sendDraftByIdViaProvider ----
 
-  test("sendDraftByIdViaProvider with SuperhumanProvider sends existing draft", async () => {
-    const { calls } = setupMockFetch();
-    const provider = new SuperhumanProvider(sampleToken);
+  /** Capture the JSON body of the /messages/send POST for payload assertions. */
+  function setupCapturingMockFetch() {
+    const calls: string[] = [];
+    let sendBody: any = null;
+    const mockFn = mock((url: string | URL | Request, init?: RequestInit) => {
+      const urlStr =
+        typeof url === "string" ? url : url instanceof URL ? url.toString() : (url as Request).url;
+      calls.push(urlStr);
+      if (urlStr.includes("messages/send") && !urlStr.includes("/log")) {
+        try {
+          sendBody = JSON.parse((init?.body as string) ?? "{}");
+        } catch {
+          sendBody = null;
+        }
+        return Promise.resolve(
+          new Response(JSON.stringify({ send_at: Date.now() }), {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          })
+        );
+      }
+      return Promise.resolve(
+        new Response(JSON.stringify({}), { status: 200, headers: { "Content-Type": "application/json" } })
+      );
+    });
+    globalThis.fetch = mockFn as any;
+    return { calls, getSendBody: () => sendBody };
+  }
 
-    const result = await sendDraftByIdViaProvider(provider, "draft00abc123");
+  test("sendDraftByIdViaProvider sends the full cached payload (recipients, body, attachment, threading)", async () => {
+    // Isolate the draft cache to a temp dir so loadDraftMeta() reads our fixture.
+    const tmp = mkdtempSync(join(tmpdir(), "sh-cli-draft-"));
+    const prevCfg = process.env.SUPERHUMAN_CLI_CONFIG_DIR;
+    process.env.SUPERHUMAN_CLI_CONFIG_DIR = tmp;
+    try {
+      const draftId = "draft00abc123";
+      const meta = {
+        draftId,
+        threadId: "AAQkThreadRealId==",
+        to: ["Reynolds W. Holding <rh2804@columbia.edu>"],
+        subject: "Re: Mirror Voting",
+        htmlBody: "<p>Hi Ren,</p>",
+        inReplyTo: "<orig@mail.gmail.com>",
+        inReplyToItemId: "AAkItem3",
+        references: ["<r1@x.com>"],
+        createdAt: new Date().toISOString(),
+        replyItemIds: ["AAkItem1", "AAkItem2", "AAkItem3"],
+        attachments: [
+          {
+            uuid: "uuid-1",
+            name: "post.docx",
+            type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            inline: false,
+            downloadUrl: "https://media.superhuman.com/x",
+            cid: "cid-1",
+            threadId: "AAQkThreadRealId==",
+            messageId: draftId,
+            size: 1234,
+          },
+        ],
+      };
+      writeFileSync(join(tmp, "draft-cache.json"), JSON.stringify({ [draftId]: meta }));
 
-    expect(result.success).toBe(true);
-    expect(result.messageId).toBe("draft00abc123");
-    const sendCall = calls.find((c) => c.includes("messages/send"));
-    expect(sendCall).toBeDefined();
+      const { calls, getSendBody } = setupCapturingMockFetch();
+      const provider = new SuperhumanProvider(sampleToken);
+
+      const result = await sendDraftByIdViaProvider(provider, draftId);
+
+      expect(result.success).toBe(true);
+      expect(result.messageId).toBe(draftId);
+      expect(calls.find((c) => c.includes("messages/send"))).toBeDefined();
+
+      const om = getSendBody()?.outgoing_message;
+      expect(om).toBeTruthy();
+      // Real thread id — NOT the draft id (the old bug used draftId here).
+      expect(om.thread_id).toBe("AAQkThreadRealId==");
+      // Recipients carried through (old bug sent to:[]).
+      expect(om.to).toEqual([{ email: "rh2804@columbia.edu", name: "Reynolds W. Holding" }]);
+      expect(om.subject).toBe("Re: Mirror Voting");
+      expect(om.html_body).toBe("<p>Hi Ren,</p>");
+      // Reply threading + the silent-failure fix.
+      expect(om.in_reply_to).toBe("AAkItem3");
+      expect(om.current_message_ids).toEqual(["AAkItem1", "AAkItem2", "AAkItem3", draftId]);
+      // Attachment re-included.
+      expect(om.attachments).toHaveLength(1);
+      expect(om.attachments[0].uuid).toBe("uuid-1");
+      expect(om.attachments[0].source.message_id).toBe(draftId);
+    } finally {
+      if (prevCfg === undefined) delete process.env.SUPERHUMAN_CLI_CONFIG_DIR;
+      else process.env.SUPERHUMAN_CLI_CONFIG_DIR = prevCfg;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("sendDraftByIdViaProvider refuses when no cached metadata exists (no blind empty send)", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "sh-cli-draft-"));
+    const prevCfg = process.env.SUPERHUMAN_CLI_CONFIG_DIR;
+    process.env.SUPERHUMAN_CLI_CONFIG_DIR = tmp; // empty cache dir
+    try {
+      const { calls } = setupCapturingMockFetch();
+      const provider = new SuperhumanProvider(sampleToken);
+
+      const result = await sendDraftByIdViaProvider(provider, "draft00missing");
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("No cached metadata");
+      // Must NOT have hit the send endpoint.
+      expect(calls.find((c) => c.includes("messages/send"))).toBeUndefined();
+    } finally {
+      if (prevCfg === undefined) delete process.env.SUPERHUMAN_CLI_CONFIG_DIR;
+      else process.env.SUPERHUMAN_CLI_CONFIG_DIR = prevCfg;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("sendDraftByIdViaProvider refuses a reply whose only thread id is the conversation id", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "sh-cli-draft-"));
+    const prevCfg = process.env.SUPERHUMAN_CLI_CONFIG_DIR;
+    process.env.SUPERHUMAN_CLI_CONFIG_DIR = tmp;
+    try {
+      const draftId = "draft00guard";
+      writeFileSync(
+        join(tmp, "draft-cache.json"),
+        JSON.stringify({
+          [draftId]: {
+            draftId,
+            threadId: "CONV==",
+            to: ["a@b.com"],
+            subject: "Re: x",
+            htmlBody: "<p>hi</p>",
+            createdAt: new Date().toISOString(),
+            replyItemIds: ["CONV=="], // only the conversation id → would fail silently
+          },
+        })
+      );
+      const { calls } = setupCapturingMockFetch();
+      const provider = new SuperhumanProvider(sampleToken);
+
+      const result = await sendDraftByIdViaProvider(provider, draftId);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain("Refusing to send");
+      expect(calls.find((c) => c.includes("messages/send"))).toBeUndefined();
+    } finally {
+      if (prevCfg === undefined) delete process.env.SUPERHUMAN_CLI_CONFIG_DIR;
+      else process.env.SUPERHUMAN_CLI_CONFIG_DIR = prevCfg;
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });
 
