@@ -2473,18 +2473,18 @@ async function cmdArchive(options: CliOptions) {
     process.exit(1);
   }
 
-  const provider = await getProvider(options);
+  const token = await requireToken(options);
 
   let successCount = 0;
   let failCount = 0;
 
   for (const threadId of options.threadIds) {
-    const result = await archiveThread(provider, threadId);
+    const result = await archiveThread(token, threadId);
     if (result.success) {
       success(`Archived: ${threadId}`);
       successCount++;
     } else {
-      error(`Failed to archive: ${threadId}`);
+      error(`Failed to archive: ${threadId}${result.error ? ` (${result.error})` : ""}`);
       failCount++;
     }
   }
@@ -2492,8 +2492,6 @@ async function cmdArchive(options: CliOptions) {
   if (options.threadIds.length > 1) {
     log(`\n${successCount} archived, ${failCount} failed`);
   }
-
-  await provider.disconnect();
 }
 
 async function cmdDelete(options: CliOptions) {
@@ -2503,18 +2501,18 @@ async function cmdDelete(options: CliOptions) {
     process.exit(1);
   }
 
-  const provider = await getProvider(options);
+  const token = await requireToken(options);
 
   let successCount = 0;
   let failCount = 0;
 
   for (const threadId of options.threadIds) {
-    const result = await deleteThread(provider, threadId);
+    const result = await deleteThread(token, threadId);
     if (result.success) {
       success(`Deleted: ${threadId}`);
       successCount++;
     } else {
-      error(`Failed to delete: ${threadId}`);
+      error(`Failed to delete: ${threadId}${result.error ? ` (${result.error})` : ""}`);
       failCount++;
     }
   }
@@ -2522,8 +2520,6 @@ async function cmdDelete(options: CliOptions) {
   if (options.threadIds.length > 1) {
     log(`\n${successCount} deleted, ${failCount} failed`);
   }
-
-  await provider.disconnect();
 }
 
 async function cmdMarkRead(options: CliOptions) {
@@ -2533,13 +2529,13 @@ async function cmdMarkRead(options: CliOptions) {
     process.exit(1);
   }
 
-  const provider = await getProvider(options);
+  const token = await requireToken(options);
 
   let successCount = 0;
   let failCount = 0;
 
   for (const threadId of options.threadIds) {
-    const result = await markAsRead(provider, threadId);
+    const result = await markAsRead(token, threadId);
     if (result.success) {
       success(`Marked as read: ${threadId}`);
       successCount++;
@@ -2552,8 +2548,6 @@ async function cmdMarkRead(options: CliOptions) {
   if (options.threadIds.length > 1) {
     log(`\n${successCount} marked as read, ${failCount} failed`);
   }
-
-  await provider.disconnect();
 }
 
 async function cmdMarkUnread(options: CliOptions) {
@@ -2563,13 +2557,13 @@ async function cmdMarkUnread(options: CliOptions) {
     process.exit(1);
   }
 
-  const provider = await getProvider(options);
+  const token = await requireToken(options);
 
   let successCount = 0;
   let failCount = 0;
 
   for (const threadId of options.threadIds) {
-    const result = await markAsUnread(provider, threadId);
+    const result = await markAsUnread(token, threadId);
     if (result.success) {
       success(`Marked as unread: ${threadId}`);
       successCount++;
@@ -2582,8 +2576,6 @@ async function cmdMarkUnread(options: CliOptions) {
   if (options.threadIds.length > 1) {
     log(`\n${successCount} marked as unread, ${failCount} failed`);
   }
-
-  await provider.disconnect();
 }
 
 async function cmdLabels(options: CliOptions) {
@@ -2651,13 +2643,13 @@ async function cmdAddLabel(options: CliOptions) {
     process.exit(1);
   }
 
-  const provider = await getProvider(options);
+  const token = await requireToken(options);
 
   let successCount = 0;
   let failCount = 0;
 
   for (const threadId of options.threadIds) {
-    const result = await addLabel(provider, threadId, options.labelId);
+    const result = await addLabel(token, threadId, options.labelId);
     if (result.success) {
       success(`Added label to: ${threadId}`);
       successCount++;
@@ -2670,8 +2662,6 @@ async function cmdAddLabel(options: CliOptions) {
   if (options.threadIds.length > 1) {
     log(`\n${successCount} labeled, ${failCount} failed`);
   }
-
-  await provider.disconnect();
 }
 
 async function cmdRemoveLabel(options: CliOptions) {
@@ -2687,13 +2677,13 @@ async function cmdRemoveLabel(options: CliOptions) {
     process.exit(1);
   }
 
-  const provider = await getProvider(options);
+  const token = await requireToken(options);
 
   let successCount = 0;
   let failCount = 0;
 
   for (const threadId of options.threadIds) {
-    const result = await removeLabel(provider, threadId, options.labelId);
+    const result = await removeLabel(token, threadId, options.labelId);
     if (result.success) {
       success(`Removed label from: ${threadId}`);
       successCount++;
@@ -2706,8 +2696,6 @@ async function cmdRemoveLabel(options: CliOptions) {
   if (options.threadIds.length > 1) {
     log(`\n${successCount} updated, ${failCount} failed`);
   }
-
-  await provider.disconnect();
 }
 
 async function cmdStar(options: CliOptions) {
@@ -2717,13 +2705,13 @@ async function cmdStar(options: CliOptions) {
     process.exit(1);
   }
 
-  const provider = await getProvider(options);
+  const token = await requireToken(options);
 
   let successCount = 0;
   let failCount = 0;
 
   for (const threadId of options.threadIds) {
-    const result = await starThread(provider, threadId);
+    const result = await starThread(token, threadId);
     if (result.success) {
       success(`Starred thread: ${threadId}`);
       successCount++;
@@ -2736,8 +2724,6 @@ async function cmdStar(options: CliOptions) {
   if (options.threadIds.length > 1) {
     log(`\n${successCount} starred, ${failCount} failed`);
   }
-
-  await provider.disconnect();
 }
 
 async function cmdUnstar(options: CliOptions) {
@@ -2747,13 +2733,13 @@ async function cmdUnstar(options: CliOptions) {
     process.exit(1);
   }
 
-  const provider = await getProvider(options);
+  const token = await requireToken(options);
 
   let successCount = 0;
   let failCount = 0;
 
   for (const threadId of options.threadIds) {
-    const result = await unstarThread(provider, threadId);
+    const result = await unstarThread(token, threadId);
     if (result.success) {
       success(`Unstarred thread: ${threadId}`);
       successCount++;
@@ -2766,8 +2752,6 @@ async function cmdUnstar(options: CliOptions) {
   if (options.threadIds.length > 1) {
     log(`\n${successCount} unstarred, ${failCount} failed`);
   }
-
-  await provider.disconnect();
 }
 
 async function cmdStarred(options: CliOptions) {
