@@ -43,7 +43,7 @@ import {
   type CreateEventInput,
   type UpdateEventInput,
 } from "./calendar";
-import { sendEmailViaProvider, createDraftViaProvider, updateDraftViaProvider, deleteDraftViaProvider } from "./send-api";
+import { createDraftViaProvider, updateDraftViaProvider, deleteDraftViaProvider } from "./send-api";
 import { createDraftWithUserInfo, getUserInfo, getUserInfoFromCache, sendDraftSuperhuman, buildSendDraftOptions, fetchGmailMessageHtml, buildForwardBody, updateDraftWithUserInfo, deleteDraftWithUserInfo, uploadAttachmentSuperhuman, type Recipient, type UserInfo, type SuperhumanAttachment } from "./draft-api";
 import { searchContactsLocal, resolveRecipientLocal, type Contact } from "./contacts";
 import { listSnippets, findSnippet, applyVars, parseVars } from "./snippets";
@@ -71,7 +71,7 @@ import { SuperhumanProvider } from "./superhuman-provider";
 import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.32.1";
+const VERSION = "0.32.2";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9252", 10);
 
 /**
@@ -1324,26 +1324,48 @@ async function cmdDraft(options: CliOptions) {
       );
 
       const bodyContent = options.html || textToHtml(options.body);
+      // Resolve recipients against local contacts (canonical casing) so the
+      // desktop client can map them to contact identifiers.
+      const draftAccountEmail = (token.email || options.account || "").toLowerCase();
+      const draftTo = canonicalizeRecipients(draftAccountEmail, options.to);
+      const draftCc = canonicalizeRecipients(draftAccountEmail, options.cc);
+      const draftBcc = canonicalizeRecipients(draftAccountEmail, options.bcc);
       const result = await createDraftWithUserInfo(userInfo, {
-        to: options.to,
-        cc: options.cc.length > 0 ? options.cc : undefined,
-        bcc: options.bcc.length > 0 ? options.bcc : undefined,
+        to: draftTo,
+        cc: draftCc.length > 0 ? draftCc : undefined,
+        bcc: draftBcc.length > 0 ? draftBcc : undefined,
         subject: options.subject || "",
         body: bodyContent,
       });
 
       if (result.success) {
+        // Cache metadata so a later `draft send <id>` keeps recipients AND
+        // attachments. Without this, draft send re-composed from flags only
+        // and silently dropped attachments (verified: mail arrived without).
+        saveDraftMeta({
+          draftId: result.draftId!,
+          threadId: result.threadId!,
+          to: draftTo,
+          cc: draftCc.length > 0 ? draftCc : undefined,
+          bcc: draftBcc.length > 0 ? draftBcc : undefined,
+          subject: options.subject || "",
+          htmlBody: bodyContent,
+          createdAt: new Date().toISOString(),
+        });
         if (hasAttachments) {
+          const uploadedAttachments: SuperhumanAttachment[] = [];
           for (const filePath of options.attachFiles!) {
             const fileData = await readFileAsBase64(filePath);
             info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
             try {
-              await uploadAttachmentSuperhuman(userInfo, result.draftId!, result.threadId!, fileData.filename, fileData.mimeType, fileData.base64Data);
+              const att = await uploadAttachmentSuperhuman(userInfo, result.draftId!, result.threadId!, fileData.filename, fileData.mimeType, fileData.base64Data);
+              uploadedAttachments.push(att);
             } catch (e: any) {
               error(`Failed to attach ${fileData.filename}: ${e.message}`);
               process.exit(1);
             }
           }
+          cacheDraftAttachments(result.draftId!, uploadedAttachments);
         }
         const attachLabel = hasAttachments ? ` with ${options.attachFiles!.length} attachment(s)` : "";
         success(`Draft created${attachLabel} in Superhuman!`);
@@ -1383,17 +1405,31 @@ async function cmdDraft(options: CliOptions) {
       });
 
       if (result.success) {
+        // Cache metadata + attachments so `draft send <id>` preserves them.
+        saveDraftMeta({
+          draftId: result.draftId!,
+          threadId: result.threadId!,
+          to: resolvedTo,
+          cc: resolvedCc,
+          bcc: resolvedBcc,
+          subject: options.subject || "",
+          htmlBody: bodyContent,
+          createdAt: new Date().toISOString(),
+        });
         if (hasAttachments) {
+          const uploadedAttachments: SuperhumanAttachment[] = [];
           for (const filePath of options.attachFiles!) {
             const fileData = await readFileAsBase64(filePath);
             info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
             try {
-              await uploadAttachmentSuperhuman(userInfo, result.draftId!, result.threadId!, fileData.filename, fileData.mimeType, fileData.base64Data);
+              const att = await uploadAttachmentSuperhuman(userInfo, result.draftId!, result.threadId!, fileData.filename, fileData.mimeType, fileData.base64Data);
+              uploadedAttachments.push(att);
             } catch (e: any) {
               error(`Failed to attach ${fileData.filename}: ${e.message}`);
               process.exit(1);
             }
           }
+          cacheDraftAttachments(result.draftId!, uploadedAttachments);
         }
         const attachLabel = hasAttachments ? ` with ${options.attachFiles!.length} attachment(s)` : "";
         success(`Draft created${attachLabel} in Superhuman!`);
@@ -1708,36 +1744,82 @@ async function cmdSend(options: CliOptions) {
   // use `draft send <id>` (cmdSendDraft) — the single code path for that.
   requireAnyRecipient(options);
 
-  const provider = await getProvider(options);
+  // Native path: create a Superhuman draft, then send it via messages/send —
+  // the same two-step flow as `draft create` + `draft send`, which is the
+  // verified-delivered path. The old sendEmailViaProvider call returned
+  // HTTP 400 and could not carry attachments at all.
+  {
+    const token = await resolveToken(options.account);
+    if (token?.userId && (token?.superhumanToken?.token || token?.idToken || token?.accessToken)) {
+      const hasAttachments = options.attachFiles && options.attachFiles.length > 0;
+      const attachLabel = hasAttachments ? ` with ${options.attachFiles!.length} attachment(s)` : "";
+      const userInfo = buildUserInfo(token, options?.account);
+      const accountEmail = (token.email || options.account || "").toLowerCase();
+      const bodyContent = options.html || textToHtml(options.body);
+      const sendTo = canonicalizeRecipients(accountEmail, options.to);
+      const sendCc = canonicalizeRecipients(accountEmail, options.cc);
+      const sendBcc = canonicalizeRecipients(accountEmail, options.bcc);
 
-  // Resolve names to emails
-  const resolvedTo = await resolveAllRecipientsViaProvider(provider, options.to);
-  const resolvedCc = options.cc.length > 0 ? await resolveAllRecipientsViaProvider(provider, options.cc) : undefined;
-  const resolvedBcc = options.bcc.length > 0 ? await resolveAllRecipientsViaProvider(provider, options.bcc) : undefined;
+      info(`Composing email${attachLabel} via Superhuman API...`);
+      const result = await createDraftWithUserInfo(userInfo, {
+        to: sendTo,
+        cc: sendCc.length > 0 ? sendCc : undefined,
+        bcc: sendBcc.length > 0 ? sendBcc : undefined,
+        subject: options.subject || "",
+        body: bodyContent,
+      });
+      if (!result.success) {
+        error(`Failed to create draft: ${result.error}`);
+        process.exit(1);
+      }
 
-  // Use HTML body if provided, otherwise convert plain text to HTML
-  const bodyContent = options.html || textToHtml(options.body);
+      const uploadedAttachments: SuperhumanAttachment[] = [];
+      if (hasAttachments) {
+        for (const filePath of options.attachFiles!) {
+          const fileData = await readFileAsBase64(filePath);
+          info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
+          try {
+            const att = await uploadAttachmentSuperhuman(userInfo, result.draftId!, result.threadId!, fileData.filename, fileData.mimeType, fileData.base64Data);
+            uploadedAttachments.push(att);
+          } catch (e: any) {
+            error(`Failed to attach ${fileData.filename}: ${e.message}`);
+            process.exit(1);
+          }
+        }
+      }
 
-  info("Sending email...");
-  const result = await sendEmailViaProvider(provider, {
-    to: resolvedTo,
-    cc: resolvedCc,
-    bcc: resolvedBcc,
-    subject: options.subject || "",
-    body: bodyContent,
-    isHtml: true,
-  });
-
-  if (result.success) {
-    success("Email sent!");
-    if (result.messageId) {
-      log(`  ${colors.dim}Message ID: ${result.messageId}${colors.reset}`);
+      const sent = await sendDraftSuperhuman(userInfo, {
+        draftId: result.draftId!,
+        threadId: result.threadId!,
+        to: sendTo.map(parseRecipientStr),
+        cc: sendCc.length > 0 ? sendCc.map(parseRecipientStr) : undefined,
+        bcc: sendBcc.length > 0 ? sendBcc.map(parseRecipientStr) : undefined,
+        subject: options.subject || "",
+        htmlBody: bodyContent,
+        attachments: uploadedAttachments.length > 0 ? uploadedAttachments : undefined,
+      });
+      if (sent.success) {
+        success(`Email${attachLabel} queued for send`);
+        log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
+        log(`  ${colors.dim}Delivery confirms after the undo window; a failure would surface in your inbox.${colors.reset}`);
+        // Clean up the just-sent draft (matches Superhuman app behavior)
+        try {
+          await deleteDraftWithUserInfo(userInfo, result.threadId!, result.draftId!);
+        } catch {
+          // Non-fatal: send already queued
+        }
+      } else {
+        error(`Failed to send: ${sent.error}`);
+        process.exit(1);
+      }
+      return;
     }
-  } else {
-    error(`Failed to send: ${result.error}`);
   }
 
-  await provider.disconnect();
+  // No cached Superhuman credentials: the legacy provider send path returned
+  // HTTP 400 and is no longer used. Require auth instead of failing silently.
+  error("No cached Superhuman credentials. Run 'superhuman account auth' first.");
+  process.exit(1);
 }
 
 function formatDate(dateStr: string): string {
