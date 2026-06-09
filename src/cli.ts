@@ -71,7 +71,7 @@ import { SuperhumanProvider } from "./superhuman-provider";
 import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.32.2";
+const VERSION = "0.32.3";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9252", 10);
 
 /**
@@ -996,29 +996,84 @@ async function resolveAllRecipientsViaProvider(
 }
 
 /**
- * Canonicalize draft recipients: dedupe by email (case-insensitive) and resolve
- * each address against the local Superhuman contacts DB so the draft carries
+ * Canonicalize multiple recipient lists (to/cc/bcc) in one pass: resolve each
+ * address against the local Superhuman contacts DB so drafts carry
  * properly-cased "Name <email>" entries the desktop client can map to contact
  * identifiers. Writing raw lowercased header strings (the old reply-all
  * behavior, e.g. "nadya malenko <malenko@bc.edu>") produces drafts the desktop
  * client refuses to send ("blank identifiers"). Unknown addresses keep their
  * original header casing — never lowercase the display name.
+ *
+ * Bare names (no "@") are resolved via contact-name search and throw when no
+ * contact matches — silently using a name as an email address would create an
+ * undeliverable draft.
+ *
+ * Dedup by email is case-insensitive and SHARED across lists in order, so a
+ * cc entry already present in to is dropped. All lists share a single
+ * contacts-DB extraction (the OPFS blob copy is the expensive part).
  */
-function canonicalizeRecipients(accountEmail: string, addrs: string[]): string[] {
-  const parsed = addrs.filter(Boolean).map(parseRecipientStr);
-  const contacts = resolveContactsByEmail(accountEmail, parsed.map((p) => p.email));
+function canonicalizeRecipientLists(accountEmail: string, lists: string[][]): string[][] {
+  const parsedLists = lists.map((addrs) =>
+    addrs.filter(Boolean).map((addr) => {
+      const p = parseRecipientStr(addr);
+      if (!p.email.includes("@")) {
+        // Bare name: resolve to an email via contact search (throws if no match)
+        return { name: p.name, email: resolveRecipientLocal(p.email, accountEmail || undefined) };
+      }
+      return p;
+    })
+  );
+  const contacts = resolveContactsByEmail(
+    accountEmail,
+    parsedLists.flat().map((p) => p.email)
+  );
   const seen = new Set<string>();
-  const out: string[] = [];
-  for (const p of parsed) {
-    const key = p.email.toLowerCase();
-    if (!key || seen.has(key)) continue;
-    seen.add(key);
-    const contact = contacts.get(key);
-    const name = contact?.name || p.name;
-    const email = contact?.email || p.email;
-    out.push(name ? `${name} <${email}>` : email);
+  return parsedLists.map((parsed) => {
+    const out: string[] = [];
+    for (const p of parsed) {
+      const key = p.email.toLowerCase();
+      if (!key || seen.has(key)) continue;
+      seen.add(key);
+      const contact = contacts.get(key);
+      const name = contact?.name || p.name;
+      const email = contact?.email || p.email;
+      out.push(name ? `${name} <${email}>` : email);
+    }
+    return out;
+  });
+}
+
+/** Single-list convenience wrapper around canonicalizeRecipientLists. */
+function canonicalizeRecipients(accountEmail: string, addrs: string[]): string[] {
+  return canonicalizeRecipientLists(accountEmail, [addrs])[0]!;
+}
+
+/**
+ * Upload files against a draft and persist them to the draft-meta cache so a
+ * later `draft send <id>` re-includes them. Exits the process on upload
+ * failure (a draft silently missing its attachment is worse than a hard stop).
+ */
+async function uploadAndCacheAttachments(
+  userInfo: UserInfo,
+  draftId: string,
+  threadId: string,
+  files: string[] | undefined
+): Promise<SuperhumanAttachment[]> {
+  const uploaded: SuperhumanAttachment[] = [];
+  if (!files || files.length === 0) return uploaded;
+  for (const filePath of files) {
+    const fileData = await readFileAsBase64(filePath);
+    info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
+    try {
+      const att = await uploadAttachmentSuperhuman(userInfo, draftId, threadId, fileData.filename, fileData.mimeType, fileData.base64Data);
+      uploaded.push(att);
+    } catch (e: any) {
+      error(`Failed to attach ${fileData.filename}: ${e.message}`);
+      process.exit(1);
+    }
   }
-  return out;
+  cacheDraftAttachments(draftId, uploaded);
+  return uploaded;
 }
 
 /**
@@ -1240,28 +1295,26 @@ async function cmdDraft(options: CliOptions) {
 
       const hasAttachments = options.attachFiles && options.attachFiles.length > 0;
 
+      // Resolve any provided recipients against local contacts (canonical
+      // casing) — unresolved entries make the draft unsendable in the client.
+      const updAccountEmail = (token.email || options.account || "").toLowerCase();
+      const [updTo, updCc, updBcc] = canonicalizeRecipientLists(updAccountEmail, [
+        options.to,
+        options.cc,
+        options.bcc,
+      ]) as [string[], string[], string[]];
+
       info(`Updating native draft ${draftId}...`);
       const updateOk = await updateDraftWithUserInfo(userInfo, draft.threadId, draftId, {
-        to: options.to.length > 0 ? options.to : undefined,
-        cc: options.cc.length > 0 ? options.cc : undefined,
-        bcc: options.bcc.length > 0 ? options.bcc : undefined,
+        to: updTo.length > 0 ? updTo : undefined,
+        cc: updCc.length > 0 ? updCc : undefined,
+        bcc: updBcc.length > 0 ? updBcc : undefined,
         subject: options.subject || undefined,
         body: bodyContent,
       });
 
       if (updateOk) {
-        if (hasAttachments) {
-          for (const filePath of options.attachFiles!) {
-            const fileData = await readFileAsBase64(filePath);
-            info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
-            try {
-              await uploadAttachmentSuperhuman(userInfo, draftId, draft.threadId, fileData.filename, fileData.mimeType, fileData.base64Data);
-            } catch (e: any) {
-              error(`Failed to attach ${fileData.filename}: ${e.message}`);
-              process.exit(1);
-            }
-          }
-        }
+        await uploadAndCacheAttachments(userInfo, draftId, draft.threadId, options.attachFiles);
         const attachLabel = hasAttachments ? ` with ${options.attachFiles!.length} attachment(s)` : "";
         log(`${colors.green}✓${colors.reset} Draft updated${attachLabel}!`);
         log(`  ${colors.dim}Draft ID: ${draftId}${colors.reset}`);
@@ -1274,9 +1327,9 @@ async function cmdDraft(options: CliOptions) {
     const provider = await getProvider(options);
 
     // Resolve names to emails
-    const resolvedTo = options.to.length > 0 ? await resolveAllRecipientsViaProvider(provider, options.to) : undefined;
-    const resolvedCc = options.cc.length > 0 ? await resolveAllRecipientsViaProvider(provider, options.cc) : undefined;
-    const resolvedBcc = options.bcc.length > 0 ? await resolveAllRecipientsViaProvider(provider, options.bcc) : undefined;
+    const resolvedTo = options.to.length > 0 ? await resolveAllRecipientsViaProvider(provider, options.to, options.account || undefined) : undefined;
+    const resolvedCc = options.cc.length > 0 ? await resolveAllRecipientsViaProvider(provider, options.cc, options.account || undefined) : undefined;
+    const resolvedBcc = options.bcc.length > 0 ? await resolveAllRecipientsViaProvider(provider, options.bcc, options.account || undefined) : undefined;
 
     // Use HTML body if provided, otherwise convert plain text to HTML (if body provided)
     const bodyContent = options.html || (options.body ? textToHtml(options.body) : undefined);
@@ -1327,9 +1380,11 @@ async function cmdDraft(options: CliOptions) {
       // Resolve recipients against local contacts (canonical casing) so the
       // desktop client can map them to contact identifiers.
       const draftAccountEmail = (token.email || options.account || "").toLowerCase();
-      const draftTo = canonicalizeRecipients(draftAccountEmail, options.to);
-      const draftCc = canonicalizeRecipients(draftAccountEmail, options.cc);
-      const draftBcc = canonicalizeRecipients(draftAccountEmail, options.bcc);
+      const [draftTo, draftCc, draftBcc] = canonicalizeRecipientLists(draftAccountEmail, [
+        options.to,
+        options.cc,
+        options.bcc,
+      ]) as [string[], string[], string[]];
       const result = await createDraftWithUserInfo(userInfo, {
         to: draftTo,
         cc: draftCc.length > 0 ? draftCc : undefined,
@@ -1352,21 +1407,7 @@ async function cmdDraft(options: CliOptions) {
           htmlBody: bodyContent,
           createdAt: new Date().toISOString(),
         });
-        if (hasAttachments) {
-          const uploadedAttachments: SuperhumanAttachment[] = [];
-          for (const filePath of options.attachFiles!) {
-            const fileData = await readFileAsBase64(filePath);
-            info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
-            try {
-              const att = await uploadAttachmentSuperhuman(userInfo, result.draftId!, result.threadId!, fileData.filename, fileData.mimeType, fileData.base64Data);
-              uploadedAttachments.push(att);
-            } catch (e: any) {
-              error(`Failed to attach ${fileData.filename}: ${e.message}`);
-              process.exit(1);
-            }
-          }
-          cacheDraftAttachments(result.draftId!, uploadedAttachments);
-        }
+        await uploadAndCacheAttachments(userInfo, result.draftId!, result.threadId!, options.attachFiles);
         const attachLabel = hasAttachments ? ` with ${options.attachFiles!.length} attachment(s)` : "";
         success(`Draft created${attachLabel} in Superhuman!`);
         log(`  ${colors.dim}Draft ID: ${result.draftId}${colors.reset}`);
@@ -1382,9 +1423,9 @@ async function cmdDraft(options: CliOptions) {
   const provider = await getProvider(options);
 
   // Resolve names to emails
-  const resolvedTo = await resolveAllRecipientsViaProvider(provider, options.to);
-  const resolvedCc = options.cc.length > 0 ? await resolveAllRecipientsViaProvider(provider, options.cc) : undefined;
-  const resolvedBcc = options.bcc.length > 0 ? await resolveAllRecipientsViaProvider(provider, options.bcc) : undefined;
+  const resolvedTo = await resolveAllRecipientsViaProvider(provider, options.to, options.account || undefined);
+  const resolvedCc = options.cc.length > 0 ? await resolveAllRecipientsViaProvider(provider, options.cc, options.account || undefined) : undefined;
+  const resolvedBcc = options.bcc.length > 0 ? await resolveAllRecipientsViaProvider(provider, options.bcc, options.account || undefined) : undefined;
 
   // Use HTML body if provided, otherwise convert plain text to HTML
   const bodyContent = options.html || textToHtml(options.body);
@@ -1416,21 +1457,7 @@ async function cmdDraft(options: CliOptions) {
           htmlBody: bodyContent,
           createdAt: new Date().toISOString(),
         });
-        if (hasAttachments) {
-          const uploadedAttachments: SuperhumanAttachment[] = [];
-          for (const filePath of options.attachFiles!) {
-            const fileData = await readFileAsBase64(filePath);
-            info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
-            try {
-              const att = await uploadAttachmentSuperhuman(userInfo, result.draftId!, result.threadId!, fileData.filename, fileData.mimeType, fileData.base64Data);
-              uploadedAttachments.push(att);
-            } catch (e: any) {
-              error(`Failed to attach ${fileData.filename}: ${e.message}`);
-              process.exit(1);
-            }
-          }
-          cacheDraftAttachments(result.draftId!, uploadedAttachments);
-        }
+        await uploadAndCacheAttachments(userInfo, result.draftId!, result.threadId!, options.attachFiles);
         const attachLabel = hasAttachments ? ` with ${options.attachFiles!.length} attachment(s)` : "";
         success(`Draft created${attachLabel} in Superhuman!`);
         log(`  ${colors.dim}Draft ID: ${result.draftId}${colors.reset}`);
@@ -1756,9 +1783,11 @@ async function cmdSend(options: CliOptions) {
       const userInfo = buildUserInfo(token, options?.account);
       const accountEmail = (token.email || options.account || "").toLowerCase();
       const bodyContent = options.html || textToHtml(options.body);
-      const sendTo = canonicalizeRecipients(accountEmail, options.to);
-      const sendCc = canonicalizeRecipients(accountEmail, options.cc);
-      const sendBcc = canonicalizeRecipients(accountEmail, options.bcc);
+      const [sendTo, sendCc, sendBcc] = canonicalizeRecipientLists(accountEmail, [
+        options.to,
+        options.cc,
+        options.bcc,
+      ]) as [string[], string[], string[]];
 
       info(`Composing email${attachLabel} via Superhuman API...`);
       const result = await createDraftWithUserInfo(userInfo, {
@@ -1773,20 +1802,7 @@ async function cmdSend(options: CliOptions) {
         process.exit(1);
       }
 
-      const uploadedAttachments: SuperhumanAttachment[] = [];
-      if (hasAttachments) {
-        for (const filePath of options.attachFiles!) {
-          const fileData = await readFileAsBase64(filePath);
-          info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
-          try {
-            const att = await uploadAttachmentSuperhuman(userInfo, result.draftId!, result.threadId!, fileData.filename, fileData.mimeType, fileData.base64Data);
-            uploadedAttachments.push(att);
-          } catch (e: any) {
-            error(`Failed to attach ${fileData.filename}: ${e.message}`);
-            process.exit(1);
-          }
-        }
-      }
+      const uploadedAttachments = await uploadAndCacheAttachments(userInfo, result.draftId!, result.threadId!, options.attachFiles);
 
       const sent = await sendDraftSuperhuman(userInfo, {
         draftId: result.draftId!,
@@ -2254,12 +2270,13 @@ async function cmdReply(options: CliOptions) {
       }
       // Resolve against local contacts: properly-cased "Name <email>" entries
       // are required for the desktop client to map recipients to contact
-      // identifiers (unresolved entries make the draft unsendable).
-      replyTo = canonicalizeRecipients(accountEmail, replyTo);
-      const toEmailSet = new Set(replyTo.map((r) => parseRecipientStr(r).email.toLowerCase()));
-      const replyCc = canonicalizeRecipients(accountEmail, options.cc).filter(
-        (r) => !toEmailSet.has(parseRecipientStr(r).email.toLowerCase())
-      );
+      // identifiers (unresolved entries make the draft unsendable). Shared
+      // dedup drops cc entries already present in to.
+      const [replyToResolved, replyCc] = canonicalizeRecipientLists(accountEmail, [
+        replyTo,
+        options.cc,
+      ]) as [string[], string[]];
+      replyTo = replyToResolved;
 
       if (options.send) {
         info(`Sending reply${attachLabel} via Superhuman API...`);
@@ -2302,24 +2319,9 @@ async function cmdReply(options: CliOptions) {
         createdAt: new Date().toISOString(),
       });
 
-      // Attach files if any
-      const uploadedAttachments: SuperhumanAttachment[] = [];
-      if (hasAttachments) {
-        for (const filePath of options.attachFiles!) {
-          const fileData = await readFileAsBase64(filePath);
-          info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
-          try {
-            const att = await uploadAttachmentSuperhuman(userInfo, result.draftId!, result.threadId!, fileData.filename, fileData.mimeType, fileData.base64Data);
-            uploadedAttachments.push(att);
-          } catch (e: any) {
-            error(`Failed to attach ${fileData.filename}: ${e.message}`);
-            process.exit(1);
-          }
-        }
-      }
-
-      // Persist uploads to the cache so a later `draft send <id>` re-includes them.
-      cacheDraftAttachments(result.draftId!, uploadedAttachments);
+      // Attach files (if any) and persist them to the draft cache so a later
+      // `draft send <id>` re-includes them.
+      const uploadedAttachments = await uploadAndCacheAttachments(userInfo, result.draftId!, result.threadId!, options.attachFiles);
 
       // Send if requested
       if (options.send) {
@@ -2404,13 +2406,17 @@ async function cmdReplyAll(options: CliOptions) {
 
       // Resolve against local contacts (canonical casing + dedupe by email) so
       // the desktop client can map every recipient to a contact identifier.
-      const uniqueRecipients = canonicalizeRecipients(accountEmail, toRaw);
-      const toEmailSet = new Set(
-        uniqueRecipients.map((r) => parseRecipientStr(r).email.toLowerCase())
-      );
-      const ccRecipientsList = canonicalizeRecipients(accountEmail, ccRaw).filter(
-        (r) => !toEmailSet.has(parseRecipientStr(r).email.toLowerCase())
-      );
+      // Shared dedup drops cc entries already present in to.
+      const [uniqueRecipients, ccRecipientsList] = canonicalizeRecipientLists(accountEmail, [
+        toRaw,
+        ccRaw,
+      ]) as [string[], string[]];
+      if (uniqueRecipients.length === 0 && ccRecipientsList.length === 0) {
+        // e.g. the thread's latest message has no usable sender address —
+        // creating a recipient-less draft would only fail later at send.
+        error("Could not determine reply-all recipients for this thread");
+        process.exit(1);
+      }
 
       const canonicalThreadId = (threadInfo as any).canonicalThreadId || options.threadId;
       const userInfo = buildUserInfo(token, options?.account);
@@ -2456,24 +2462,9 @@ async function cmdReplyAll(options: CliOptions) {
         createdAt: new Date().toISOString(),
       });
 
-      // Attach files if any
-      const uploadedAttachments: SuperhumanAttachment[] = [];
-      if (hasAttachments) {
-        for (const filePath of options.attachFiles!) {
-          const fileData = await readFileAsBase64(filePath);
-          info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
-          try {
-            const att = await uploadAttachmentSuperhuman(userInfo, result.draftId!, result.threadId!, fileData.filename, fileData.mimeType, fileData.base64Data);
-            uploadedAttachments.push(att);
-          } catch (e: any) {
-            error(`Failed to attach ${fileData.filename}: ${e.message}`);
-            process.exit(1);
-          }
-        }
-      }
-
-      // Persist uploads to the cache so a later `draft send <id>` re-includes them.
-      cacheDraftAttachments(result.draftId!, uploadedAttachments);
+      // Attach files (if any) and persist them to the draft cache so a later
+      // `draft send <id>` re-includes them.
+      const uploadedAttachments = await uploadAndCacheAttachments(userInfo, result.draftId!, result.threadId!, options.attachFiles);
 
       // Send if requested
       if (options.send) {
@@ -2546,6 +2537,13 @@ async function cmdForward(options: CliOptions) {
         : `Fwd: ${threadInfo.subject}`;
 
       const userInfo = buildUserInfo(token, options?.account);
+      // Resolve recipients against local contacts (canonical casing) so the
+      // desktop client can map them to contact identifiers; honor --cc too.
+      const fwdAccountEmail = (token.email || options.account || "").toLowerCase();
+      const [fwdTo, fwdCc] = canonicalizeRecipientLists(fwdAccountEmail, [
+        options.to,
+        options.cc,
+      ]) as [string[], string[]];
 
       // Fetch original message body to include in the forward
       let originalHtml = "";
@@ -2560,7 +2558,7 @@ async function cmdForward(options: CliOptions) {
       );
 
       if (options.send) {
-        info(`Sending forward${attachLabel} via Gmail API...`);
+        info(`Sending forward${attachLabel} via Superhuman API...`);
       } else {
         info(`Creating draft for forward${attachLabel} via Superhuman API...`);
       }
@@ -2568,7 +2566,9 @@ async function cmdForward(options: CliOptions) {
       // Forward = new thread; do NOT pass inReplyToThreadId (which would reuse
       // the Gmail hex thread ID and cause the send API to return 520).
       const result = await createDraftWithUserInfo(userInfo, {
-        to: options.to, subject, body: htmlBody,
+        to: fwdTo,
+        cc: fwdCc.length > 0 ? fwdCc : undefined,
+        subject, body: htmlBody,
         action: "forward",
       });
 
@@ -2581,39 +2581,25 @@ async function cmdForward(options: CliOptions) {
       saveDraftMeta({
         draftId: result.draftId!,
         threadId: result.threadId!,
-        to: options.to,
+        to: fwdTo,
+        cc: fwdCc.length > 0 ? fwdCc : undefined,
         subject,
         htmlBody,
         createdAt: new Date().toISOString(),
       });
 
-      // Attach files if any
-      const uploadedAttachments: SuperhumanAttachment[] = [];
-      if (hasAttachments) {
-        for (const filePath of options.attachFiles!) {
-          const fileData = await readFileAsBase64(filePath);
-          info(`Attaching ${fileData.filename} (${fileData.mimeType})...`);
-          try {
-            const att = await uploadAttachmentSuperhuman(userInfo, result.draftId!, result.threadId!, fileData.filename, fileData.mimeType, fileData.base64Data);
-            uploadedAttachments.push(att);
-          } catch (e: any) {
-            error(`Failed to attach ${fileData.filename}: ${e.message}`);
-            process.exit(1);
-          }
-        }
-      }
-
-      // Persist uploads to the cache so a later `draft send <id>` re-includes them.
-      cacheDraftAttachments(result.draftId!, uploadedAttachments);
+      // Attach files (if any) and persist them to the draft cache so a later
+      // `draft send <id>` re-includes them.
+      const uploadedAttachments = await uploadAndCacheAttachments(userInfo, result.draftId!, result.threadId!, options.attachFiles);
 
       // Send if requested
       if (options.send) {
-        const toRecipients = options.to.map(parseRecipientStr);
         info(`Sending forward${attachLabel} via Superhuman API...`);
         const sent = await sendDraftSuperhuman(userInfo, {
           draftId: result.draftId!,
           threadId: result.threadId!,
-          to: toRecipients,
+          to: fwdTo.map(parseRecipientStr),
+          cc: fwdCc.length > 0 ? fwdCc.map(parseRecipientStr) : undefined,
           subject,
           htmlBody,
           attachments: uploadedAttachments.length > 0 ? uploadedAttachments : undefined,
@@ -3714,7 +3700,7 @@ async function cmdCalendarCreate(options: CliOptions) {
 
   // Add attendees from --to option (resolve names to emails)
   if (options.to.length > 0) {
-    const resolvedAttendees = await resolveAllRecipientsViaProvider(provider, options.to);
+    const resolvedAttendees = await resolveAllRecipientsViaProvider(provider, options.to, options.account || undefined);
     eventInput.attendees = resolvedAttendees.map(email => ({ email }));
   }
 
@@ -3769,7 +3755,7 @@ async function cmdCalendarUpdate(options: CliOptions) {
     updates.location = options.eventLocation;
   }
   if (options.to.length > 0) {
-    const resolvedAttendees = await resolveAllRecipientsViaProvider(provider, options.to);
+    const resolvedAttendees = await resolveAllRecipientsViaProvider(provider, options.to, options.account || undefined);
     updates.attendees = resolvedAttendees.map(email => ({ email }));
   }
 

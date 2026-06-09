@@ -280,11 +280,13 @@ export function searchContactsFromDB(
   try {
     const db = new Database(tmpPath, { readonly: true });
     try {
-      const like = `%${query}%`;
+      // Escape LIKE metacharacters so %/_ in the query match literally
+      // (underscores are common in email local parts).
+      const like = `%${query.replace(/[\\%_]/g, (m) => "\\" + m)}%`;
       return db
         .query<LocalContact, [string, string, number]>(
           `SELECT id, name, email, score, source FROM contacts
-           WHERE email LIKE ? OR name LIKE ?
+           WHERE email LIKE ? ESCAPE '\\' OR name LIKE ? ESCAPE '\\'
            ORDER BY score DESC
            LIMIT ?`
         )
