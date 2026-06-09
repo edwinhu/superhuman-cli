@@ -22,6 +22,7 @@ interface SuperhumanDraft {
   id: string;
   subject: string;
   to: string[];
+  cc?: string[];
   from: string;
   snippet: string;
   date: string;
@@ -200,6 +201,7 @@ export class SuperhumanDraftProvider implements IDraftProvider {
             subject: draft.subject || "(no subject)",
             from: draft.from || "",
             to: draft.to || [],
+            cc: draft.cc || [],
             preview: draft.snippet || "",
             timestamp: draft.date || "",
             source: "native",

@@ -250,6 +250,99 @@ export function lookupThreadInfoById(
   }
 }
 
+/**
+ * A contact row from Superhuman's local `contacts` table. Names carry the
+ * canonical casing the desktop client expects (e.g. "Nadya Malenko"); ids are
+ * the contact's email as stored by Superhuman.
+ */
+export interface LocalContact {
+  id: string;
+  name: string | null;
+  email: string;
+  score: number | null;
+  source: string | null;
+}
+
+/**
+ * Search the local `contacts` table for an account by name or email substring.
+ * Returns matches ordered by Superhuman's own relevance score (descending),
+ * or null when no OPFS blob exists for this account.
+ */
+export function searchContactsFromDB(
+  accountEmail: string,
+  query: string,
+  limit: number = 20
+): LocalContact[] | null {
+  const blobPath = findOPFSBlob(accountEmail);
+  if (!blobPath) return null;
+
+  const tmpPath = extractSQLite(blobPath);
+  try {
+    const db = new Database(tmpPath, { readonly: true });
+    try {
+      const like = `%${query}%`;
+      return db
+        .query<LocalContact, [string, string, number]>(
+          `SELECT id, name, email, score, source FROM contacts
+           WHERE email LIKE ? OR name LIKE ?
+           ORDER BY score DESC
+           LIMIT ?`
+        )
+        .all(like, like, limit);
+    } finally {
+      db.close();
+    }
+  } finally {
+    try { rmSync(tmpPath); } catch {}
+  }
+}
+
+/**
+ * Batch-resolve email addresses against the local contacts table. Returns a map
+ * keyed by lowercased email → the contact's canonical {name, email}. Addresses
+ * with no contact entry are simply absent from the map. One blob extraction for
+ * the whole batch.
+ *
+ * This is what gives reply/reply-all drafts properly-cased recipients: raw
+ * lowercased header strings (e.g. "nadya malenko <malenko@bc.edu>") produce
+ * drafts the desktop client refuses to send ("blank identifiers").
+ */
+export function resolveContactsByEmail(
+  accountEmail: string,
+  emails: string[]
+): Map<string, { name: string | null; email: string }> {
+  const out = new Map<string, { name: string | null; email: string }>();
+  if (emails.length === 0) return out;
+
+  const blobPath = findOPFSBlob(accountEmail);
+  if (!blobPath) return out;
+
+  const tmpPath = extractSQLite(blobPath);
+  try {
+    const db = new Database(tmpPath, { readonly: true });
+    try {
+      const q = db.query<{ name: string | null; email: string }, [string]>(
+        `SELECT name, email FROM contacts
+         WHERE email = ? COLLATE NOCASE
+         ORDER BY score DESC
+         LIMIT 1`
+      );
+      for (const email of emails) {
+        if (!email) continue;
+        const key = email.toLowerCase();
+        if (out.has(key)) continue;
+        const row = q.get(email);
+        if (row) out.set(key, row);
+      }
+    } finally {
+      db.close();
+    }
+  } finally {
+    try { rmSync(tmpPath); } catch {}
+  }
+  return out;
+}
+
 export interface DirectSearchOptions {
   query: string;
   limit?: number;

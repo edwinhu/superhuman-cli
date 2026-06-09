@@ -24,7 +24,7 @@ import {
 } from "./superhuman-api";
 import { listInbox, searchInbox, streamListInbox, streamSearchInbox } from "./inbox";
 import type { InboxThread } from "./inbox";
-import { searchDirect, listLocalAccounts, lookupThreadInfoById, getThreadBodiesFromDB } from "./sqlite-search";
+import { searchDirect, listLocalAccounts, lookupThreadInfoById, getThreadBodiesFromDB, resolveContactsByEmail } from "./sqlite-search";
 import { saveDraftMeta, loadDraftMeta, deleteDraftMeta } from "./draft-cache";
 import { listAccounts, listAccountsChrome, switchAccount, type Account } from "./accounts";
 import { archiveThread, deleteThread } from "./archive";
@@ -45,7 +45,7 @@ import {
 } from "./calendar";
 import { sendEmailViaProvider, createDraftViaProvider, updateDraftViaProvider, deleteDraftViaProvider } from "./send-api";
 import { createDraftWithUserInfo, getUserInfo, getUserInfoFromCache, sendDraftSuperhuman, buildSendDraftOptions, fetchGmailMessageHtml, buildForwardBody, updateDraftWithUserInfo, deleteDraftWithUserInfo, uploadAttachmentSuperhuman, type Recipient, type UserInfo, type SuperhumanAttachment } from "./draft-api";
-import { searchContacts, resolveRecipient, type Contact } from "./contacts";
+import { searchContactsLocal, resolveRecipientLocal, type Contact } from "./contacts";
 import { listSnippets, findSnippet, applyVars, parseVars } from "./snippets";
 import {
   getToken,
@@ -71,7 +71,7 @@ import { SuperhumanProvider } from "./superhuman-provider";
 import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.32.0";
+const VERSION = "0.32.1";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9252", 10);
 
 /**
@@ -974,22 +974,51 @@ async function getProvider(options: CliOptions): Promise<ConnectionProvider> {
 }
 
 /**
- * Resolve all recipients via ConnectionProvider.
+ * Resolve all recipients via the local Superhuman contacts DB.
  * Names without @ are looked up in contacts; emails are passed through unchanged.
+ * The provider argument is unused (kept for call-site compatibility) — contact
+ * data comes from the local SQLite blob, no connection needed.
  */
 async function resolveAllRecipientsViaProvider(
-  provider: ConnectionProvider,
-  recipients: string[]
+  _provider: ConnectionProvider,
+  recipients: string[],
+  account?: string
 ): Promise<string[]> {
   const resolved: string[] = [];
   for (const recipient of recipients) {
-    const email = await resolveRecipient(provider, recipient);
+    const email = resolveRecipientLocal(recipient, account);
     if (email !== recipient && !recipient.includes("@")) {
       info(`Resolved "${recipient}" to ${email}`);
     }
     resolved.push(email);
   }
   return resolved;
+}
+
+/**
+ * Canonicalize draft recipients: dedupe by email (case-insensitive) and resolve
+ * each address against the local Superhuman contacts DB so the draft carries
+ * properly-cased "Name <email>" entries the desktop client can map to contact
+ * identifiers. Writing raw lowercased header strings (the old reply-all
+ * behavior, e.g. "nadya malenko <malenko@bc.edu>") produces drafts the desktop
+ * client refuses to send ("blank identifiers"). Unknown addresses keep their
+ * original header casing — never lowercase the display name.
+ */
+function canonicalizeRecipients(accountEmail: string, addrs: string[]): string[] {
+  const parsed = addrs.filter(Boolean).map(parseRecipientStr);
+  const contacts = resolveContactsByEmail(accountEmail, parsed.map((p) => p.email));
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const p of parsed) {
+    const key = p.email.toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    const contact = contacts.get(key);
+    const name = contact?.name || p.name;
+    const email = contact?.email || p.email;
+    out.push(name ? `${name} <${email}>` : email);
+  }
+  return out;
 }
 
 /**
@@ -1523,12 +1552,15 @@ async function cmdSendDraft(options: CliOptions) {
   // Build userInfo
   const userInfo = buildUserInfo(token, options?.account);
 
-  // Build recipients — parse "Name <email>" format into {email, name} objects
+  // Build recipients — parse "Name <email>" format into {email, name} objects.
+  // Fall back to cached cc/bcc (saved by reply/reply-all) when no flags given.
+  const resolvedCc = options.cc.length > 0 ? options.cc : (cachedMeta?.cc ?? []);
+  const resolvedBcc = options.bcc.length > 0 ? options.bcc : (cachedMeta?.bcc ?? []);
   const toRecipients: Recipient[] = resolvedTo.map(parseRecipientStr);
   const ccRecipients: Recipient[] | undefined =
-    options.cc.length > 0 ? options.cc.map(parseRecipientStr) : undefined;
+    resolvedCc.length > 0 ? resolvedCc.map(parseRecipientStr) : undefined;
   const bccRecipients: Recipient[] | undefined =
-    options.bcc.length > 0 ? options.bcc.map(parseRecipientStr) : undefined;
+    resolvedBcc.length > 0 ? resolvedBcc.map(parseRecipientStr) : undefined;
 
   // Re-include any attachments uploaded when the draft was created. Without
   // this the queued send carries `attachments: []`, and Superhuman's backend
@@ -1651,6 +1683,9 @@ async function cmdListDrafts(options: CliOptions) {
       log(`  Subject: ${draft.subject || "(no subject)"}`);
       log(`  Source: ${draft.source}`);
       log(`  To: ${draft.to.join(", ") || "(no recipients)"}`);
+      if (draft.cc && draft.cc.length > 0) {
+        log(`  Cc: ${draft.cc.join(", ")}`);
+      }
       if (draft.from) {
         log(`  From: ${draft.from}`);
       }
@@ -2131,6 +2166,19 @@ async function cmdReply(options: CliOptions) {
         replyTo = [threadInfo.from];
       }
 
+      // --to overrides the computed reply target; --cc adds CC recipients.
+      if (options.to.length > 0) {
+        replyTo = options.to;
+      }
+      // Resolve against local contacts: properly-cased "Name <email>" entries
+      // are required for the desktop client to map recipients to contact
+      // identifiers (unresolved entries make the draft unsendable).
+      replyTo = canonicalizeRecipients(accountEmail, replyTo);
+      const toEmailSet = new Set(replyTo.map((r) => parseRecipientStr(r).email.toLowerCase()));
+      const replyCc = canonicalizeRecipients(accountEmail, options.cc).filter(
+        (r) => !toEmailSet.has(parseRecipientStr(r).email.toLowerCase())
+      );
+
       if (options.send) {
         info(`Sending reply${attachLabel} via Superhuman API...`);
       } else {
@@ -2139,6 +2187,7 @@ async function cmdReply(options: CliOptions) {
 
       const result = await createDraftWithUserInfo(userInfo, {
         to: replyTo,
+        cc: replyCc.length > 0 ? replyCc : undefined,
         subject,
         body: htmlBody,
         action: "reply",
@@ -2161,6 +2210,7 @@ async function cmdReply(options: CliOptions) {
         draftId: result.draftId!,
         threadId: result.threadId!,
         to: replyTo,
+        cc: replyCc.length > 0 ? replyCc : undefined,
         subject,
         htmlBody,
         inReplyTo: threadInfo.messageId || undefined,
@@ -2196,6 +2246,7 @@ async function cmdReply(options: CliOptions) {
           draftId: result.draftId!,
           threadId: result.threadId!,
           to: replyTo.map(parseRecipientStr),
+          cc: replyCc.length > 0 ? replyCc.map(parseRecipientStr) : undefined,
           subject,
           htmlBody,
           inReplyTo: threadInfo.messageId || undefined,
@@ -2253,14 +2304,31 @@ async function cmdReplyAll(options: CliOptions) {
         ? threadInfo.subject
         : `Re: ${threadInfo.subject}`;
 
-      // Build reply-all recipients (all participants except self)
+      // Build reply-all recipients (all participants except self).
+      // To = sender + original To; Cc = original Cc — matching the desktop
+      // client. NEVER lowercase the raw header strings: the old
+      // `.map(e => e.toLowerCase())` dedup produced unresolved recipients
+      // ("nadya malenko <...>") that the desktop client refused to send.
       const accountEmail = (token.email || options.account || "").toLowerCase();
-      const allRecipients = [
-        threadInfo.from,
-        ...threadInfo.to,
-        ...threadInfo.cc,
-      ].filter(email => email && email.toLowerCase() !== accountEmail);
-      const uniqueRecipients = [...new Set(allRecipients.map(e => e.toLowerCase()))];
+      const notSelf = (addr: string) =>
+        !!addr && parseRecipientStr(addr).email.toLowerCase() !== accountEmail;
+      const toRaw = [threadInfo.from, ...threadInfo.to].filter(notSelf);
+      const ccRaw = threadInfo.cc.filter(notSelf);
+      // --to / --cc append extra recipients to the computed lists.
+      toRaw.push(...options.to);
+      ccRaw.push(...options.cc);
+      // Self-sent thread where everyone filtered out: reply back to the sender.
+      if (toRaw.length === 0 && ccRaw.length === 0) toRaw.push(threadInfo.from);
+
+      // Resolve against local contacts (canonical casing + dedupe by email) so
+      // the desktop client can map every recipient to a contact identifier.
+      const uniqueRecipients = canonicalizeRecipients(accountEmail, toRaw);
+      const toEmailSet = new Set(
+        uniqueRecipients.map((r) => parseRecipientStr(r).email.toLowerCase())
+      );
+      const ccRecipientsList = canonicalizeRecipients(accountEmail, ccRaw).filter(
+        (r) => !toEmailSet.has(parseRecipientStr(r).email.toLowerCase())
+      );
 
       const canonicalThreadId = (threadInfo as any).canonicalThreadId || options.threadId;
       const userInfo = buildUserInfo(token, options?.account);
@@ -2273,7 +2341,9 @@ async function cmdReplyAll(options: CliOptions) {
       }
 
       const result = await createDraftWithUserInfo(userInfo, {
-        to: uniqueRecipients, subject, body: htmlBody,
+        to: uniqueRecipients,
+        cc: ccRecipientsList.length > 0 ? ccRecipientsList : undefined,
+        subject, body: htmlBody,
         action: "reply" as const,
         inReplyToThreadId: canonicalThreadId,
         inReplyToRfc822Id: threadInfo.messageId || undefined,
@@ -2294,6 +2364,7 @@ async function cmdReplyAll(options: CliOptions) {
         draftId: result.draftId!,
         threadId: result.threadId!,
         to: uniqueRecipients,
+        cc: ccRecipientsList.length > 0 ? ccRecipientsList : undefined,
         subject,
         htmlBody,
         inReplyTo: threadInfo.messageId || undefined,
@@ -2330,6 +2401,7 @@ async function cmdReplyAll(options: CliOptions) {
           draftId: result.draftId!,
           threadId: result.threadId!,
           to: toRecipients,
+          cc: ccRecipientsList.length > 0 ? ccRecipientsList.map(parseRecipientStr) : undefined,
           subject,
           htmlBody,
           inReplyTo: threadInfo.messageId || undefined,
@@ -3687,35 +3759,26 @@ async function cmdContacts(options: CliOptions) {
     process.exit(1);
   }
 
-  const provider = await getProvider(options);
+  // Local-first: query Superhuman's own contacts table in the per-account
+  // SQLite blob. No CDP connection or provider API needed.
+  if (options.account) {
+    info(`Searching contacts in account: ${options.account}`);
+  }
+  const contacts: Contact[] = searchContactsLocal(options.contactsQuery, {
+    limit: options.limit,
+    account: options.account || undefined,
+  });
 
-  try {
-    let contacts: Contact[];
-
-    if (options.account) {
-      // Use direct API with specified account
-      const { searchContactsDirect } = await import("./token-api");
-      const token = await provider.getToken(options.account);
-      contacts = await searchContactsDirect(token, options.contactsQuery, options.limit);
-      info(`Searching contacts in account: ${options.account}`);
+  if (options.json) {
+    printJson(contacts);
+  } else {
+    if (contacts.length === 0) {
+      info("No contacts found");
     } else {
-      // Use existing DI-based approach (current account)
-      contacts = await searchContacts(provider, options.contactsQuery, { limit: options.limit });
-    }
-
-    if (options.json) {
-      printJson(contacts);
-    } else {
-      if (contacts.length === 0) {
-        info("No contacts found");
-      } else {
-        for (const contact of contacts) {
-          console.log(formatContact(contact));
-        }
+      for (const contact of contacts) {
+        console.log(formatContact(contact));
       }
     }
-  } finally {
-    await provider.disconnect();
   }
 }
 

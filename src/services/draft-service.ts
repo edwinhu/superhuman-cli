@@ -12,6 +12,7 @@ export interface Draft {
   subject: string;
   from: string;
   to: string[];
+  cc: string[];
   preview: string;
   timestamp: string;
   source: "native";
