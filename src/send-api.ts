@@ -238,36 +238,6 @@ export async function updateDraftViaProvider(
 }
 
 /**
- * Send a draft by ID using a ConnectionProvider.
- * Routes through SuperhumanProvider (direct backend) or MCP.
- */
-export async function sendDraftByIdViaProvider(
-  provider: ConnectionProvider,
-  draftId: string
-): Promise<SendResult> {
-  if (provider instanceof SuperhumanProvider) {
-    const userInfo = await userInfoFromProvider(provider);
-    // Minimal send — draft already has recipients/subject/body persisted.
-    // We need at least the draftId and threadId; use draftId as threadId.
-    const sendResult = await sendDraftSuperhuman(userInfo, {
-      draftId,
-      threadId: draftId,
-      to: [],
-      subject: "",
-      htmlBody: "",
-    });
-    if (!sendResult.success) {
-      return { success: false, error: sendResult.error };
-    }
-    return { success: true, messageId: draftId };
-  }
-
-  throw new Error(
-    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
-  );
-}
-
-/**
  * Delete a draft using a ConnectionProvider.
  * Routes through SuperhumanProvider (direct backend) or MCP.
  */

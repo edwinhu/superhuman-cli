@@ -10,8 +10,8 @@ import type { SuperhumanTokenInfo } from "../superhuman-provider";
 import {
   sendEmailViaProvider,
   createDraftViaProvider,
-  sendDraftByIdViaProvider,
 } from "../send-api";
+import { buildSendDraftOptions, type Recipient, type SuperhumanAttachment } from "../draft-api";
 import { replyToThread, replyAllToThread, forwardThread, _testHooks } from "../reply";
 
 const sampleToken: SuperhumanTokenInfo = {
@@ -156,19 +156,6 @@ describe("send-api with SuperhumanProvider", () => {
     expect(sendCall).toBeUndefined();
   });
 
-  // ---- sendDraftByIdViaProvider ----
-
-  test("sendDraftByIdViaProvider with SuperhumanProvider sends existing draft", async () => {
-    const { calls } = setupMockFetch();
-    const provider = new SuperhumanProvider(sampleToken);
-
-    const result = await sendDraftByIdViaProvider(provider, "draft00abc123");
-
-    expect(result.success).toBe(true);
-    expect(result.messageId).toBe("draft00abc123");
-    const sendCall = calls.find((c) => c.includes("messages/send"));
-    expect(sendCall).toBeDefined();
-  });
 });
 
 describe("reply.ts with SuperhumanProvider", () => {
@@ -333,5 +320,122 @@ describe("reply.ts with SuperhumanProvider", () => {
     // Should read thread, create draft, AND send
     const sendCall = calls.find((c) => c.includes("messages/send"));
     expect(sendCall).toBeDefined();
+  });
+});
+
+describe("buildSendDraftOptions", () => {
+  const att: SuperhumanAttachment = {
+    uuid: "uuid-1",
+    name: "post.docx",
+    type: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    inline: false,
+    downloadUrl: "https://media.superhuman.com/x",
+    cid: "cid-1",
+    threadId: "AAQkThreadRealId==",
+    messageId: "draft00abc123",
+    size: 1234,
+  };
+  const to: Recipient[] = [{ email: "rh2804@columbia.edu", name: "Reynolds W. Holding" }];
+
+  test("reply: carries real threadId, recipients, attachment, and current_message_ids = [...replyItemIds, draftId]", () => {
+    const r = buildSendDraftOptions({
+      draftId: "draft00abc123",
+      threadId: "AAQkThreadRealId==",
+      to,
+      subject: "Re: Mirror Voting",
+      htmlBody: "<p>Hi Ren,</p>",
+      inReplyTo: "<orig@mail.gmail.com>",
+      inReplyToItemId: "AAkItem3",
+      references: ["<r1@x.com>"],
+      replyItemIds: ["AAkItem1", "AAkItem2", "AAkItem3"],
+      attachments: [att],
+      delay: 20,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    const o = r.options;
+    // Real thread id — NOT the draft id (the original bug used draftId here).
+    expect(o.threadId).toBe("AAQkThreadRealId==");
+    expect(o.to).toEqual(to);
+    expect(o.subject).toBe("Re: Mirror Voting");
+    expect(o.htmlBody).toBe("<p>Hi Ren,</p>");
+    expect(o.inReplyToItemId).toBe("AAkItem3");
+    // The silent-failure fix: prior thread ids + this draft.
+    expect(o.currentMessageIds).toEqual(["AAkItem1", "AAkItem2", "AAkItem3", "draft00abc123"]);
+    expect(o.attachments).toEqual([att]);
+    expect(o.delay).toBe(20);
+  });
+
+  test("Gmail reply: per-message id distinct from threadId is NOT blocked by the guard", () => {
+    // Regression: a Gmail reply's replyItemIds are real per-message ids, distinct
+    // from the (hex) threadId, so the guard must let it through.
+    const r = buildSendDraftOptions({
+      draftId: "draft00gmailrep",
+      threadId: "19e944aeb93de925",
+      to: [{ email: "malenko@bc.edu", name: "Nadya Malenko" }],
+      subject: "Re: paper",
+      htmlBody: "<p>Thanks!</p>",
+      inReplyToItemId: "19e951ed105d2b06",
+      replyItemIds: ["19e951ed105d2b06"],
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.options.currentMessageIds).toEqual(["19e951ed105d2b06", "draft00gmailrep"]);
+  });
+
+  test("compose (no replyItemIds): current_message_ids is omitted", () => {
+    const r = buildSendDraftOptions({
+      draftId: "draft00compose",
+      threadId: "draft00compose",
+      to,
+      subject: "Hello",
+      htmlBody: "<p>hi</p>",
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.options.currentMessageIds).toBeUndefined();
+  });
+
+  test("refuses an empty-recipient send (would 200 then silently never deliver)", () => {
+    const r = buildSendDraftOptions({
+      draftId: "draft00empty",
+      threadId: "T==",
+      to: [],
+      subject: "x",
+      htmlBody: "<p>x</p>",
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error).toContain("recipients");
+  });
+
+  test("refuses a reply whose only thread message id is the conversation id", () => {
+    const r = buildSendDraftOptions({
+      draftId: "draft00guard",
+      threadId: "CONV==",
+      to: [{ email: "a@b.com" }],
+      subject: "Re: x",
+      htmlBody: "<p>hi</p>",
+      replyItemIds: ["CONV=="], // == threadId → MS no-per-message-id fallback
+    });
+    expect(r.ok).toBe(false);
+    if (r.ok) return;
+    expect(r.error).toContain("Refusing to send");
+  });
+
+  test("empty cc/bcc arrays become undefined (not []), non-empty pass through", () => {
+    const r = buildSendDraftOptions({
+      draftId: "draft00cc",
+      threadId: "T==",
+      to,
+      cc: [],
+      bcc: [{ email: "boss@x.com" }],
+      subject: "x",
+      htmlBody: "<p>x</p>",
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.options.cc).toBeUndefined();
+    expect(r.options.bcc).toEqual([{ email: "boss@x.com" }]);
   });
 });
