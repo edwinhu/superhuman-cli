@@ -24,7 +24,7 @@ import {
 } from "./superhuman-api";
 import { listInbox, searchInbox, streamListInbox, streamSearchInbox } from "./inbox";
 import type { InboxThread } from "./inbox";
-import { searchDirect, listLocalAccounts, lookupThreadInfoById } from "./sqlite-search";
+import { searchDirect, listLocalAccounts, lookupThreadInfoById, getThreadBodiesFromDB } from "./sqlite-search";
 import { saveDraftMeta, loadDraftMeta, deleteDraftMeta } from "./draft-cache";
 import { listAccounts, listAccountsChrome, switchAccount, type Account } from "./accounts";
 import { archiveThread, deleteThread } from "./archive";
@@ -71,7 +71,7 @@ import { SuperhumanProvider } from "./superhuman-provider";
 import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.31.2";
+const VERSION = "0.32.0";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9252", 10);
 
 /**
@@ -270,6 +270,8 @@ ${colors.bold}OPTIONS${colors.reset}
   --needs-reply      Exclude threads where you were the last sender (for inbox)
   --exclude <patterns> Exclude threads matching patterns (comma-separated, matches from/subject)
   --ai-label <names> Filter to threads with a Superhuman AI label (Respond, Meeting, News, Waiting; comma-separated = any-of)
+  --with-body        Attach full message body from local FTS index to each inbox thread (JSON only)
+  --body-chars <n>   Cap --with-body body length to n characters (0 = no cap)
   --split <bucket>   Filter by Superhuman split inbox: "important" or "other" (uses CDP)
   --until <time>     Snooze until: preset (tomorrow, next-week, weekend, evening) or ISO datetime
   --output <path>    Output directory or file path (for attachment download)
@@ -487,6 +489,8 @@ interface CliOptions {
   labels: string[]; // filter to threads with any of these label names
   splitInbox: "important" | "other" | ""; // Superhuman split inbox filter
   aiLabel: string; // Superhuman AI label filter (e.g., "Respond", "Meeting")
+  withBody: boolean; // attach full message body (from local FTS) to each inbox thread (JSON only)
+  bodyChars: number; // cap body length attached by --with-body (0 = no cap)
   // ai options
   aiQuery: string; // question to ask the AI
   // snippet options
@@ -554,6 +558,8 @@ function parseArgs(args: string[]): CliOptions {
     labels: [],
     splitInbox: "",
     aiLabel: "",
+    withBody: false,
+    bodyChars: 0,
     aiQuery: "",
     snippetQuery: "",
     vars: "",
@@ -761,6 +767,14 @@ function parseArgs(args: string[]): CliOptions {
           break;
         case "ai-label":
           options.aiLabel = unescapeString(value);
+          i += inc;
+          break;
+        case "with-body":
+          options.withBody = true;
+          i += 1;
+          break;
+        case "body-chars":
+          options.bodyChars = parseInt(value, 10) || 0;
           i += inc;
           break;
         case "vars":
@@ -1736,7 +1750,26 @@ async function cmdInbox(options: CliOptions) {
     aiLabel: options.aiLabel || undefined,
   };
 
-  if (options.json) {
+  if (options.json && options.withBody) {
+    // --with-body: collect the filtered set, batch-resolve full bodies from the
+    // local FTS index in one DB pass, attach (optionally capped), emit NDJSON.
+    const threads = await listInbox(provider, inboxOptions);
+    const email = await provider.getCurrentEmail();
+    const bodies = getThreadBodiesFromDB(email, threads.map((t) => t.id));
+    for (const thread of threads) {
+      let body = bodies.get(thread.id) ?? "";
+      // Superhuman delimits messages with private-use chars (U+F8F0–F8FF);
+      // normalize them to a readable boundary marker.
+      body = body.replace(/[\u{F8F0}-\u{F8FF}]+/gu, "\n--- message break ---\n").trim();
+      // The FTS body concatenates messages oldest->newest, so the latest message
+      // (what determines whether a reply is owed) is at the TAIL. When capping,
+      // keep the tail, not the head.
+      if (options.bodyChars > 0 && body.length > options.bodyChars) {
+        body = "…" + body.slice(body.length - options.bodyChars);
+      }
+      console.log(JSON.stringify({ ...thread, body }));
+    }
+  } else if (options.json) {
     // NDJSON streaming: yield each thread as it's fetched
     for await (const thread of streamListInbox(provider, inboxOptions)) {
       console.log(JSON.stringify(thread));

@@ -702,6 +702,69 @@ export function readThreadFromDB(
   }
 }
 
+/**
+ * Batch-fetch full message bodies for a set of inbox thread/message IDs.
+ *
+ * Superhuman's `threads` table only stores message snippets, but the full
+ * body text is kept in the FTS index (`thread_search_content.c2content`,
+ * keyed by `c0thread_id`). Inbox listings expose the latest *message* ID,
+ * which may differ from the conversation's `thread_id`, so we resolve through
+ * the `messages` table (id -> thread_id) and also accept a direct thread_id
+ * match (single-message threads use the same value for both).
+ *
+ * Returns a Map keyed by the ID that was passed in. Missing/empty bodies are
+ * simply absent from the map. Returns an empty Map if the blob can't be found.
+ */
+export function getThreadBodiesFromDB(
+  accountEmail: string,
+  ids: string[]
+): Map<string, string> {
+  if (ids.length === 0) return new Map();
+
+  const blobPath = findOPFSBlob(accountEmail);
+  if (!blobPath) return new Map();
+
+  const tmpPath = extractSQLite(blobPath);
+  try {
+    const db = new Database(tmpPath, { readonly: true });
+    try {
+      return resolveBodies(db, ids);
+    } finally {
+      db.close();
+    }
+  } finally {
+    try { rmSync(tmpPath); } catch {}
+  }
+}
+
+/**
+ * Core body-resolution query, separated from blob/extract handling so it can be
+ * tested against a fixture database. For each id, return the FTS body matching
+ * either the thread_id directly, or the thread_id of a message with that id.
+ */
+export function resolveBodies(
+  db: Database,
+  ids: string[]
+): Map<string, string> {
+  const out = new Map<string, string>();
+  const resolve = db.query<{ body: string }, [string, string]>(
+    `SELECT s.c2content AS body
+       FROM thread_search_content s
+      WHERE s.c0thread_id = ?
+         OR s.c0thread_id = (SELECT m.thread_id FROM messages m WHERE m.id = ? LIMIT 1)
+      LIMIT 1`
+  );
+  for (const id of ids) {
+    try {
+      const row = resolve.get(id, id);
+      if (row?.body) out.set(id, row.body);
+    } catch {
+      // skip this id; a single bad lookup shouldn't abort the batch
+    }
+  }
+  return out;
+}
+
 export interface ListInboxRow {
   threadId: string;
   json: string;
