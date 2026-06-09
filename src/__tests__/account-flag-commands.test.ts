@@ -71,11 +71,11 @@ for (const cmd of commands) {
       });
     }
 
-    test("falls back gracefully with no cached credentials", async () => {
+    test("errors gracefully with no cached credentials", async () => {
       const { output } = await getOutput(
         spawnCli(...cmd.withThread, "--account=nonexistent@example.com")
       );
-      expect(output).toMatch(/no cached tokens|could not|not running|expired|error|failed/i);
+      expect(output).toMatch(/no cached|credentials|account auth|could not|error|failed/i);
     });
 
     test("accepts --account flag without unknown option error", async () => {

@@ -5,14 +5,11 @@
  * Supports both Microsoft/Outlook and Gmail accounts.
  *
  * Uses direct API calls via superhumanFetch (no CDP/browser connection needed).
- * Thread message IDs are resolved from local SQLite first, then portal RPC
- * (`threadInternal.listAsync`) as a fallback.
+ * Thread message IDs are resolved from the local SQLite cache.
  */
 
-import type { SuperhumanTokenInfo } from "./token-api";
+import type { SuperhumanTokenInfo, TokenInfo } from "./token-api";
 import { superhumanFetch } from "./token-api";
-import type { ConnectionProvider } from "./connection-provider";
-import { SuperhumanProvider } from "./superhuman-provider";
 import { readThreadFromDB } from "./sqlite-search";
 
 export interface SnoozeResult {
@@ -221,247 +218,132 @@ export async function listSnoozedDirect(
 }
 
 // ============================================================================
-// ConnectionProvider-based Functions
-// These accept a ConnectionProvider and use the direct API functions internally.
+// Token-direct command-facing functions
+// These accept a resolved TokenInfo and use the direct API functions internally.
 // ============================================================================
 
 /**
  * Resolve a thread's canonical thread ID and the list of message IDs it
- * contains. Tries local SQLite first (works without a CDP connection), and
- * falls back to portal RPC `threadInternal.listAsync` (same path as
- * `superhuman read`). Errors from both paths are surfaced rather than
- * swallowed so callers can see auth/network/shape failures.
- *
- * Note: `threadInternal.getAsync` does NOT exist on the Superhuman portal;
- * the previous implementation that called it always failed silently. See
- * `src/read.ts` (`readThreadPortal`) for the working pattern this mirrors.
+ * contains from the local SQLite cache (token-direct, no running app needed).
  */
-async function resolveThreadForSnooze(
-  provider: ConnectionProvider,
+function resolveThreadForSnooze(
+  email: string,
   threadId: string
-): Promise<{ canonicalThreadId: string; messageIds: string[] }> {
-  if (!(provider instanceof SuperhumanProvider)) {
+): { canonicalThreadId: string; messageIds: string[] } {
+  // Token-direct: resolve the thread's message ids from the local SQLite (OPFS
+  // blob) cache. No running app / portal needed.
+  const json = readThreadFromDB(email, threadId);
+  if (!json) {
     throw new Error(
-      "SuperhumanProvider required to resolve thread message IDs. " +
-      "Run 'superhuman account auth' to authenticate."
+      `Thread ${threadId} not found in the local cache. Open it in the Superhuman ` +
+      `app to sync it, then retry.`
     );
   }
-
-  // 1. Try local SQLite (OPFS blob) — no CDP needed, matches read.ts path.
-  // `readThreadFromDB` looks up by exact thread_id first, then falls back
-  // to searching for a message ID inside the thread JSON, and tags the
-  // result with `_canonicalThreadId` so we can use the right ID for the
-  // reminders API.
-  const accountEmail = await provider.getCurrentEmail();
-  if (accountEmail) {
-    try {
-      const json = readThreadFromDB(accountEmail, threadId);
-      if (json) {
-        const rawMessages = Array.isArray((json as any).messages)
-          ? ((json as any).messages as any[])
-          : typeof (json as any).messages === "object" && (json as any).messages !== null
-          ? (Object.values((json as any).messages) as any[])
-          : [];
-        const messageIds = rawMessages
-          .map((m: any) => m?.id || m?.message_id)
-          .filter(Boolean);
-        if (messageIds.length > 0) {
-          const canonicalThreadId =
-            (json as any)._canonicalThreadId ||
-            (json as any).id ||
-            threadId;
-          return { canonicalThreadId, messageIds };
-        }
-      }
-    } catch (e) {
-      // SQLite read failed — fall through to portal RPC. Don't hide it
-      // entirely; the portal fallback may still succeed and the user will
-      // get a real error if it doesn't.
-      console.error(
-        `[snooze] SQLite lookup for ${threadId} failed: ${(e as Error).message}`
-      );
-    }
-  }
-
-  // 2. Fall back to portal `threadInternal.listAsync` (same as read.ts).
-  if (!provider.hasPortal()) {
-    throw new Error(
-      `Thread ${threadId} not found in local SQLite cache, and no CDP ` +
-      `connection is available to query the Superhuman portal. ` +
-      `Open Superhuman in Chrome (with --remote-debugging-port=9400) or ` +
-      `sync the thread by visiting it in the app, then retry.`
-    );
-  }
-
-  const BATCH_SIZE = 200;
-  const result = await provider.portalInvoke("threadInternal", "listAsync", [
-    "INBOX",
-    { limit: BATCH_SIZE, query: "" },
-  ]);
-
-  const rawThreads: any[] = Array.isArray(result)
-    ? result
-    : Array.isArray(result?.threads)
-    ? result.threads
+  const rawMessages = Array.isArray((json as any).messages)
+    ? ((json as any).messages as any[])
+    : typeof (json as any).messages === "object" && (json as any).messages !== null
+    ? (Object.values((json as any).messages) as any[])
     : [];
-
-  for (const item of rawThreads) {
-    const json = item?.json;
-    if (!json) continue;
-
-    const messages: any[] = Array.isArray(json.messages)
-      ? json.messages
-      : typeof json.messages === "object" && json.messages !== null
-      ? Object.values(json.messages)
-      : [];
-
-    const threadInternalId: string = json.id || "";
-    const isMatch =
-      threadInternalId === threadId ||
-      messages.some((m: any) => m?.id === threadId);
-
-    if (!isMatch) continue;
-
-    const messageIds = messages
-      .map((m: any) => m?.id || m?.message_id)
-      .filter(Boolean);
-
-    if (messageIds.length === 0) {
-      throw new Error(
-        `Portal returned thread ${threadInternalId} for ${threadId} ` +
-        `but its messages list was empty.`
-      );
-    }
-
-    return {
-      canonicalThreadId: threadInternalId || threadId,
-      messageIds,
-    };
+  const messageIds = rawMessages
+    .map((m: any) => m?.id || m?.message_id)
+    .filter(Boolean);
+  if (messageIds.length === 0) {
+    throw new Error(
+      `Thread ${threadId} has no resolvable message ids in the local cache.`
+    );
   }
+  const canonicalThreadId =
+    (json as any)._canonicalThreadId || (json as any).id || threadId;
+  return { canonicalThreadId, messageIds };
+}
 
-  throw new Error(
-    `Thread ${threadId} not found via portal listAsync (searched ` +
-    `${rawThreads.length} INBOX threads) or local SQLite. The portal RPC ` +
-    `currently only enumerates INBOX; archived/snoozed threads cannot be ` +
-    `resolved this way.`
-  );
+/** The Superhuman backend bearer (id-token), with email for 401 refresh. */
+function superhumanTokenOf(token: TokenInfo): SuperhumanTokenInfo {
+  return {
+    token: token.superhumanToken?.token || token.idToken || "",
+    email: token.email,
+  };
 }
 
 /**
- * Snooze a thread using ConnectionProvider.
- * Gets token from the provider, resolves message IDs via MCP, then calls the direct API.
+ * Snooze threads (token-direct). Resolves message ids from local SQLite, then
+ * calls the reminders API. No running app required.
  */
-export async function snoozeThreadViaProvider(
-  provider: ConnectionProvider,
+export async function snoozeThreads(
+  token: TokenInfo,
   threadIds: string[],
   snoozeUntil: Date | string
 ): Promise<SnoozeResult[]> {
-  const token = await provider.getToken();
-
-  if (!token.idToken) {
+  const superhumanToken = superhumanTokenOf(token);
+  if (!superhumanToken.token) {
     throw new Error(
       "Superhuman backend credentials required for snooze. Run 'superhuman account auth'."
     );
   }
 
-  const superhumanToken: SuperhumanTokenInfo = {
-    token: token.idToken,
-    email: token.email,
-  };
-
-  const triggerAt = typeof snoozeUntil === "string" ? snoozeUntil : snoozeUntil.toISOString();
+  const triggerAt =
+    typeof snoozeUntil === "string" ? snoozeUntil : snoozeUntil.toISOString();
   const results: SnoozeResult[] = [];
 
   for (const threadId of threadIds) {
     let canonicalThreadId: string;
     let messageIds: string[];
     try {
-      ({ canonicalThreadId, messageIds } = await resolveThreadForSnooze(
-        provider,
-        threadId
-      ));
+      ({ canonicalThreadId, messageIds } = resolveThreadForSnooze(token.email, threadId));
     } catch (e) {
       results.push({ success: false, error: (e as Error).message });
       continue;
     }
-
-    const result = await snoozeThreadDirect(
-      superhumanToken,
-      canonicalThreadId,
-      messageIds,
-      triggerAt
+    results.push(
+      await snoozeThreadDirect(superhumanToken, canonicalThreadId, messageIds, triggerAt)
     );
-    results.push(result);
   }
 
   return results;
 }
 
 /**
- * Unsnooze threads using ConnectionProvider.
- * First lists snoozed threads to find reminder IDs, then cancels them.
+ * Unsnooze threads (token-direct). Lists snoozed reminders to find reminder ids,
+ * then cancels them. No running app required.
  */
-export async function unsnoozeThreadViaProvider(
-  provider: ConnectionProvider,
+export async function unsnoozeThreads(
+  token: TokenInfo,
   threadIds: string[]
 ): Promise<SnoozeResult[]> {
-  const token = await provider.getToken();
-
-  if (!token.idToken) {
+  const superhumanToken = superhumanTokenOf(token);
+  if (!superhumanToken.token) {
     throw new Error(
       "Superhuman backend credentials required for unsnooze. Run 'superhuman account auth'."
     );
   }
 
-  const superhumanToken: SuperhumanTokenInfo = {
-    token: token.idToken,
-    email: token.email,
-  };
-
-  // Fetch all snoozed threads to find reminder IDs
-  const snoozedThreads = await listSnoozedDirect(superhumanToken, 200);
+  // The backend rejects reminder list requests with limit > 100 (HTTP 400), so
+  // cap at 100 — otherwise unsnooze could never find the reminder id.
+  const snoozedThreads = await listSnoozedDirect(superhumanToken, 100);
   const results: SnoozeResult[] = [];
 
   for (const threadId of threadIds) {
     const snoozed = snoozedThreads.find((t) => t.id === threadId);
     if (!snoozed?.reminderId) {
-      results.push({
-        success: false,
-        error: "Could not find reminder ID for thread",
-      });
+      results.push({ success: false, error: "Could not find reminder ID for thread" });
       continue;
     }
-
-    const result = await unsnoozeThreadDirect(
-      superhumanToken,
-      threadId,
-      snoozed.reminderId
-    );
-    results.push(result);
+    results.push(await unsnoozeThreadDirect(superhumanToken, threadId, snoozed.reminderId));
   }
 
   return results;
 }
 
-/**
- * List snoozed threads using ConnectionProvider.
- */
-export async function listSnoozedViaProvider(
-  provider: ConnectionProvider,
+/** List snoozed threads (token-direct). */
+export async function listSnoozed(
+  token: TokenInfo,
   limit: number = 50
 ): Promise<SnoozedThread[]> {
-  const token = await provider.getToken();
-
-  if (!token.idToken) {
+  const superhumanToken = superhumanTokenOf(token);
+  if (!superhumanToken.token) {
     throw new Error(
       "Superhuman backend credentials required for listing snoozed threads. Run 'superhuman account auth'."
     );
   }
-
-  const superhumanToken: SuperhumanTokenInfo = {
-    token: token.idToken,
-    email: token.email,
-  };
-
   return listSnoozedDirect(superhumanToken, limit);
 }

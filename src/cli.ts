@@ -27,12 +27,11 @@ import type { InboxThread } from "./inbox";
 import { searchDirect, listLocalAccounts, lookupThreadInfoById } from "./sqlite-search";
 import { saveDraftMeta, loadDraftMeta, deleteDraftMeta } from "./draft-cache";
 import { listAccounts, listAccountsChrome, switchAccount, type Account } from "./accounts";
-import { replyToThread, replyAllToThread, forwardThread } from "./reply";
 import { archiveThread, deleteThread } from "./archive";
 import { markAsRead, markAsUnread } from "./read-status";
 import { readThread } from "./read";
 import { listLabels, getThreadLabels, addLabel, removeLabel, starThread, unstarThread, listStarred } from "./labels";
-import { parseSnoozeTime, snoozeThreadViaProvider, unsnoozeThreadViaProvider, listSnoozedViaProvider } from "./snooze";
+import { parseSnoozeTime, snoozeThreads, unsnoozeThreads, listSnoozed } from "./snooze";
 import { listAttachments, downloadAttachment, readFileAsBase64 } from "./attachments";
 import {
   listEvents,
@@ -2189,31 +2188,11 @@ async function cmdReply(options: CliOptions) {
     }
   }
 
-  if (options.account) {
-    error(`No cached tokens for account: ${options.account}. Run 'superhuman account auth' first.`);
-    process.exit(1);
-  }
-
-  // CDP path (fallback)
-  const provider = await getProvider(options);
-
-  const body = options.body || "";
-  const action = options.send ? "Sending" : "Creating draft for";
-  info(`${action} reply to thread ${options.threadId}...`);
-
-  const result = await replyToThread(provider, options.threadId, body, options.send);
-
-  if (result.success) {
-    if (options.send) {
-      success("Reply sent!");
-    } else {
-      success(`Draft saved (${result.draftId})`);
-    }
-  } else {
-    error(result.error || "Failed to create reply");
-  }
-
-  await provider.disconnect();
+  // No cached credentials: cannot send/draft token-direct. We deliberately do
+  // NOT fall back to a CDP/provider send — that path couldn't set
+  // current_message_ids and silently dropped replies on Microsoft accounts.
+  error("No cached Superhuman credentials. Run 'superhuman account auth' first.");
+  process.exit(1);
 }
 
 async function cmdReplyAll(options: CliOptions) {
@@ -2343,31 +2322,9 @@ async function cmdReplyAll(options: CliOptions) {
     }
   }
 
-  if (options.account) {
-    error(`No cached tokens for account: ${options.account}. Run 'superhuman account auth' first.`);
-    process.exit(1);
-  }
-
-  // CDP path (fallback)
-  const provider = await getProvider(options);
-
-  const body = options.body || "";
-  const action = options.send ? "Sending" : "Creating draft for";
-  info(`${action} reply-all to thread ${options.threadId}...`);
-
-  const result = await replyAllToThread(provider, options.threadId, body, options.send);
-
-  if (result.success) {
-    if (options.send) {
-      success("Reply-all sent!");
-    } else {
-      success(`Draft saved (${result.draftId})`);
-    }
-  } else {
-    error(result.error || "Failed to create reply-all");
-  }
-
-  await provider.disconnect();
+  // No cached credentials: cannot send/draft token-direct (see cmdReply).
+  error("No cached Superhuman credentials. Run 'superhuman account auth' first.");
+  process.exit(1);
 }
 
 async function cmdForward(options: CliOptions) {
@@ -2491,35 +2448,22 @@ async function cmdForward(options: CliOptions) {
     }
   }
 
-  if (options.account) {
-    error(`No cached tokens for account: ${options.account}. Run 'superhuman account auth' first.`);
+  // No cached credentials: cannot send/draft token-direct (see cmdReply).
+  error("No cached Superhuman credentials. Run 'superhuman account auth' first.");
+  process.exit(1);
+}
+
+/**
+ * Resolve the cached Superhuman backend credentials for a state-changing
+ * command, or exit. These ops are token-direct (no running app required).
+ */
+async function requireToken(options: CliOptions) {
+  const token = await resolveToken(options.account);
+  if (!token?.email || !(token.superhumanToken?.token || token.idToken || token.accessToken)) {
+    error("Could not resolve Superhuman credentials. Run 'superhuman account auth'.");
     process.exit(1);
   }
-
-  // CDP path (fallback)
-  const provider = await getProvider(options);
-
-  // Resolve name to email
-  const resolvedTo = await resolveAllRecipientsViaProvider(provider, options.to);
-  const toEmail = resolvedTo[0]; // Use first recipient for forward
-
-  const body = options.body || "";
-  const action = options.send ? "Sending" : "Creating draft for";
-  info(`${action} forward to ${toEmail}...`);
-
-  const result = await forwardThread(provider, options.threadId, toEmail, body, options.send);
-
-  if (result.success) {
-    if (options.send) {
-      success("Forward sent!");
-    } else {
-      success(`Draft saved (${result.draftId})`);
-    }
-  } else {
-    error(result.error || "Failed to create forward");
-  }
-
-  await provider.disconnect();
+  return token;
 }
 
 async function cmdArchive(options: CliOptions) {
@@ -2878,12 +2822,12 @@ async function cmdSnooze(options: CliOptions) {
     process.exit(1);
   }
 
-  const provider = await getProvider(options);
+  const token = await requireToken(options);
 
   let successCount = 0;
   let failCount = 0;
 
-  const results = await snoozeThreadViaProvider(provider, options.threadIds, snoozeTime);
+  const results = await snoozeThreads(token, options.threadIds, snoozeTime);
   for (let i = 0; i < options.threadIds.length; i++) {
     const threadId = options.threadIds[i];
     const result = results[i];
@@ -2899,8 +2843,6 @@ async function cmdSnooze(options: CliOptions) {
   if (options.threadIds.length > 1) {
     log(`\n${successCount} snoozed, ${failCount} failed`);
   }
-
-  await provider.disconnect();
 }
 
 async function cmdUnsnooze(options: CliOptions) {
@@ -2910,12 +2852,12 @@ async function cmdUnsnooze(options: CliOptions) {
     process.exit(1);
   }
 
-  const provider = await getProvider(options);
+  const token = await requireToken(options);
 
   let successCount = 0;
   let failCount = 0;
 
-  const results = await unsnoozeThreadViaProvider(provider, options.threadIds);
+  const results = await unsnoozeThreads(token, options.threadIds);
   for (let i = 0; i < options.threadIds.length; i++) {
     const threadId = options.threadIds[i];
     const result = results[i];
@@ -2931,14 +2873,12 @@ async function cmdUnsnooze(options: CliOptions) {
   if (options.threadIds.length > 1) {
     log(`\n${successCount} unsnoozed, ${failCount} failed`);
   }
-
-  await provider.disconnect();
 }
 
 async function cmdSnoozed(options: CliOptions) {
-  const provider = await getProvider(options);
+  const token = await requireToken(options);
 
-  const threads = await listSnoozedViaProvider(provider, options.limit);
+  const threads = await listSnoozed(token, options.limit);
 
   if (options.json) {
     printJson(threads);
@@ -2955,8 +2895,6 @@ async function cmdSnoozed(options: CliOptions) {
       }
     }
   }
-
-  await provider.disconnect();
 }
 
 function formatFileSize(bytes: number): string {
