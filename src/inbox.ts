@@ -358,6 +358,29 @@ async function listInboxSuperhuman(
     );
   }
 
+  if (options.aiLabel) {
+    // Superhuman's AI categorizes threads with labels stored in labelIds as
+    // "<Name> (Superhuman/AI)" — e.g. "Respond (Superhuman/AI)", "News
+    // (Superhuman/AI)", "Meeting (Superhuman/AI)", "Waiting (Superhuman/AI)".
+    // Accept short names ("Respond"), comma-separated lists ("Respond,Meeting"),
+    // or a full label string; match case-insensitively. Keep a thread if it
+    // carries ANY of the requested AI labels.
+    const wanted = options.aiLabel
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean)
+      .map((s) =>
+        /\(superhuman\/ai\)\s*$/i.test(s)
+          ? s.toLowerCase()
+          : `${s} (superhuman/ai)`.toLowerCase()
+      );
+    if (wanted.length) {
+      threads = threads.filter((t) =>
+        t.labelIds.some((l) => wanted.includes(l.toLowerCase()))
+      );
+    }
+  }
+
   return threads.slice(0, limit);
 }
 

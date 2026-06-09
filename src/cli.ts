@@ -71,7 +71,7 @@ import { SuperhumanProvider } from "./superhuman-provider";
 import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.31.0";
+const VERSION = "0.31.1";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9252", 10);
 
 /**
@@ -269,7 +269,7 @@ ${colors.bold}OPTIONS${colors.reset}
   --label <name|id>  Label name or ID (for label add/remove, or inbox filter; repeatable)
   --needs-reply      Exclude threads where you were the last sender (for inbox)
   --exclude <patterns> Exclude threads matching patterns (comma-separated, matches from/subject)
-  --ai-label <name>  Filter by Superhuman AI label (e.g., Respond, Meeting, News, Waiting)
+  --ai-label <names> Filter to threads with a Superhuman AI label (Respond, Meeting, News, Waiting; comma-separated = any-of)
   --split <bucket>   Filter by Superhuman split inbox: "important" or "other" (uses CDP)
   --until <time>     Snooze until: preset (tomorrow, next-week, weekend, evening) or ISO datetime
   --output <path>    Output directory or file path (for attachment download)

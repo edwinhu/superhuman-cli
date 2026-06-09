@@ -154,6 +154,47 @@ describe("inbox with SuperhumanProvider (portal path)", () => {
     expect(threads[0].labelIds).toContain("UNREAD");
   });
 
+  test("aiLabel filter keeps only threads carrying the AI label (short name)", async () => {
+    const portalResult = [
+      { id: "t0", threadId: "t0", subject: "Reply me", from: "a@example.com",
+        date: "2026-03-20T12:00:00Z", snippet: "s", messageCount: 1,
+        labelIds: ["INBOX", "Respond (Superhuman/AI)"] },
+      { id: "t1", threadId: "t1", subject: "A newsletter", from: "b@example.com",
+        date: "2026-03-21T12:00:00Z", snippet: "s", messageCount: 1,
+        labelIds: ["INBOX", "News (Superhuman/AI)"] },
+      { id: "t2", threadId: "t2", subject: "Plain", from: "c@example.com",
+        date: "2026-03-22T12:00:00Z", snippet: "s", messageCount: 1,
+        labelIds: ["INBOX"] },
+    ];
+    const { provider } = createProviderWithPortal(portalResult);
+
+    const threads = await listInbox(provider, { aiLabel: "Respond", limit: 10 });
+
+    expect(threads).toHaveLength(1);
+    expect(threads[0].id).toBe("t0");
+  });
+
+  test("aiLabel filter accepts comma-separated list (any-of) and full label strings", async () => {
+    const portalResult = [
+      { id: "t0", threadId: "t0", subject: "Reply me", from: "a@example.com",
+        date: "2026-03-20T12:00:00Z", snippet: "s", messageCount: 1,
+        labelIds: ["INBOX", "Respond (Superhuman/AI)"] },
+      { id: "t1", threadId: "t1", subject: "Schedule", from: "b@example.com",
+        date: "2026-03-21T12:00:00Z", snippet: "s", messageCount: 1,
+        labelIds: ["INBOX", "Meeting (Superhuman/AI)"] },
+      { id: "t2", threadId: "t2", subject: "News", from: "c@example.com",
+        date: "2026-03-22T12:00:00Z", snippet: "s", messageCount: 1,
+        labelIds: ["INBOX", "News (Superhuman/AI)"] },
+    ];
+    const { provider } = createProviderWithPortal(portalResult);
+
+    const shortNames = await listInbox(provider, { aiLabel: "Respond, Meeting", limit: 10 });
+    expect(shortNames.map((t) => t.id).sort()).toEqual(["t0", "t1"]);
+
+    const fullString = await listInbox(provider, { aiLabel: "Meeting (Superhuman/AI)", limit: 10 });
+    expect(fullString.map((t) => t.id)).toEqual(["t1"]);
+  });
+
   test("streamListInbox yields threads one by one", async () => {
     const { provider } = createProviderWithPortal(makePortalListResult(3));
 
