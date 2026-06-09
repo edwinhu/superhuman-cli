@@ -16,6 +16,10 @@ export interface InboxThread {
     email: string;
     name: string;
   };
+  /** Direct recipients of the latest message (To). */
+  to?: { email: string; name: string }[];
+  /** CC recipients of the latest message. */
+  cc?: { email: string; name: string }[];
   date: string;
   snippet: string;
   labelIds: string[];
@@ -92,6 +96,8 @@ function threadItemToInboxThread(item: any): InboxThread | null {
     id: latest.id || Object.keys(thread.messages)[0] || "",
     subject: latest.subject || "",
     from: parseFrom(latest.from || ""),
+    to: parseRecipients(latest.to),
+    cc: parseRecipients(latest.cc),
     date: latest.date || "",
     snippet: latest.snippet || "",
     labelIds: latest.labelIds || [],
@@ -138,6 +144,16 @@ function parseFromField(from: any): { email: string; name: string } {
     email: from.email || from.attributes?.email || "",
     name: from.name || "",
   };
+}
+
+/**
+ * Parse a To/CC field (array of recipients, each a string "Name <email>" or an
+ * object {email,name,...}) into a list of {email,name}. Drops entries with no
+ * resolvable email. Non-array input yields an empty list.
+ */
+function parseRecipients(field: any): { email: string; name: string }[] {
+  if (!Array.isArray(field)) return [];
+  return field.map((r) => parseFromField(r)).filter((r) => r.email);
 }
 
 /**
@@ -200,6 +216,8 @@ function parsePortalListResult(result: any): InboxThread[] {
           id: latest.id || threadId,
           subject: latest.subject || "",
           from: parseFromField(latest.from),
+          to: parseRecipients(latest.to),
+          cc: parseRecipients(latest.cc),
           date: latest.date || "",
           snippet: latest.snippet || "",
           // Prefer thread-level listIds (more complete); fall back to message labelIds
@@ -213,6 +231,8 @@ function parsePortalListResult(result: any): InboxThread[] {
         id: item.id || item.threadId || "",
         subject: item.subject || "",
         from: parseFromField(item.from),
+        to: parseRecipients(item.to),
+        cc: parseRecipients(item.cc),
         date: item.date || "",
         snippet: item.snippet || "",
         labelIds: item.labelIds || [],
@@ -268,6 +288,8 @@ function listInboxSQLite(
         id: latest.id || row.threadId,
         subject: latest.subject || "",
         from: parseFromField(latest.from),
+        to: parseRecipients(latest.to),
+        cc: parseRecipients(latest.cc),
         date: latest.date || "",
         snippet: latest.snippet || "",
         labelIds: row.labelIds,
@@ -478,6 +500,8 @@ function parsePortalSearchResult(result: any): InboxThread[] {
         id: threadId,
         subject: latest.subject || "",
         from: parseFromField(latest.from),
+        to: parseRecipients(latest.to),
+        cc: parseRecipients(latest.cc),
         date: latest.date || "",
         snippet: item.snippet?.replace(/<[^>]*>/g, "") || latest.snippet || "",
         labelIds: item.listIds || latest.labelIds || [],

@@ -154,6 +154,32 @@ describe("inbox with SuperhumanProvider (portal path)", () => {
     expect(threads[0].labelIds).toContain("UNREAD");
   });
 
+  test("parses to/cc recipients of the latest message (string and object forms)", async () => {
+    const portalResult = [{
+      id: "t1", threadId: "t1", subject: "Hi", date: "2026-03-20T12:00:00Z",
+      from: { email: "sender@example.com", name: "Sender" },
+      to: [{ email: "user@example.com", name: "User" }],
+      cc: ["Bob <bob@example.com>", { email: "carol@example.com", name: "Carol" }],
+      snippet: "s", labelIds: ["INBOX"], messageCount: 1,
+    }];
+    const { provider } = createProviderWithPortal(portalResult);
+
+    const threads = await listInbox(provider, { limit: 10 });
+
+    expect(threads[0].to).toEqual([{ email: "user@example.com", name: "User" }]);
+    expect(threads[0].cc).toEqual([
+      { email: "bob@example.com", name: "Bob" },
+      { email: "carol@example.com", name: "Carol" },
+    ]);
+  });
+
+  test("to/cc default to empty arrays when the message omits them", async () => {
+    const { provider } = createProviderWithPortal(makePortalListResult(1));
+    const threads = await listInbox(provider, { limit: 10 });
+    expect(threads[0].to).toEqual([]);
+    expect(threads[0].cc).toEqual([]);
+  });
+
   test("aiLabel filter keeps only threads carrying the AI label (short name)", async () => {
     const portalResult = [
       { id: "t0", threadId: "t0", subject: "Reply me", from: "a@example.com",
