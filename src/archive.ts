@@ -1,12 +1,13 @@
 /**
  * Archive Module
  *
- * Functions for archiving and trashing email threads.
- * Routes to Superhuman portal RPC (SuperhumanProvider).
+ * Functions for archiving and trashing email threads. Token-direct: archive and
+ * delete are just label writes (remove INBOX / add TRASH) via the Superhuman
+ * backend — no running app required.
  */
 
-import type { ConnectionProvider } from "./connection-provider";
-import { SuperhumanProvider } from "./superhuman-provider";
+import { modifyThreadLabels } from "./labels";
+import type { TokenInfo } from "./token-api";
 
 export interface ArchiveResult {
   success: boolean;
@@ -19,63 +20,21 @@ export interface DeleteResult {
 }
 
 /**
- * Archive a thread by removing it from inbox (server-persisted)
- *
- * @param provider - The connection provider
- * @param threadId - The thread ID to archive
- * @returns Result with success status
+ * Archive a thread by removing it from the inbox (server-persisted).
  */
 export async function archiveThread(
-  provider: ConnectionProvider,
+  token: TokenInfo,
   threadId: string
 ): Promise<ArchiveResult> {
-  if (provider instanceof SuperhumanProvider) {
-    if (!provider.hasPortal()) {
-      return { success: false, error: "Requires running Superhuman app with CDP connection for archive" };
-    }
-    try {
-      await provider.portalInvoke("threadInternal", "modifyLabels", [
-        threadId,
-        { addLabelIds: [], removeLabelIds: ["INBOX"] },
-      ]);
-      return { success: true };
-    } catch (e: any) {
-      return { success: false, error: e.message };
-    }
-  }
-
-  throw new Error(
-    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
-  );
+  return modifyThreadLabels(token, threadId, [], ["INBOX"]);
 }
 
 /**
- * Delete (trash) a thread (server-persisted)
- *
- * @param provider - The connection provider
- * @param threadId - The thread ID to delete
- * @returns Result with success status
+ * Delete (trash) a thread (server-persisted).
  */
 export async function deleteThread(
-  provider: ConnectionProvider,
+  token: TokenInfo,
   threadId: string
 ): Promise<DeleteResult> {
-  if (provider instanceof SuperhumanProvider) {
-    if (!provider.hasPortal()) {
-      return { success: false, error: "Requires running Superhuman app with CDP connection for delete" };
-    }
-    try {
-      await provider.portalInvoke("threadInternal", "modifyLabels", [
-        threadId,
-        { addLabelIds: ["TRASH"], removeLabelIds: [] },
-      ]);
-      return { success: true };
-    } catch (e: any) {
-      return { success: false, error: e.message };
-    }
-  }
-
-  throw new Error(
-    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
-  );
+  return modifyThreadLabels(token, threadId, ["TRASH"], []);
 }

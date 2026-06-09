@@ -71,8 +71,12 @@ describe("no provider APIs remain in src/", () => {
     //   (fetchGmailMessageHtml is used for forward body fetching)
     // Allow: attachments.ts uses gmail.googleapis.com for attachment download
     //   (confirmed exception: no Superhuman backend endpoint for downloading received attachments)
+    // Allow: labels.ts uses gmail.googleapis.com/threads/{id}/modify for label mutations
+    //   (confirmed exception: per-thread label changes have NO Superhuman backend
+    //    endpoint — the desktop app itself calls the Gmail provider API directly,
+    //    verified by CDP-monitoring a live star toggle. Same class as attachments.)
     // Disallow: gmail.googleapis.com, people.googleapis.com, etc. everywhere else
-    const allowlist = new Set(["draft-api.ts", "attachments.ts"]);
+    const allowlist = new Set(["draft-api.ts", "attachments.ts", "labels.ts"]);
     const hits: string[] = [];
     for (const [path, content] of sources) {
       const rel = path.replace(SRC_DIR + "/", "");
@@ -101,7 +105,11 @@ describe("no provider APIs remain in src/", () => {
     //   (confirmed exception: userdata.getThreads returns 400 for all MS/Exchange accounts)
     // Allow: token-api.ts contains getThreadInfoMsGraph() used as fallback in resolveThreadInfo()
     //   when userdata.getThreads returns 400 for Microsoft/Exchange accounts from CLI context
-    const allowlist = new Set(["calendar.ts", "attachments.ts", "read.ts", "token-api.ts"]);
+    // Allow: labels.ts uses graph.microsoft.com for label mutations on MS accounts
+    //   (confirmed exception: Outlook has no labels — the app translates label
+    //    changes to per-message PATCH {isRead,flag} + POST /move, calling MS Graph
+    //    directly. No Superhuman backend endpoint exists. Same class as attachments.)
+    const allowlist = new Set(["calendar.ts", "attachments.ts", "read.ts", "token-api.ts", "labels.ts"]);
     const hits: string[] = [];
     for (const [path, content] of sources) {
       const rel = path.replace(SRC_DIR + "/", "");

@@ -7,7 +7,227 @@
 
 import type { ConnectionProvider } from "./connection-provider";
 import { SuperhumanProvider } from "./superhuman-provider";
-import { listInboxFromDB } from "./sqlite-search";
+import { listInboxFromDB, readThreadFromDB } from "./sqlite-search";
+import { refreshTokenViaCDP, type TokenInfo } from "./token-api";
+
+/** Thrown by a provider call on HTTP 401 so the caller can refresh + retry once. */
+class ProviderAuthError extends Error {}
+
+/**
+ * Add/remove labels on a thread (token-direct, no running app required). This is
+ * the single primitive behind archive, delete, star, label add/remove, and mark
+ * read/unread.
+ *
+ * **Why the provider API and not the Superhuman backend?** Reverse-engineering
+ * the live desktop app (build 1041.0.9) — Network-monitoring the renderer while
+ * toggling a star — showed Superhuman itself mutates per-thread labels by
+ * calling the *provider* directly, NOT a `~backend` endpoint:
+ *
+ *   Gmail:     POST gmail.googleapis.com/gmail/v1/users/me/threads/{id}/modify
+ *              body {addLabelIds, removeLabelIds}
+ *   Microsoft: PATCH graph.microsoft.com/v1.0/me/messages/{id}  {isRead, flag, …}
+ *              POST  graph.microsoft.com/v1.0/me/messages/{id}/move {destinationId}
+ *
+ * There is no Superhuman backend RPC for a single-thread Gmail/Outlook label
+ * change — the app enqueues an offline "modifier" locally and flushes it to the
+ * provider API (captured on the wire). `messages.modifyLabels` is for *shared
+ * team* labels only; `relabels.create` is a heavyweight bulk-action (query +
+ * splits + label metadata) used only above a selection threshold. The old
+ * `userdata.writeMessage` → `threads/{id}/labels` write returned HTTP 400 (no
+ * such backend write path) and the portal `threadInternal.modifyLabels` method
+ * was removed from the app.
+ *
+ * This is therefore a confirmed provider-API exception, analogous to attachment
+ * download (`attachments.ts`): it uses the stored OAuth `accessToken` from
+ * tokens.json (the PROVIDER token, not `superhumanToken`) — the same credential
+ * Superhuman uses internally. On HTTP 401 the token is refreshed via CDP and the
+ * call retried once.
+ */
+export async function modifyThreadLabels(
+  token: TokenInfo,
+  threadId: string,
+  addLabelIds: string[],
+  removeLabelIds: string[]
+): Promise<LabelResult> {
+  if (addLabelIds.length === 0 && removeLabelIds.length === 0) {
+    return { success: true };
+  }
+
+  const attempt = async (tok: TokenInfo): Promise<LabelResult> => {
+    const accessToken = tok.accessToken;
+    if (!accessToken) {
+      return {
+        success: false,
+        error: "No provider access token (run 'superhuman account auth')",
+      };
+    }
+    if (tok.isMicrosoft) {
+      return modifyThreadLabelsMsGraph(tok.email, threadId, addLabelIds, removeLabelIds, accessToken);
+    }
+    return modifyThreadLabelsGmail(threadId, addLabelIds, removeLabelIds, accessToken);
+  };
+
+  try {
+    return await attempt(token);
+  } catch (e: any) {
+    if (!(e instanceof ProviderAuthError)) {
+      return { success: false, error: e.message };
+    }
+    // 401 → refresh the provider OAuth token via CDP and retry exactly once.
+    const refreshed = await refreshTokenViaCDP(token.email);
+    if (!refreshed) {
+      return { success: false, error: "Authentication failed (run 'superhuman account auth')" };
+    }
+    try {
+      return await attempt(refreshed);
+    } catch (e2: any) {
+      if (e2 instanceof ProviderAuthError) {
+        return { success: false, error: "Authentication failed (token refresh did not clear 401)" };
+      }
+      return { success: false, error: e2.message };
+    }
+  }
+}
+
+/**
+ * Gmail: a single POST to the thread-modify endpoint. Matches the app's
+ * `changeLabelsPerThread`, which uses this for *every* label change — including
+ * adding TRASH (delete) and removing INBOX (archive); there is no separate
+ * trash/untrash call.
+ */
+async function modifyThreadLabelsGmail(
+  threadId: string,
+  addLabelIds: string[],
+  removeLabelIds: string[],
+  accessToken: string
+): Promise<LabelResult> {
+  const url = `https://gmail.googleapis.com/gmail/v1/users/me/threads/${encodeURIComponent(
+    threadId
+  )}/modify`;
+  const resp = await fetch(url, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${accessToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ addLabelIds, removeLabelIds }),
+  });
+  if (resp.status === 401) throw new ProviderAuthError("Gmail 401");
+  if (!resp.ok) {
+    const body = await resp.text().catch(() => "");
+    return { success: false, error: `Gmail thread modify failed: HTTP ${resp.status} ${body.slice(0, 300)}` };
+  }
+  return { success: true };
+}
+
+/**
+ * Microsoft/Outlook has no labels. The app translates label changes to per-
+ * message MS Graph mutations (see `_computeMicrosoftMessageUpdates` /
+ * `_isMicrosoftMessageMoved` in the app bundle):
+ *   - UNREAD/STARRED/importance → PATCH /me/messages/{id}
+ *   - INBOX/TRASH (a folder move) → POST /me/messages/{id}/move {destinationId}
+ * A "thread" is a conversation, and these are per-MESSAGE, so the change is
+ * applied to every message id in the thread (resolved from the local SQLite
+ * cache, same as snooze).
+ */
+async function modifyThreadLabelsMsGraph(
+  email: string,
+  threadId: string,
+  addLabelIds: string[],
+  removeLabelIds: string[],
+  accessToken: string
+): Promise<LabelResult> {
+  const messageIds = resolveMsMessageIds(email, threadId);
+
+  const patch = computeMicrosoftMessageUpdates(addLabelIds, removeLabelIds);
+  const moveDest = computeMicrosoftMoveDestination(addLabelIds, removeLabelIds);
+  const hasPatch = Object.keys(patch).length > 0;
+
+  for (const id of messageIds) {
+    if (hasPatch) {
+      const resp = await fetch(
+        `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(id)}`,
+        {
+          method: "PATCH",
+          headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+          body: JSON.stringify(patch),
+        }
+      );
+      if (resp.status === 401) throw new ProviderAuthError("MS Graph 401");
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => "");
+        return { success: false, error: `MS Graph message update failed: HTTP ${resp.status} ${body.slice(0, 300)}` };
+      }
+    }
+    if (moveDest) {
+      const resp = await fetch(
+        `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(id)}/move`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${accessToken}`, "Content-Type": "application/json" },
+          body: JSON.stringify({ destinationId: moveDest }),
+        }
+      );
+      if (resp.status === 401) throw new ProviderAuthError("MS Graph 401");
+      if (!resp.ok) {
+        const body = await resp.text().catch(() => "");
+        return { success: false, error: `MS Graph message move failed: HTTP ${resp.status} ${body.slice(0, 300)}` };
+      }
+    }
+  }
+  return { success: true };
+}
+
+/**
+ * Resolve every message id in a thread from the local SQLite cache so the
+ * change applies to the whole conversation (MS Graph mutations are per-message).
+ * Falls back to the threadId itself — MS inbox threadIds are message ids — when
+ * the thread isn't cached locally, so the operation still affects at least the
+ * representative message rather than failing outright.
+ */
+function resolveMsMessageIds(email: string, threadId: string): string[] {
+  let json: Record<string, unknown> | null = null;
+  try {
+    json = readThreadFromDB(email, threadId);
+  } catch {
+    json = null;
+  }
+  if (!json) return [threadId];
+  const raw: any = json;
+  const messages: any[] = Array.isArray(raw.messages)
+    ? raw.messages
+    : typeof raw.messages === "object" && raw.messages !== null
+    ? Object.values(raw.messages)
+    : [];
+  const ids = messages.map((m: any) => m?.id || m?.message_id).filter(Boolean) as string[];
+  return ids.length > 0 ? ids : [threadId];
+}
+
+/** Map label add/remove sets to an MS Graph message PATCH body. */
+export function computeMicrosoftMessageUpdates(
+  addLabelIds: string[],
+  removeLabelIds: string[]
+): { isRead?: boolean; flag?: { flagStatus: string }; inferenceClassification?: string } {
+  const w: { isRead?: boolean; flag?: { flagStatus: string }; inferenceClassification?: string } = {};
+  if (removeLabelIds.includes("UNREAD")) w.isRead = true;
+  else if (addLabelIds.includes("UNREAD")) w.isRead = false;
+  if (removeLabelIds.includes("STARRED")) w.flag = { flagStatus: "complete" };
+  else if (addLabelIds.includes("STARRED")) w.flag = { flagStatus: "flagged" };
+  if (addLabelIds.includes("SH_IMPORTANT")) w.inferenceClassification = "focused";
+  else if (addLabelIds.includes("SH_OTHER")) w.inferenceClassification = "other";
+  return w;
+}
+
+/** Map an INBOX/TRASH label change to an MS Graph well-known destination folder. */
+export function computeMicrosoftMoveDestination(
+  addLabelIds: string[],
+  removeLabelIds: string[]
+): string | null {
+  if (addLabelIds.includes("TRASH")) return "deleteditems";
+  if (removeLabelIds.includes("INBOX")) return "archive";
+  if (addLabelIds.includes("INBOX")) return "inbox";
+  return null;
+}
 
 export interface Label {
   id: string;
@@ -109,123 +329,36 @@ export async function getThreadLabels(
  * @returns Result with success status
  */
 export async function addLabel(
-  provider: ConnectionProvider,
+  token: TokenInfo,
   threadId: string,
   labelId: string
 ): Promise<LabelResult> {
-  if (provider instanceof SuperhumanProvider) {
-    if (!provider.hasPortal()) {
-      return { success: false, error: "Requires running Superhuman app with CDP connection for label operations" };
-    }
-    try {
-      await provider.portalInvoke("threadInternal", "modifyLabels", [
-        threadId,
-        { addLabelIds: [labelId], removeLabelIds: [] },
-      ]);
-      return { success: true };
-    } catch (e: any) {
-      return { success: false, error: e.message };
-    }
-  }
-
-  throw new Error(
-    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
-  );
+  return modifyThreadLabels(token, threadId, [labelId], []);
 }
 
 /**
- * Remove a label from a thread (server-persisted)
- *
- * @param provider - The connection provider
- * @param threadId - The thread ID to remove the label from
- * @param labelId - The label ID to remove
- * @returns Result with success status
+ * Remove a label from a thread (server-persisted, token-direct).
  */
 export async function removeLabel(
-  provider: ConnectionProvider,
+  token: TokenInfo,
   threadId: string,
   labelId: string
 ): Promise<LabelResult> {
-  if (provider instanceof SuperhumanProvider) {
-    if (!provider.hasPortal()) {
-      return { success: false, error: "Requires running Superhuman app with CDP connection for label operations" };
-    }
-    try {
-      await provider.portalInvoke("threadInternal", "modifyLabels", [
-        threadId,
-        { addLabelIds: [], removeLabelIds: [labelId] },
-      ]);
-      return { success: true };
-    } catch (e: any) {
-      return { success: false, error: e.message };
-    }
-  }
-
-  throw new Error(
-    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
-  );
+  return modifyThreadLabels(token, threadId, [], [labelId]);
 }
 
 /**
- * Star a thread (adds STARRED label)
- *
- * @param provider - The connection provider
- * @param threadId - The thread ID to star
- * @returns Result with success status
+ * Star a thread (adds STARRED label, token-direct).
  */
-export async function starThread(
-  provider: ConnectionProvider,
-  threadId: string
-): Promise<LabelResult> {
-  if (provider instanceof SuperhumanProvider) {
-    if (!provider.hasPortal()) {
-      return { success: false, error: "Requires running Superhuman app with CDP connection for star operations" };
-    }
-    try {
-      await provider.portalInvoke("threadInternal", "modifyLabels", [
-        threadId,
-        { addLabelIds: ["STARRED"], removeLabelIds: [] },
-      ]);
-      return { success: true };
-    } catch (e: any) {
-      return { success: false, error: e.message };
-    }
-  }
-
-  throw new Error(
-    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
-  );
+export async function starThread(token: TokenInfo, threadId: string): Promise<LabelResult> {
+  return modifyThreadLabels(token, threadId, ["STARRED"], []);
 }
 
 /**
- * Unstar a thread (removes STARRED label)
- *
- * @param provider - The connection provider
- * @param threadId - The thread ID to unstar
- * @returns Result with success status
+ * Unstar a thread (removes STARRED label, token-direct).
  */
-export async function unstarThread(
-  provider: ConnectionProvider,
-  threadId: string
-): Promise<LabelResult> {
-  if (provider instanceof SuperhumanProvider) {
-    if (!provider.hasPortal()) {
-      return { success: false, error: "Requires running Superhuman app with CDP connection for star operations" };
-    }
-    try {
-      await provider.portalInvoke("threadInternal", "modifyLabels", [
-        threadId,
-        { addLabelIds: [], removeLabelIds: ["STARRED"] },
-      ]);
-      return { success: true };
-    } catch (e: any) {
-      return { success: false, error: e.message };
-    }
-  }
-
-  throw new Error(
-    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
-  );
+export async function unstarThread(token: TokenInfo, threadId: string): Promise<LabelResult> {
+  return modifyThreadLabels(token, threadId, [], ["STARRED"]);
 }
 
 /**

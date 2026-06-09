@@ -1,12 +1,12 @@
 /**
  * Read Status Module
  *
- * Functions for marking email threads as read or unread.
- * Routes to Superhuman portal RPC (SuperhumanProvider) with backend API fallback.
+ * Mark email threads read/unread. Token-direct: read state is the UNREAD label,
+ * written via the Superhuman backend — no running app required.
  */
 
-import type { ConnectionProvider } from "./connection-provider";
-import { SuperhumanProvider } from "./superhuman-provider";
+import { modifyThreadLabels } from "./labels";
+import type { TokenInfo } from "./token-api";
 
 export interface ReadStatusResult {
   success: boolean;
@@ -14,101 +14,21 @@ export interface ReadStatusResult {
 }
 
 /**
- * Modify labels on a thread via the backend writeMessage API.
- * Used as fallback when portal RPC is unavailable or fails.
- */
-async function modifyLabelsBackend(
-  provider: SuperhumanProvider,
-  threadId: string,
-  addLabelIds: string[],
-  removeLabelIds: string[]
-): Promise<ReadStatusResult> {
-  try {
-    await provider.backendFetch("/v3/userdata.writeMessage", {
-      method: "POST",
-      body: JSON.stringify({
-        writes: [
-          {
-            path: `threads/${threadId}/labels`,
-            value: { addLabelIds, removeLabelIds },
-          },
-        ],
-      }),
-    });
-    return { success: true };
-  } catch (e: any) {
-    return { success: false, error: e.message };
-  }
-}
-
-/**
- * Mark a thread as read (server-persisted)
- *
- * Tries portal RPC first (if available), then falls back to backend API.
- *
- * @param provider - The connection provider
- * @param threadId - The thread ID to mark as read
- * @returns Result with success status
+ * Mark a thread as read (removes UNREAD label, server-persisted).
  */
 export async function markAsRead(
-  provider: ConnectionProvider,
+  token: TokenInfo,
   threadId: string
 ): Promise<ReadStatusResult> {
-  if (provider instanceof SuperhumanProvider) {
-    // Try portal first if available
-    if (provider.hasPortal()) {
-      try {
-        await provider.portalInvoke("threadInternal", "modifyLabels", [
-          threadId,
-          { addLabelIds: [], removeLabelIds: ["UNREAD"] },
-        ]);
-        return { success: true };
-      } catch (_portalErr: any) {
-        // Portal failed — fall through to backend
-      }
-    }
-
-    // Backend fallback
-    return modifyLabelsBackend(provider, threadId, [], ["UNREAD"]);
-  }
-
-  throw new Error(
-    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
-  );
+  return modifyThreadLabels(token, threadId, [], ["UNREAD"]);
 }
 
 /**
- * Mark a thread as unread (server-persisted)
- *
- * Tries portal RPC first (if available), then falls back to backend API.
- *
- * @param provider - The connection provider
- * @param threadId - The thread ID to mark as unread
- * @returns Result with success status
+ * Mark a thread as unread (adds UNREAD label, server-persisted).
  */
 export async function markAsUnread(
-  provider: ConnectionProvider,
+  token: TokenInfo,
   threadId: string
 ): Promise<ReadStatusResult> {
-  if (provider instanceof SuperhumanProvider) {
-    // Try portal first if available
-    if (provider.hasPortal()) {
-      try {
-        await provider.portalInvoke("threadInternal", "modifyLabels", [
-          threadId,
-          { addLabelIds: ["UNREAD"], removeLabelIds: [] },
-        ]);
-        return { success: true };
-      } catch (_portalErr: any) {
-        // Portal failed — fall through to backend
-      }
-    }
-
-    // Backend fallback
-    return modifyLabelsBackend(provider, threadId, ["UNREAD"], []);
-  }
-
-  throw new Error(
-    "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."
-  );
+  return modifyThreadLabels(token, threadId, ["UNREAD"], []);
 }
