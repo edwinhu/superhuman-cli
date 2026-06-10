@@ -82,6 +82,31 @@ function formatRecipients(emails?: string[]): string[] {
   return !emails || emails.length === 0 ? [] : emails;
 }
 
+/** Extract the bare email from a "Name <email>" recipient string. */
+function bareEmail(s: string): string {
+  const m = s.match(/<\s*([^<>]+@[^@<>]+)\s*>/);
+  return (m ? m[1] : s).trim();
+}
+
+/**
+ * Draft fingerprint matching the app's DraftModel.fingerprint() exactly:
+ * to/cc are the BARE recipient emails joined with an EMPTY string, and
+ * attachments are the sorted attachment uuids joined with an empty string.
+ * (The CLI previously wrote full "Name <email>" strings joined with commas,
+ * which no official client ever produces.)
+ */
+function draftFingerprint(
+  to: string[],
+  cc: string[],
+  attachmentUuids: string[] = []
+): { to: string; cc: string; attachments: string } {
+  return {
+    to: to.map(bareEmail).join(""),
+    cc: cc.map(bareEmail).join(""),
+    attachments: [...attachmentUuids].sort().join(""),
+  };
+}
+
 export interface DraftOptions {
   to?: string[];
   cc?: string[];
@@ -91,6 +116,15 @@ export interface DraftOptions {
   action?: "compose" | "reply" | "forward";
   inReplyToThreadId?: string;
   inReplyToRfc822Id?: string;
+  /**
+   * Provider message id of the message being replied to (Gmail hex id /
+   * Microsoft item id). The official clients store this in the draft's
+   * `inReplyTo` field and read it back at send time to build
+   * outgoing_message.in_reply_to — a reply draft without it is accepted by
+   * the backend but silently never delivered (and the mobile client can't
+   * send it at all). Omit for compose drafts.
+   */
+  inReplyTo?: string;
   references?: string[];
 }
 
@@ -187,33 +221,39 @@ export async function createDraftWithUserInfo(
 ): Promise<DraftResult> {
   try {
     const draftId = generateDraftId();
-    // For new threads (compose/forward), reuse draftId as threadId so
-    // messages/send receives thread_id === message_id. For replies, use the
-    // original thread's ID to keep the email in the same thread.
-    const threadId = options.inReplyToThreadId || draftId;
+    // For new threads (compose/forward), generate a SEPARATE draft-format
+    // thread id — this matches the official clients (DraftId.newId() is called
+    // once for the thread and once for the message; captured app drafts always
+    // have threadId !== id). messages/send accepts both ids being draft ids.
+    // For replies, use the original thread's ID to keep the email in the
+    // same thread.
+    const threadId = options.inReplyToThreadId || generateDraftId();
     const now = new Date().toISOString();
 
+    const to = formatRecipients(options.to);
+    const cc = formatRecipients(options.cc);
     const draftValue = {
       id: draftId,
       threadId: threadId,
       action: options.action || "compose",
       name: null,
       from: `${userInfo.email.split("@")[0]} <${userInfo.email}>`,
-      to: formatRecipients(options.to),
-      cc: formatRecipients(options.cc),
+      to,
+      cc,
       bcc: formatRecipients(options.bcc),
       subject: options.subject || "",
       body: options.body || "",
-      snippet: (options.body || "").replace(/<[^>]*>/g, "").substring(0, 100),
+      snippet: (options.body || "").replace(/<[^>]*>/g, "").substring(0, 200),
+      // Provider message id of the replied-to message. The app writes this for
+      // reply drafts (`inReplyTo: this.inReplyTo || void 0`) and clients build
+      // outgoing_message.in_reply_to from it at send time — without it a reply
+      // draft can't be sent from the mobile app. Omitted (not null) for compose.
+      ...(options.inReplyTo ? { inReplyTo: options.inReplyTo } : {}),
       inReplyToRfc822Id: options.inReplyToRfc822Id || null,
       labelIds: ["DRAFT"],
       clientCreatedAt: now,
       date: now,
-      fingerprint: {
-        to: (options.to || []).join(","),
-        cc: (options.cc || []).join(","),
-        attachments: "",
-      },
+      fingerprint: draftFingerprint(to, cc),
       lastSessionId: crypto.randomUUID(),
       quotedContent: "",
       quotedContentInlined: false,
@@ -544,13 +584,15 @@ export async function updateDraftWithUserInfo(
       subject,
       body,
       snippet,
+      // `...existing` above already carries forward existing.inReplyTo; only
+      // override when the caller explicitly passes a new one.
+      ...(options.inReplyTo ? { inReplyTo: options.inReplyTo } : {}),
       inReplyToRfc822Id: pick(options.inReplyToRfc822Id, existing.inReplyToRfc822Id ?? null),
       labelIds: existing.labelIds ?? ["DRAFT"],
       clientCreatedAt: existing.clientCreatedAt ?? now,
       date: now,
       fingerprint: {
-        to: to.join(","),
-        cc: cc.join(","),
+        ...draftFingerprint(to, cc),
         attachments: existing.fingerprint?.attachments ?? "",
       },
       lastSessionId: crypto.randomUUID(),

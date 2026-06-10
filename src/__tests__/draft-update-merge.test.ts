@@ -119,7 +119,8 @@ describe("draft update — merge, not replace", () => {
 
     const w = getWritten();
     expect(w.to).toEqual(["new@example.com", "other@example.com"]); // changed
-    expect(w.fingerprint.to).toBe("new@example.com,other@example.com"); // fingerprint follows To
+    // App-parity fingerprint: bare emails joined with an EMPTY string (DraftModel.fingerprint)
+    expect(w.fingerprint.to).toBe("new@example.comother@example.com"); // fingerprint follows To
     expect(w.subject).toBe("Re: [Sleep.me] Re: Leak"); // preserved
     expect(w.body).toBe("<p>original body</p>"); // preserved
   });

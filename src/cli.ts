@@ -143,7 +143,28 @@ function ensureReplyDeliverableOrExit(threadInfo: any, threadId: string): void {
  */
 function parseRecipientStr(s: string): Recipient {
   const m = s.match(/^(.+?)\s*<(.+?)>$/);
-  return m ? { name: m[1].trim(), email: m[2].trim() } : { email: s };
+  if (!m) return { email: s };
+  // Strip RFC822 quoting around the display name and unescape \" \\ — the
+  // inverse of escapeRfc822Name (drafts store quoted names for e.g. "Last, First").
+  let name = m[1].trim();
+  if (name.startsWith('"') && name.endsWith('"') && name.length >= 2) {
+    name = name.slice(1, -1).replace(/\\(.)/g, "$1");
+  }
+  return { name, email: m[2].trim() };
+}
+
+/**
+ * Quote a display name for storage in a draft recipient string, matching the
+ * app's ContactModel._escapeRfc822Name exactly: names made only of RFC822
+ * atom-ish chars (the app's regex includes spaces) stay bare; anything else —
+ * commas ("Last, First"), parens, colons… — is wrapped in double quotes with
+ * `"` and `\` backslash-escaped. Without this, a comma'd name stored bare
+ * makes clients mis-parse the recipient list.
+ */
+function escapeRfc822Name(name: string): string {
+  return /^[a-z0-9$%&'*+.\-/=?^_`{}|~ ]*$/i.test(name)
+    ? name
+    : '"' + name.replace(/["\\]/g, (c) => `\\${c}`) + '"';
 }
 
 /**
@@ -1037,7 +1058,7 @@ function canonicalizeRecipientLists(accountEmail: string, lists: string[][]): st
       const contact = contacts.get(key);
       const name = contact?.name || p.name;
       const email = contact?.email || p.email;
-      out.push(name ? `${name} <${email}>` : email);
+      out.push(name ? `${escapeRfc822Name(name)} <${email}>` : email);
     }
     return out;
   });
@@ -2284,6 +2305,11 @@ async function cmdReply(options: CliOptions) {
         info(`Creating draft for reply${attachLabel} via Superhuman API...`);
       }
 
+      // Provider message item-id of the message being replied to (Gmail: the
+      // message id, not the thread id the user passed). Written into the
+      // draft's `inReplyTo` so other clients (desktop/mobile) can send it.
+      const replyMsgId = resolveReplyItemId(token, threadInfo, options.threadId);
+
       const result = await createDraftWithUserInfo(userInfo, {
         to: replyTo,
         cc: replyCc.length > 0 ? replyCc : undefined,
@@ -2291,6 +2317,9 @@ async function cmdReply(options: CliOptions) {
         body: htmlBody,
         action: "reply",
         inReplyToThreadId: canonicalThreadId,
+        // Only write a REAL provider message id into the draft; the fallback in
+        // replyMsgId can be the conversation id, which no client should see here.
+        inReplyTo: threadInfo.gmailMessageId || undefined,
         inReplyToRfc822Id: threadInfo.messageId || undefined,
         references: threadInfo.references,
       });
@@ -2299,10 +2328,6 @@ async function cmdReply(options: CliOptions) {
         error(`Failed to create reply draft: ${result.error}`);
         return;
       }
-
-      // Provider message item-id of the message being replied to (Gmail: the
-      // message id, not the thread id the user passed).
-      const replyMsgId = resolveReplyItemId(token, threadInfo, options.threadId);
 
       // Cache metadata so `draft send <id>` works without --to/--subject/--body
       saveDraftMeta({
@@ -2428,12 +2453,20 @@ async function cmdReplyAll(options: CliOptions) {
         info(`Creating draft for reply-all${attachLabel} via Superhuman API...`);
       }
 
+      // Provider message item-id of the message being replied to (Gmail: the
+      // message id, not the thread id the user passed). Written into the
+      // draft's `inReplyTo` so other clients (desktop/mobile) can send it.
+      const replyMsgId = resolveReplyItemId(token, threadInfo, options.threadId);
+
       const result = await createDraftWithUserInfo(userInfo, {
         to: uniqueRecipients,
         cc: ccRecipientsList.length > 0 ? ccRecipientsList : undefined,
         subject, body: htmlBody,
         action: "reply" as const,
         inReplyToThreadId: canonicalThreadId,
+        // Only write a REAL provider message id into the draft; the fallback in
+        // replyMsgId can be the conversation id, which no client should see here.
+        inReplyTo: threadInfo.gmailMessageId || undefined,
         inReplyToRfc822Id: threadInfo.messageId || undefined,
         references: threadInfo.references,
       });
@@ -2442,10 +2475,6 @@ async function cmdReplyAll(options: CliOptions) {
         error(`Failed to create reply-all draft: ${result.error}`);
         return;
       }
-
-      // Provider message item-id of the message being replied to (Gmail: the
-      // message id, not the thread id the user passed).
-      const replyMsgId = resolveReplyItemId(token, threadInfo, options.threadId);
 
       // Cache metadata so `draft send <id>` works without --to/--subject/--body
       saveDraftMeta({
