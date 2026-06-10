@@ -287,6 +287,7 @@ ${colors.bold}OPTIONS${colors.reset}
   --native           Use native Superhuman API for draft update (auto-detected for draft00... IDs)
   --thread <id>      Thread ID for reply/forward drafts (for draft send)
   --delay <seconds>  Delay before sending in seconds (for draft send, default: 20)
+  --no-signature     Don't append the account's Superhuman signature when sending
   --label <name|id>  Label name or ID (for label add/remove, or inbox filter; repeatable)
   --needs-reply      Exclude threads where you were the last sender (for inbox)
   --exclude <patterns> Exclude threads matching patterns (comma-separated, matches from/subject)
@@ -527,6 +528,8 @@ interface CliOptions {
   attachFiles: string[]; // file paths to attach (for reply/reply-all/forward)
   // streaming output flag
   stream: boolean; // output arrays as NDJSON (one JSON object per line)
+  // signature opt-out
+  noSignature: boolean; // skip the automatic account-signature append on send
 }
 
 function parseArgs(args: string[]): CliOptions {
@@ -589,6 +592,7 @@ function parseArgs(args: string[]): CliOptions {
     native: false,
     attachFiles: [],
     stream: false,
+    noSignature: false,
   };
 
   let i = 0;
@@ -821,6 +825,10 @@ function parseArgs(args: string[]): CliOptions {
           break;
         case "native":
           options.native = true;
+          i += 1;
+          break;
+        case "no-signature":
+          options.noSignature = true;
           i += 1;
           break;
         case "stream":
@@ -1243,6 +1251,7 @@ async function cmdSnippet(options: CliOptions) {
       subject,
       htmlBody: body,
       delay: 0,
+      noSignature: options.noSignature,
     });
 
     if (sendResult.success) {
@@ -1665,6 +1674,7 @@ async function cmdSendDraft(options: CliOptions) {
     inReplyTo: cachedMeta?.inReplyTo,
     inReplyToItemId: cachedMeta?.inReplyToItemId,
     references: cachedMeta?.references,
+    noSignature: options.noSignature,
     replyItemIds: cachedMeta?.replyItemIds,
     attachments: draftAttachments.length > 0 ? draftAttachments : undefined,
     delay: options.sendDraftDelay,
@@ -1834,6 +1844,7 @@ async function cmdSend(options: CliOptions) {
         subject: options.subject || "",
         htmlBody: bodyContent,
         attachments: uploadedAttachments.length > 0 ? uploadedAttachments : undefined,
+        noSignature: options.noSignature,
       });
       if (sent.success) {
         success(`Email${attachLabel} queued for send`);
@@ -2363,6 +2374,7 @@ async function cmdReply(options: CliOptions) {
           references: threadInfo.references,
           currentMessageIds: [...resolveThreadMessageIds(threadInfo, replyMsgId), result.draftId!],
           attachments: uploadedAttachments.length > 0 ? uploadedAttachments : undefined,
+          noSignature: options.noSignature,
         });
         if (sent.success) {
           deleteDraftMeta(result.draftId!);
@@ -2511,6 +2523,7 @@ async function cmdReplyAll(options: CliOptions) {
           references: threadInfo.references,
           currentMessageIds: [...resolveThreadMessageIds(threadInfo, replyMsgId), result.draftId!],
           attachments: uploadedAttachments.length > 0 ? uploadedAttachments : undefined,
+          noSignature: options.noSignature,
         });
         if (sent.success) {
           deleteDraftMeta(result.draftId!);
@@ -2632,6 +2645,7 @@ async function cmdForward(options: CliOptions) {
           subject,
           htmlBody,
           attachments: uploadedAttachments.length > 0 ? uploadedAttachments : undefined,
+          noSignature: options.noSignature,
         });
         if (sent.success) {
           deleteDraftMeta(result.draftId!);

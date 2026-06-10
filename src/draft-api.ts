@@ -452,6 +452,13 @@ export interface SendDraftOptions {
    * only [draftId] (the default) makes the MS-account reply send fail silently.
    */
   currentMessageIds?: string[];
+  /**
+   * Skip the automatic account-signature append (--no-signature). The
+   * signature is otherwise added to htmlBody at send time, mirroring the
+   * official clients (which append it whenever the draft's quoted content is
+   * not inlined — always true for CLI-created drafts).
+   */
+  noSignature?: boolean;
 }
 
 /**
@@ -824,6 +831,7 @@ export interface BuildSendDraftInput {
   replyItemIds?: string[];
   attachments?: SuperhumanAttachment[];
   delay?: number;
+  noSignature?: boolean;
 }
 
 export type BuildSendDraftResult =
@@ -880,6 +888,7 @@ export function buildSendDraftOptions(input: BuildSendDraftInput): BuildSendDraf
       currentMessageIds: replyItemIds.length > 0 ? [...replyItemIds, draftId] : undefined,
       attachments: input.attachments && input.attachments.length > 0 ? input.attachments : undefined,
       delay: input.delay,
+      noSignature: input.noSignature,
     },
   };
 }
@@ -899,6 +908,31 @@ export async function sendDraftSuperhuman(
   options: SendDraftOptions
 ): Promise<SendDraftResult> {
   try {
+    // Inherit the account's configured signature, exactly like the app's
+    // OutgoingMessage.fromDraft does at send time. Lazy import avoids a
+    // module cycle (signature.ts imports UserInfo from this file). Any
+    // failure here degrades to sending unsigned rather than blocking.
+    let htmlBody = options.htmlBody;
+    if (!options.noSignature) {
+      try {
+        const { buildSignedBody } = await import("./signature");
+        const isReply = !!(
+          options.inReplyToItemId ||
+          options.inReplyTo ||
+          (options.currentMessageIds && options.currentMessageIds.length > 1)
+        );
+        const signed = await buildSignedBody(userInfo, htmlBody, { isReply });
+        htmlBody = signed.htmlBody;
+        if (process.env.SH_DEBUG && signed.didAddSignature) {
+          console.error("DEBUG appended account signature to outgoing body");
+        }
+      } catch (e) {
+        if (process.env.SH_DEBUG) {
+          console.error("DEBUG signature append skipped:", e);
+        }
+      }
+    }
+
     const rfc822Id = generateRfc822Id();
     // Superhuman ID format: timestamp-base36 + "." + UUID
     // The backend validates this format and rejects plain UUIDs.
@@ -940,7 +974,7 @@ export async function sendDraftSuperhuman(
       cc: formatRecipientForSend(options.cc || []),
       bcc: formatRecipientForSend(options.bcc || []),
       subject: options.subject,
-      html_body: options.htmlBody,
+      html_body: htmlBody,
       // outgoing_message.attachments[] must match BYTE-FOR-BYTE what Superhuman's
       // own app sends (captured via CDP network monitoring of a real attachment
       // send). For an upload-firebase attachment the `source` carries ONLY
