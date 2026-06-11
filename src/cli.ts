@@ -32,7 +32,7 @@ import { markAsRead, markAsUnread } from "./read-status";
 import { readThread } from "./read";
 import { listLabels, getThreadLabels, addLabel, removeLabel, starThread, unstarThread, listStarred } from "./labels";
 import { parseSnoozeTime, snoozeThreads, unsnoozeThreads, listSnoozed } from "./snooze";
-import { listAttachments, downloadAttachment, readFileAsBase64 } from "./attachments";
+import { listAttachments, downloadAttachment, downloadRawMessage, readFileAsBase64 } from "./attachments";
 import {
   listEvents,
   createEvent,
@@ -71,7 +71,7 @@ import { SuperhumanProvider } from "./superhuman-provider";
 import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.33.0";
+const VERSION = "0.34.0";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9252", 10);
 
 /**
@@ -111,6 +111,25 @@ function resolveReplyItemId(token: any, threadInfo: any, threadId: string): stri
 function resolveThreadMessageIds(threadInfo: any, fallbackId: string): string[] {
   const ids: string[] = ((threadInfo?.messageIds as string[]) || []).filter(Boolean);
   return ids.length > 0 ? ids : [fallbackId];
+}
+
+/**
+ * Pick the provider message id of the latest non-draft message in a thread.
+ * Returns null when only a conversation id is available (MS Graph fallback),
+ * which the provider raw-export endpoints won't accept.
+ */
+function latestProviderMessageId(threadInfo: any): string | null {
+  const ids: string[] = ((threadInfo?.messageIds as string[]) || []).filter(Boolean);
+  return ids[ids.length - 1] ?? (threadInfo?.gmailMessageId as string) ?? null;
+}
+
+/** Make a subject safe to use as a filename. */
+function sanitizeFilename(name: string): string {
+  return name
+    .replace(/[/\\:*?"<>|\x00-\x1f]/g, "_")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 120);
 }
 
 /**
@@ -269,6 +288,7 @@ ${colors.bold}SUBCOMMAND GROUPS${colors.reset}
   ${colors.cyan}star${colors.reset}     add <id> | remove <id> | list
   ${colors.cyan}snooze${colors.reset}   set <id> --until <time> | cancel <id> | list
   ${colors.cyan}attachment${colors.reset} list <id> | download <id>
+  ${colors.cyan}export${colors.reset}   eml <id> — save a message as a .eml file (raw RFC 822)
   ${colors.cyan}snippet${colors.reset}  list | use <name>
   ${colors.cyan}contact${colors.reset}  search <query>
 
@@ -282,6 +302,7 @@ ${colors.bold}OPTIONS${colors.reset}
   --html <text>      Email body as HTML
   --attach <path>    Attach a file (can be used multiple times, for reply/reply-all/forward)
   --send             Send immediately instead of saving as draft (for reply/reply-all/forward)
+  --as-attachment    Forward the original message as a .eml attachment instead of inline text
   --vars <pairs>     Template variable substitution: "key1=val1,key2=val2" (for snippet use)
   --provider <type>  Draft API: "superhuman" (default), "gmail", or "outlook"
   --native           Use native Superhuman API for draft update (auto-detected for draft00... IDs)
@@ -298,7 +319,7 @@ ${colors.bold}OPTIONS${colors.reset}
   --until <time>     Snooze until: preset (tomorrow, next-week, weekend, evening) or ISO datetime
   --output <path>    Output directory or file path (for attachment download)
   --attachment <id>  Specific attachment ID (for attachment download)
-  --message <id>     Message ID (required with --attachment)
+  --message <id>     Message ID (required with --attachment; optional for export eml / forward --as-attachment)
   --limit <number>   Number of results (default: 10, for inbox/search)
   --ai               Use AI-powered search (ai.askAIProxy) instead of keyword FTS
   --include-done     Search all emails including archived/done (routes to AI server-side search)
@@ -352,6 +373,7 @@ ${colors.bold}EXAMPLES${colors.reset}
   ${colors.dim}# Reply-all / Forward${colors.reset}
   superhuman reply-all <thread-id> --body "Thanks everyone!"
   superhuman forward <thread-id> --to colleague@example.com --body "FYI" --send
+  superhuman forward <thread-id> --to colleague@example.com --as-attachment --send
 
   ${colors.dim}# Archive / Delete${colors.reset}
   superhuman archive <thread-id>
@@ -388,6 +410,10 @@ ${colors.bold}EXAMPLES${colors.reset}
   superhuman attachment download <thread-id>
   superhuman attachment download <thread-id> --output ./downloads
   superhuman attachment download --attachment <attachment-id> --message <message-id> --output ./file.pdf
+
+  ${colors.dim}# Export a message as .eml (raw RFC 822, attachable to other emails)${colors.reset}
+  superhuman export eml <thread-id> --output ./message.eml
+  superhuman export eml <thread-id> --message <message-id> --output ./message.eml
 
   ${colors.dim}# Calendar${colors.reset}
   superhuman calendar list
@@ -445,7 +471,7 @@ ${colors.bold}REQUIREMENTS${colors.reset}
 // Commands that use noun+verb subcommand groups (e.g., "calendar create", "draft delete")
 const GROUPED_COMMANDS = new Set([
   "calendar", "draft", "label", "star", "snooze", "mark",
-  "attachment", "snippet", "snippets", "account", "contact",
+  "attachment", "snippet", "snippets", "account", "contact", "export",
 ]);
 
 interface CliOptions {
@@ -530,6 +556,7 @@ interface CliOptions {
   stream: boolean; // output arrays as NDJSON (one JSON object per line)
   // signature opt-out
   noSignature: boolean; // skip the automatic account-signature append on send
+  asAttachment: boolean; // forward: attach the original message as a .eml file
 }
 
 function parseArgs(args: string[]): CliOptions {
@@ -593,6 +620,7 @@ function parseArgs(args: string[]): CliOptions {
     attachFiles: [],
     stream: false,
     noSignature: false,
+    asAttachment: false,
   };
 
   let i = 0;
@@ -831,6 +859,10 @@ function parseArgs(args: string[]): CliOptions {
           options.noSignature = true;
           i += 1;
           break;
+        case "as-attachment":
+          options.asAttachment = true;
+          i += 1;
+          break;
         case "stream":
         case "ndjson":
           options.stream = true;
@@ -914,6 +946,10 @@ function parseArgs(args: string[]): CliOptions {
       i += 1;
     } else if (options.command === "attachment" && options.subcommand === "download" && !options.threadId && !options.attachmentId) {
       // attachment download <thread-id>
+      options.threadId = unescapeString(arg);
+      i += 1;
+    } else if (options.command === "export" && options.subcommand === "eml" && !options.threadId) {
+      // export eml <thread-id>
       options.threadId = unescapeString(arg);
       i += 1;
     } else if (options.command === "contact" && options.subcommand === "search" && !options.contactsQuery) {
@@ -2587,17 +2623,42 @@ async function cmdForward(options: CliOptions) {
         options.cc,
       ]) as [string[], string[]];
 
+      // --as-attachment: package the original message as a .eml file instead
+      // of inlining its HTML. Raw RFC 822 bytes come from the provider, so the
+      // forwarded copy keeps original headers and nested attachments.
+      let emlAttachment: { filename: string; base64: string } | null = null;
+      if (options.asAttachment) {
+        const msgId = options.messageId
+          || latestProviderMessageId(threadInfo)
+          || (!token.isMicrosoft ? options.threadId : null);
+        if (!msgId) {
+          error("Could not resolve a provider message id to attach. Pass --message <id> (see 'attachment list').");
+          process.exit(1);
+        }
+        info(`Downloading original message as .eml...`);
+        const raw = await downloadRawMessage(msgId, {
+          accessToken: token.accessToken,
+          isMicrosoft: token.isMicrosoft,
+        });
+        emlAttachment = {
+          filename: `${sanitizeFilename(threadInfo.subject) || msgId}.eml`,
+          base64: Buffer.from(raw).toString("base64"),
+        };
+      }
+
       // Fetch original message body to include in the forward
       let originalHtml = "";
-      if (threadInfo.gmailMessageId && !token.isMicrosoft) {
+      if (!options.asAttachment && threadInfo.gmailMessageId && !token.isMicrosoft) {
         const fetched = await fetchGmailMessageHtml(token.accessToken, threadInfo.gmailMessageId);
         if (fetched) originalHtml = fetched;
       }
-      const htmlBody = buildForwardBody(
-        body ? textToHtml(body) : "",
-        originalHtml,
-        { from: threadInfo.from, date: threadInfo.date, subject: threadInfo.subject, to: threadInfo.to }
-      );
+      const htmlBody = options.asAttachment
+        ? (body ? textToHtml(body) : "<div></div>")
+        : buildForwardBody(
+            body ? textToHtml(body) : "",
+            originalHtml,
+            { from: threadInfo.from, date: threadInfo.date, subject: threadInfo.subject, to: threadInfo.to }
+          );
 
       if (options.send) {
         info(`Sending forward${attachLabel} via Superhuman API...`);
@@ -2632,7 +2693,17 @@ async function cmdForward(options: CliOptions) {
 
       // Attach files (if any) and persist them to the draft cache so a later
       // `draft send <id>` re-includes them.
-      const uploadedAttachments = await uploadAndCacheAttachments(userInfo, result.draftId!, result.threadId!, options.attachFiles);
+      let uploadedAttachments = await uploadAndCacheAttachments(userInfo, result.draftId!, result.threadId!, options.attachFiles);
+
+      if (emlAttachment) {
+        info(`Attaching ${emlAttachment.filename} (message/rfc822)...`);
+        const att = await uploadAttachmentSuperhuman(
+          userInfo, result.draftId!, result.threadId!,
+          emlAttachment.filename, "message/rfc822", emlAttachment.base64
+        );
+        uploadedAttachments = [...uploadedAttachments, att];
+        cacheDraftAttachments(result.draftId!, uploadedAttachments);
+      }
 
       // Send if requested
       if (options.send) {
@@ -3216,6 +3287,55 @@ async function cmdDownload(options: CliOptions) {
   }
 
   await provider.disconnect();
+}
+
+/**
+ * Export a message as a standards-compliant .eml file (raw RFC 822 source).
+ *
+ * Downloads the original MIME bytes from the provider (Gmail format=raw /
+ * MS Graph $value) so headers, multipart structure, and nested attachments
+ * survive intact. Defaults to the latest message in the thread; --message
+ * picks a specific provider message id.
+ */
+async function cmdExportEml(options: CliOptions) {
+  if (!options.threadId && !options.messageId) {
+    error("Thread ID is required (or use --message <provider-message-id>)");
+    console.log(`Usage: superhuman export eml <thread-id> [--message <id>] [--output <file.eml>] [--account <email>]`);
+    process.exit(1);
+  }
+
+  const token = await requireToken(options);
+  let messageId = options.messageId;
+  let subject = "";
+
+  if (options.threadId) {
+    const threadInfo = await resolveThreadInfo(token, token.email || options.account || "", options.threadId);
+    if (threadInfo) {
+      subject = threadInfo.subject || "";
+      if (!messageId) messageId = latestProviderMessageId(threadInfo) || "";
+    }
+    // Gmail thread ids double as message ids for single-message threads
+    if (!messageId && !token.isMicrosoft) messageId = options.threadId;
+  }
+
+  if (!messageId) {
+    error("Could not resolve a provider message id for this thread. Pass --message <id> (see 'attachment list').");
+    process.exit(1);
+  }
+
+  try {
+    info(`Exporting message ${messageId} as .eml...`);
+    const raw = await downloadRawMessage(messageId, {
+      accessToken: token.accessToken,
+      isMicrosoft: token.isMicrosoft,
+    });
+    const outputPath = options.outputPath || `${sanitizeFilename(subject) || messageId}.eml`;
+    await Bun.write(outputPath, raw);
+    success(`Exported: ${outputPath} (${formatFileSize(raw.length)})`);
+  } catch (e) {
+    error(`Failed to export: ${(e as Error).message}`);
+    process.exit(1);
+  }
 }
 
 /**
@@ -4201,6 +4321,18 @@ async function main() {
         default:
           error(`Unknown subcommand: attachment ${options.subcommand || "(none)"}`);
           log(`Usage: superhuman attachment list|download`);
+          process.exit(1);
+      }
+      break;
+
+    case "export":
+      switch (options.subcommand) {
+        case "eml":
+          await cmdExportEml(options);
+          break;
+        default:
+          error(`Unknown subcommand: export ${options.subcommand || "(none)"}`);
+          log(`Usage: superhuman export eml <thread-id> [--message <id>] [--output <file.eml>]`);
           process.exit(1);
       }
       break;

@@ -56,6 +56,7 @@ const MIME_TYPES: Record<string, string> = {
   xml: "application/xml",
   zip: "application/zip",
   gz: "application/gzip",
+  eml: "message/rfc822",
   doc: "application/msword",
   docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
   xls: "application/vnd.ms-excel",
@@ -418,6 +419,59 @@ async function downloadAttachmentMsGraph(
     data: base64,
     size: data.size || Math.ceil((base64.length * 3) / 4),
   };
+}
+
+/**
+ * Download the raw RFC 822 (MIME) source of a message — a ready-to-save .eml
+ * with the original headers, multipart structure, and nested attachments.
+ *
+ * Like downloadAttachment, this is a provider-API exception: no Superhuman
+ * backend endpoint serves raw message source (Superhuman itself calls the
+ * provider internally). Uses the stored OAuth access token from tokens.json.
+ *
+ *   - Gmail: GET /gmail/v1/users/me/messages/{id}?format=raw (base64url)
+ *   - Microsoft: GET /v1.0/me/messages/{id}/$value (raw MIME bytes)
+ *
+ * @param messageId - Provider message id (from SQLite thread info / listAttachments)
+ * @param auth      - OAuth credentials: { accessToken, isMicrosoft }
+ */
+export async function downloadRawMessage(
+  messageId: string,
+  auth: AttachmentAuthOptions
+): Promise<Uint8Array> {
+  if (!auth?.accessToken) {
+    throw new Error(
+      "downloadRawMessage requires an OAuth access token. " +
+      "Pass auth.accessToken from the cached token (token.accessToken)."
+    );
+  }
+
+  if (auth.isMicrosoft) {
+    const url = `https://graph.microsoft.com/v1.0/me/messages/${encodeURIComponent(messageId)}/$value`;
+    const resp = await fetch(url, {
+      headers: { Authorization: `Bearer ${auth.accessToken}` },
+    });
+    if (!resp.ok) {
+      const text = await resp.text();
+      throw new Error(`MS Graph API error ${resp.status}: ${text}`);
+    }
+    return new Uint8Array(await resp.arrayBuffer());
+  }
+
+  const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(messageId)}?format=raw`;
+  const resp = await fetch(url, {
+    headers: { Authorization: `Bearer ${auth.accessToken}` },
+  });
+  if (!resp.ok) {
+    const text = await resp.text();
+    throw new Error(`Gmail API error ${resp.status}: ${text}`);
+  }
+  const data = await resp.json() as { raw?: string };
+  if (!data.raw) {
+    throw new Error("Gmail API returned no raw message content");
+  }
+  const base64 = data.raw.replace(/-/g, "+").replace(/_/g, "/");
+  return new Uint8Array(Buffer.from(base64, "base64"));
 }
 
 /**
