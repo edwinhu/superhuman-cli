@@ -99,7 +99,8 @@ async function modifyThreadLabelsGmail(
   threadId: string,
   addLabelIds: string[],
   removeLabelIds: string[],
-  accessToken: string
+  accessToken: string,
+  isRetry = false
 ): Promise<LabelResult> {
   const url = `https://gmail.googleapis.com/gmail/v1/users/me/threads/${encodeURIComponent(
     threadId
@@ -113,11 +114,41 @@ async function modifyThreadLabelsGmail(
     body: JSON.stringify({ addLabelIds, removeLabelIds }),
   });
   if (resp.status === 401) throw new ProviderAuthError("Gmail 401");
+  if (resp.status === 404 && !isRetry) {
+    // Superhuman-local thread ids aren't always Gmail thread ids: the SQLite
+    // cache does its own thread grouping, and the id it reports is often a
+    // *message* id (inbox listings use the latest message id; merged threads
+    // can use an id Gmail has never seen as a thread). messages.get accepts a
+    // message id and returns the authoritative threadId — resolve, retry once.
+    const realId = await resolveGmailThreadId(threadId, accessToken);
+    if (realId && realId !== threadId) {
+      return modifyThreadLabelsGmail(realId, addLabelIds, removeLabelIds, accessToken, true);
+    }
+  }
   if (!resp.ok) {
     const body = await resp.text().catch(() => "");
     return { success: false, error: `Gmail thread modify failed: HTTP ${resp.status} ${body.slice(0, 300)}` };
   }
   return { success: true };
+}
+
+/**
+ * Resolve a (possibly message-level or Superhuman-local) id to the Gmail
+ * server thread id via messages.get. Returns null when Gmail doesn't know
+ * the id as a message either.
+ */
+async function resolveGmailThreadId(
+  id: string,
+  accessToken: string
+): Promise<string | null> {
+  const resp = await fetch(
+    `https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(id)}?format=minimal`,
+    { headers: { Authorization: `Bearer ${accessToken}` } }
+  );
+  if (resp.status === 401) throw new ProviderAuthError("Gmail 401");
+  if (!resp.ok) return null;
+  const data = (await resp.json().catch(() => null)) as { threadId?: string } | null;
+  return data?.threadId ?? null;
 }
 
 /**

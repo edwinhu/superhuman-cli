@@ -1,6 +1,6 @@
 {
   "name": "superhuman-cli",
-  "version": "0.34.0",
+  "version": "0.34.1",
   "module": "src/index.ts",
   "type": "module",
   "private": true,
