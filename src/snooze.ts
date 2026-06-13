@@ -85,6 +85,136 @@ export function parseSnoozeTime(timeStr: string): Date {
   return date;
 }
 
+/**
+ * Parse a "send later" / scheduled-send time string into a future Date.
+ *
+ * Richer than {@link parseSnoozeTime}: accepts the snooze presets, an ISO
+ * datetime, AND natural day/time forms so `draft send --at "monday morning"`
+ * works the way a user types it. Recognised forms (case-insensitive):
+ *
+ *   - presets: tomorrow | next-week | weekend | evening
+ *   - weekday (optionally "next "): "monday", "next friday", "mon 9am",
+ *     "monday morning", "tuesday 14:30"
+ *   - time-of-day alone: "morning" (9am), "afternoon" (2pm), "evening" (6pm),
+ *     "noon" — today if still ahead, else tomorrow
+ *   - bare clock time: "9am", "3:30pm", "14:00" — today if ahead else tomorrow
+ *   - anything Date can parse (ISO 8601, "2026-06-15 09:00", …)
+ *
+ * Throws if the string can't be parsed or resolves to a past time.
+ */
+export function parseSendAtTime(input: string): Date {
+  const raw = input.trim();
+  if (!raw) throw new Error("Empty schedule time");
+  const lower = raw.toLowerCase();
+  const now = new Date();
+
+  // Snooze presets share the same intent (next-week === next Monday 9am).
+  const presets: SnoozePreset[] = ["tomorrow", "next-week", "weekend", "evening"];
+  if (presets.includes(lower as SnoozePreset)) {
+    return getSnoozeTimeFromPreset(lower as SnoozePreset);
+  }
+
+  // Named time-of-day → hour mapping.
+  const timeOfDay: Record<string, number> = {
+    morning: 9,
+    noon: 12,
+    afternoon: 14,
+    evening: 18,
+    night: 20,
+  };
+
+  // Pull an explicit clock time ("9am", "3:30pm", "14:00") out of the string.
+  const parseClock = (s: string): { h: number; m: number } | null => {
+    const m = s.match(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/);
+    if (!m) return null;
+    let h = parseInt(m[1], 10);
+    const min = m[2] ? parseInt(m[2], 10) : 0;
+    const ap = m[3];
+    if (h > 23 || min > 59) return null;
+    if (ap === "pm" && h < 12) h += 12;
+    if (ap === "am" && h === 12) h = 0;
+    return { h, m: min };
+  };
+
+  // Resolve hour/minute from any time-of-day word or clock time in the string;
+  // default to 9am (a sensible "morning") when only a day is given.
+  const resolveTime = (s: string): { h: number; m: number } => {
+    for (const [word, hr] of Object.entries(timeOfDay)) {
+      if (s.includes(word)) return { h: hr, m: 0 };
+    }
+    return parseClock(s) ?? { h: 9, m: 0 };
+  };
+
+  // Weekday handling: "monday", "next fri", "tuesday 14:30", "mon morning".
+  const weekdays = [
+    "sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday",
+  ];
+  const dayMatch = lower.match(
+    /\b(next\s+)?(sun|mon|tue|wed|thu|fri|sat)[a-z]*\b/
+  );
+  if (dayMatch) {
+    const abbr = dayMatch[2];
+    const target = weekdays.findIndex((d) => d.startsWith(abbr));
+    if (target !== -1) {
+      const result = new Date(now);
+      const { h, m } = resolveTime(lower);
+      let delta = (target - now.getDay() + 7) % 7;
+      // Same weekday today: only keep "today" if the time is still ahead and
+      // the user didn't say "next". Otherwise jump a week.
+      if (delta === 0) {
+        const candidate = new Date(now);
+        candidate.setHours(h, m, 0, 0);
+        if (dayMatch[1] || candidate <= now) delta = 7;
+      } else if (dayMatch[1] && delta < 7) {
+        // "next <day>": if the day is still ahead this week, push to next week.
+        delta += 7;
+      }
+      result.setDate(now.getDate() + delta);
+      result.setHours(h, m, 0, 0);
+      return result;
+    }
+  }
+
+  // "tomorrow 3pm" / "tomorrow morning".
+  if (lower.startsWith("tomorrow")) {
+    const { h, m } = resolveTime(lower);
+    const result = new Date(now);
+    result.setDate(now.getDate() + 1);
+    result.setHours(h, m, 0, 0);
+    return result;
+  }
+  if (lower.startsWith("today")) {
+    const { h, m } = resolveTime(lower);
+    const result = new Date(now);
+    result.setHours(h, m, 0, 0);
+    if (result <= now) {
+      throw new Error(`"${raw}" is in the past`);
+    }
+    return result;
+  }
+
+  // Time-of-day word or bare clock alone → today if ahead, else tomorrow.
+  const todWord = Object.keys(timeOfDay).find((w) => lower === w);
+  const bareClock = parseClock(lower);
+  if (todWord || (bareClock && /^[\d:apm\s]+$/.test(lower))) {
+    const { h, m } = todWord ? { h: timeOfDay[todWord], m: 0 } : bareClock!;
+    const result = new Date(now);
+    result.setHours(h, m, 0, 0);
+    if (result <= now) result.setDate(result.getDate() + 1);
+    return result;
+  }
+
+  // Fall back to native Date parsing (ISO 8601, "2026-06-15 09:00", …).
+  const date = new Date(raw);
+  if (isNaN(date.getTime())) {
+    throw new Error(`Could not parse schedule time: "${raw}"`);
+  }
+  if (date <= now) {
+    throw new Error(`Schedule time "${raw}" is in the past`);
+  }
+  return date;
+}
+
 // ============================================================================
 // Direct API Functions (using Superhuman Backend Token)
 // These bypass CDP and call Superhuman's backend APIs directly.

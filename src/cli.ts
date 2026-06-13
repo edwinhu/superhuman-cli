@@ -31,7 +31,7 @@ import { archiveThread, deleteThread } from "./archive";
 import { markAsRead, markAsUnread } from "./read-status";
 import { readThread } from "./read";
 import { listLabels, getThreadLabels, addLabel, removeLabel, starThread, unstarThread, listStarred } from "./labels";
-import { parseSnoozeTime, snoozeThreads, unsnoozeThreads, listSnoozed } from "./snooze";
+import { parseSnoozeTime, parseSendAtTime, snoozeThreads, unsnoozeThreads, listSnoozed } from "./snooze";
 import { listAttachments, downloadAttachment, downloadRawMessage, readFileAsBase64 } from "./attachments";
 import {
   listEvents,
@@ -71,7 +71,7 @@ import { SuperhumanProvider } from "./superhuman-provider";
 import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.34.1";
+const VERSION = "0.35.0";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9252", 10);
 
 /**
@@ -308,6 +308,9 @@ ${colors.bold}OPTIONS${colors.reset}
   --native           Use native Superhuman API for draft update (auto-detected for draft00... IDs)
   --thread <id>      Thread ID for reply/forward drafts (for draft send)
   --delay <seconds>  Delay before sending in seconds (for draft send, default: 20)
+  --at <datetime>    Native Send Later (server-side scheduled send): hold and dispatch at this
+                     future time even if this machine is offline. Accepts "monday morning",
+                     "next-week", "tomorrow 9am", "fri 3pm", or an ISO datetime (for draft send)
   --no-signature     Don't append the account's Superhuman signature when sending
   --label <name|id>  Label name or ID (for label add/remove, or inbox filter; repeatable)
   --needs-reply      Exclude threads where you were the last sender (for inbox)
@@ -455,6 +458,11 @@ ${colors.bold}EXAMPLES${colors.reset}
   superhuman draft send <draft-id> --account=user@example.com --to=recipient@example.com --subject="Subject" --body="Body"
   superhuman draft send <draft-id> --thread=<thread-id> --account=... ${colors.dim}# For reply/forward drafts${colors.reset}
 
+  ${colors.dim}# Native Send Later (server-side scheduled send — fires even if this machine is off)${colors.reset}
+  superhuman draft create --to user@example.com --subject "Hello" --body "Hi" ${colors.dim}# prints <draft-id>${colors.reset}
+  superhuman draft send <draft-id> --at "monday morning"
+  superhuman draft send <draft-id> --at "2026-06-15T09:00:00" --to user@example.com --subject "Hello" --body "Hi"
+
 
   ${colors.dim}# Send an email immediately${colors.reset}
   superhuman send --to user@example.com --subject "Quick note" --body "FYI"
@@ -505,6 +513,7 @@ interface CliOptions {
   sendDraftDraftId: string; // draft ID for send-draft command
   sendDraftThreadId: string; // thread ID for reply/forward drafts (optional)
   sendDraftDelay: number; // delay in seconds for send-draft command (default: 20)
+  sendAt: string; // native Send Later: absolute future datetime (--at), server-side scheduled send
   // label options
   labelId: string; // label ID for add-label/remove-label
   // snooze options
@@ -584,6 +593,7 @@ function parseArgs(args: string[]): CliOptions {
     sendDraftDraftId: "",
     sendDraftThreadId: "",
     sendDraftDelay: 20,
+    sendAt: "",
     labelId: "",
     snoozeUntil: "",
     outputPath: "",
@@ -845,6 +855,10 @@ function parseArgs(args: string[]): CliOptions {
           break;
         case "delay":
           options.sendDraftDelay = parseInt(value, 10);
+          i += inc;
+          break;
+        case "at":
+          options.sendAt = unescapeString(value);
           i += inc;
           break;
         case "thread":
@@ -1698,6 +1712,25 @@ async function cmdSendDraft(options: CliOptions) {
   // alias of SuperhumanAttachment, so the cached entries are used directly.
   const draftAttachments: SuperhumanAttachment[] = cachedMeta?.attachments ?? [];
 
+  // Native "Send Later": parse --at into an absolute future timestamp. The
+  // backend holds the message and dispatches server-side at this time (works
+  // with this machine asleep/offline), exactly like the app's Send Later.
+  let scheduledForIso: string | undefined;
+  if (options.sendAt) {
+    let when: Date;
+    try {
+      when = parseSendAtTime(options.sendAt);
+    } catch (e) {
+      error(`Invalid --at time: ${(e as Error).message}`);
+      process.exit(1);
+    }
+    if (when.getTime() <= Date.now()) {
+      error(`--at time is in the past: ${when.toLocaleString()}`);
+      process.exit(1);
+    }
+    scheduledForIso = when.toISOString();
+  }
+
   // Assemble the payload (and apply the silent-delivery guard) in one place.
   const build = buildSendDraftOptions({
     draftId,
@@ -1714,17 +1747,21 @@ async function cmdSendDraft(options: CliOptions) {
     replyItemIds: cachedMeta?.replyItemIds,
     attachments: draftAttachments.length > 0 ? draftAttachments : undefined,
     delay: options.sendDraftDelay,
+    scheduledFor: scheduledForIso,
   });
   if (!build.ok) {
     error(build.error);
     process.exit(1);
   }
 
+  const scheduleNote = scheduledForIso
+    ? ` (Send Later: ${new Date(scheduledForIso).toLocaleString()})`
+    : "";
   if (cachedMeta) {
     const attachNote = draftAttachments.length > 0 ? ` with ${draftAttachments.length} attachment(s)` : "";
-    info(`Sending draft ${draftId.slice(-15)}${attachNote} to ${resolvedTo.join(", ")}...`);
+    info(`Sending draft ${draftId.slice(-15)}${attachNote} to ${resolvedTo.join(", ")}${scheduleNote}...`);
   } else {
-    info(`Sending draft ${draftId.slice(-15)}...`);
+    info(`Sending draft ${draftId.slice(-15)}${scheduleNote}...`);
   }
 
   const result = await sendDraftSuperhuman(userInfo, build.options);
@@ -1735,23 +1772,37 @@ async function cmdSendDraft(options: CliOptions) {
     // delivery happens after the undo window and can still fail (Superhuman
     // injects a "failed to send" notice up to ~10 min later). Report accurately
     // so the ✓ is never mistaken for guaranteed delivery.
-    if (result.sendAt) {
+    if (scheduledForIso) {
+      // Native Send Later: the backend holds the message and dispatches it at
+      // the scheduled time server-side — no local process required.
+      success(`Scheduled (Send Later) — dispatching at ${new Date(scheduledForIso).toLocaleString()}`);
+    } else if (result.sendAt) {
       const sendTime = new Date(result.sendAt);
       success(`Draft queued — dispatching at ${sendTime.toLocaleString()}`);
     } else {
       success("Draft queued for send");
     }
     log(`  ${colors.dim}Account: ${token.email}${colors.reset}`);
-    log(`  ${colors.dim}Delivery confirms after the undo window; a failure would surface in your inbox.${colors.reset}`);
+    if (scheduledForIso) {
+      log(`  ${colors.dim}Held server-side; sends even if this machine is offline. Cancel/reschedule from the Superhuman app's Scheduled view.${colors.reset}`);
+    } else {
+      log(`  ${colors.dim}Delivery confirms after the undo window; a failure would surface in your inbox.${colors.reset}`);
+    }
 
     // Clean up local cache entry
     deleteDraftMeta(draftId);
 
-    // Auto-delete the native draft after successful send (matches Superhuman app behavior)
-    try {
-      await deleteDraftWithUserInfo(userInfo, resolvedThreadId, draftId);
-    } catch {
-      // Non-fatal: draft was sent successfully, cleanup failure is just cosmetic
+    // Auto-delete the native draft after an IMMEDIATE send (matches the app).
+    // For a scheduled (Send Later) send, KEEP the draft: the app holds the
+    // message as a scheduled draft until dispatch, and discarding it could
+    // cancel the pending server-side send. Leave it so it stays visible/
+    // cancellable in the app's Scheduled view.
+    if (!scheduledForIso) {
+      try {
+        await deleteDraftWithUserInfo(userInfo, resolvedThreadId, draftId);
+      } catch {
+        // Non-fatal: draft was sent successfully, cleanup failure is just cosmetic
+      }
     }
   } else {
     error(`Failed to send draft: ${result.error}`);

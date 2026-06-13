@@ -431,8 +431,19 @@ export interface SendDraftOptions {
   subject: string;
   /** HTML body content */
   htmlBody: string;
-  /** Delay in seconds: 0=immediate, 20=default undo window, 3600=1hr scheduled */
+  /** Delay in seconds: 0=immediate, 20=default undo window. This is the
+   * client-side undo window only — for true server-side "Send Later" use
+   * `scheduledFor` instead (the backend holds the message until that time). */
   delay?: number;
+  /**
+   * Absolute server-side dispatch time (ISO 8601 string) — Superhuman's native
+   * "Send Later". When set, the backend queues the message and delivers it at
+   * this time even if this machine is offline; this maps byte-for-byte to the
+   * app's `outgoing_message.scheduled_for` (the app sets it from the draft's
+   * `scheduledFor.toISOString()` and posts the SAME /messages/send body, with
+   * `delay` left at its constant undo-window value). Null/omitted = send now.
+   */
+  scheduledFor?: string;
   /** Attachments uploaded via uploadAttachmentSuperhuman() */
   attachments?: SuperhumanAttachment[];
   /** RFC822 Message-ID to reply to (used for the In-Reply-To MIME header) */
@@ -831,6 +842,8 @@ export interface BuildSendDraftInput {
   replyItemIds?: string[];
   attachments?: SuperhumanAttachment[];
   delay?: number;
+  /** Absolute server-side dispatch time (ISO 8601) for native Send Later. */
+  scheduledFor?: string;
   noSignature?: boolean;
 }
 
@@ -888,6 +901,7 @@ export function buildSendDraftOptions(input: BuildSendDraftInput): BuildSendDraf
       currentMessageIds: replyItemIds.length > 0 ? [...replyItemIds, draftId] : undefined,
       attachments: input.attachments && input.attachments.length > 0 ? input.attachments : undefined,
       delay: input.delay,
+      scheduledFor: input.scheduledFor,
       noSignature: input.noSignature,
     },
   };
@@ -998,7 +1012,10 @@ export async function sendDraftSuperhuman(
           uuid: att.uuid,
         },
       })),
-      scheduled_for: null,
+      // Native "Send Later": an absolute ISO timestamp here makes Superhuman's
+      // backend hold the message and dispatch it at that time server-side (works
+      // with this machine offline). Null = send now (after the undo `delay`).
+      scheduled_for: options.scheduledFor ?? null,
       abort_on_reply: false,
       current_message_ids: options.currentMessageIds ?? [options.draftId],
       mail_merge_recipients: [],
