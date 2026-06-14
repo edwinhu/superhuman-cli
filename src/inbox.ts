@@ -24,6 +24,40 @@ export interface InboxThread {
   snippet: string;
   labelIds: string[];
   messageCount: number;
+  /**
+   * True when the account owner sent the LATEST message in the thread (i.e. the
+   * thread is "me-last" and does NOT need a reply). Detected from the latest
+   * message's `SENT` label — which Superhuman applies to every message you sent
+   * regardless of which alias it came from, on both Gmail and Microsoft — so it
+   * is alias-proof, unlike comparing `from.email` to a single account address.
+   * `from` always holds the last sender; downstream can read it as last_sender.
+   */
+  isFromMe: boolean;
+  /**
+   * True when the thread is awaiting a reply from the account owner: it has at
+   * least one message and the latest one was NOT sent by the owner.
+   * (`awaitingReply === !isFromMe` for non-empty threads.)
+   */
+  awaitingReply: boolean;
+}
+
+/**
+ * Determine whether the account owner sent the given message.
+ *
+ * Primary signal: the `SENT` label, which Superhuman stamps on every message
+ * the user sent from ANY linked alias, on both Gmail and Microsoft accounts —
+ * so this correctly recognizes replies from aliases that differ from the active
+ * `--account` address. Falls back to matching the sender email against the
+ * supplied me-set (account address + any known aliases) when the label is
+ * absent (older cache rows, provider quirks).
+ */
+const EMPTY_ME_SET: Set<string> = new Set();
+
+function messageIsFromMe(message: any, meSet: Set<string>): boolean {
+  const labelIds: string[] = Array.isArray(message?.labelIds) ? message.labelIds : [];
+  if (labelIds.includes("SENT")) return true;
+  const from = parseFromField(message?.from);
+  return from.email !== "" && meSet.has(from.email.toLowerCase());
 }
 
 export interface ListInboxOptions {
@@ -91,6 +125,7 @@ function threadItemToInboxThread(item: any): InboxThread | null {
       new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime()
   );
   const latest = messages[0];
+  const isFromMe = messageIsFromMe(latest, EMPTY_ME_SET);
 
   return {
     id: latest.id || Object.keys(thread.messages)[0] || "",
@@ -102,6 +137,8 @@ function threadItemToInboxThread(item: any): InboxThread | null {
     snippet: latest.snippet || "",
     labelIds: latest.labelIds || [],
     messageCount: messages.length,
+    isFromMe,
+    awaitingReply: !isFromMe,
   };
 }
 
@@ -202,6 +239,8 @@ function parsePortalListResult(result: any): InboxThread[] {
             snippet: "",
             labelIds: threadListIds,
             messageCount: 0,
+            isFromMe: false,
+            awaitingReply: false,
           };
         }
 
@@ -211,6 +250,9 @@ function parsePortalListResult(result: any): InboxThread[] {
             new Date(a.date || 0).getTime() - new Date(b.date || 0).getTime()
         );
         const latest = messages[messages.length - 1];
+        // Detect me-last from the LATEST MESSAGE's own labelIds (not the
+        // thread-level listIds, which would lose the per-message SENT marker).
+        const isFromMe = messageIsFromMe(latest, EMPTY_ME_SET);
 
         return {
           id: latest.id || threadId,
@@ -223,21 +265,28 @@ function parsePortalListResult(result: any): InboxThread[] {
           // Prefer thread-level listIds (more complete); fall back to message labelIds
           labelIds: threadListIds.length > 0 ? threadListIds : (latest.labelIds || []),
           messageCount: messages.length,
+          isFromMe,
+          awaitingReply: !isFromMe,
         };
       }
 
       // Legacy flat format: { id, threadId, subject, from, date, snippet, labelIds, messageCount }
-      return {
-        id: item.id || item.threadId || "",
-        subject: item.subject || "",
-        from: parseFromField(item.from),
-        to: parseRecipients(item.to),
-        cc: parseRecipients(item.cc),
-        date: item.date || "",
-        snippet: item.snippet || "",
-        labelIds: item.labelIds || [],
-        messageCount: item.messageCount || 1,
-      };
+      {
+        const isFromMe = messageIsFromMe(item, EMPTY_ME_SET);
+        return {
+          id: item.id || item.threadId || "",
+          subject: item.subject || "",
+          from: parseFromField(item.from),
+          to: parseRecipients(item.to),
+          cc: parseRecipients(item.cc),
+          date: item.date || "",
+          snippet: item.snippet || "",
+          labelIds: item.labelIds || [],
+          messageCount: item.messageCount || 1,
+          isFromMe,
+          awaitingReply: !isFromMe,
+        };
+      }
     })
     .filter((t): t is InboxThread => t !== null);
 }
@@ -252,6 +301,12 @@ function listInboxSQLite(
 ): InboxThread[] | null {
   const limit = options.limit ?? 10;
   const listId = buildGetThreadsFilter(options).listId;
+  // me-set is a fallback for the rare message that lacks a SENT label; the
+  // active account address is always "me". (Alias replies are already caught by
+  // the SENT label, which Superhuman applies regardless of sending alias.)
+  const meSet: Set<string> = new Set(
+    accountEmail ? [accountEmail.toLowerCase()] : []
+  );
 
   try {
     const rows = listInboxFromDB(accountEmail, listId, limit * 2); // fetch extra for client-side filtering
@@ -275,6 +330,8 @@ function listInboxSQLite(
           snippet: "",
           labelIds: row.labelIds,
           messageCount: 0,
+          isFromMe: false,
+          awaitingReply: false,
         };
       }
 
@@ -283,6 +340,10 @@ function listInboxSQLite(
           new Date(a.date || 0).getTime() - new Date(b.date || 0).getTime()
       );
       const latest = messages[messages.length - 1];
+      // Me-last detection uses the latest message's own labelIds, which carry
+      // the SENT marker for messages sent from any alias (the row-level
+      // labelIds are the thread's list membership, not the message's).
+      const isFromMe = messageIsFromMe(latest, meSet);
 
       return {
         id: latest.id || row.threadId,
@@ -294,6 +355,8 @@ function listInboxSQLite(
         snippet: latest.snippet || "",
         labelIds: row.labelIds,
         messageCount: messages.length,
+        isFromMe,
+        awaitingReply: !isFromMe,
       };
     });
   } catch {
@@ -352,12 +415,14 @@ async function listInboxSuperhuman(
   }
 
   if (options.needsReply) {
-    // Exclude threads where user was the last sender
+    // Exclude threads where the owner was the last sender. `isFromMe` is derived
+    // from the latest message's SENT label, so it recognizes replies sent from
+    // ANY of the owner's aliases — not just the active --account address (the
+    // old `from.email === userEmail` check leaked alias-sent threads). The
+    // email fallback below covers the rare cached message with no SENT label.
     const userEmail = (await provider.getCurrentEmail()).toLowerCase();
     threads = threads.filter(
-      (t) =>
-        t.messageCount <= 1 ||
-        t.from.email.toLowerCase() !== userEmail
+      (t) => !t.isFromMe && t.from.email.toLowerCase() !== userEmail
     );
   }
 
@@ -487,6 +552,8 @@ function parsePortalSearchResult(result: any): InboxThread[] {
           snippet: item.snippet?.replace(/<[^>]*>/g, "") || "",
           labelIds: item.listIds || [],
           messageCount: 0,
+          isFromMe: false,
+          awaitingReply: false,
         };
       }
 
@@ -495,6 +562,7 @@ function parsePortalSearchResult(result: any): InboxThread[] {
           new Date(a.date || 0).getTime() - new Date(b.date || 0).getTime()
       );
       const latest = messages[messages.length - 1];
+      const isFromMe = messageIsFromMe(latest, EMPTY_ME_SET);
 
       return {
         id: threadId,
@@ -506,6 +574,8 @@ function parsePortalSearchResult(result: any): InboxThread[] {
         snippet: item.snippet?.replace(/<[^>]*>/g, "") || latest.snippet || "",
         labelIds: item.listIds || latest.labelIds || [],
         messageCount: messages.length,
+        isFromMe,
+        awaitingReply: !isFromMe,
       };
     })
     .filter((t): t is InboxThread => t !== null);

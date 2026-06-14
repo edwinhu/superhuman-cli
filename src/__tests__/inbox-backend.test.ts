@@ -248,6 +248,100 @@ describe("inbox with SuperhumanProvider (portal path)", () => {
     expect(threads[0].from.email).toBe("alice@example.com");
     expect(threads[0].from.name).toBe("Alice Smith");
   });
+
+  // --- needs-reply / me-last detection -------------------------------------
+  //
+  // Real portal threads arrive in the { json: { id, messages: [...] } } shape.
+  // me-last is determined by the LATEST message's SENT label, which Superhuman
+  // applies to anything the owner sent from ANY alias — so a reply from an
+  // alias that differs from the active account address is still recognized.
+
+  /** Build a portal thread in the real { json } shape from a list of messages. */
+  function jsonThread(id: string, messages: any[]) {
+    return { json: { id, messages }, listIds: ["INBOX"] };
+  }
+
+  test("needs-reply EXCLUDES a thread whose last message the owner sent from an ALIAS", async () => {
+    // Active account is user@example.com; the owner replied last from an alias
+    // (owner-alias@other.org). Old logic compared from.email to the account
+    // address only and leaked this thread; the SENT label catches it.
+    const portalResult = [
+      jsonThread("leak-alias", [
+        { id: "m1", subject: "Q", from: { email: "them@x.com", name: "Them" },
+          date: "2026-03-20T10:00:00Z", labelIds: ["INBOX"] },
+        { id: "m2", subject: "Re: Q", from: { email: "owner-alias@other.org", name: "Owner" },
+          date: "2026-03-20T11:00:00Z", labelIds: ["SENT"] },
+      ]),
+    ];
+    const { provider } = createProviderWithPortal(portalResult);
+
+    const threads = await listInbox(provider, { needsReply: true, limit: 10 });
+
+    expect(threads).toHaveLength(0);
+  });
+
+  test("needs-reply INCLUDES a thread whose last message the other person sent", async () => {
+    const portalResult = [
+      jsonThread("awaiting", [
+        { id: "m1", subject: "Q", from: { email: "owner-alias@other.org", name: "Owner" },
+          date: "2026-03-20T10:00:00Z", labelIds: ["SENT"] },
+        { id: "m2", subject: "Re: Q", from: { email: "them@x.com", name: "Them" },
+          date: "2026-03-20T11:00:00Z", labelIds: ["INBOX"] },
+      ]),
+    ];
+    const { provider } = createProviderWithPortal(portalResult);
+
+    const threads = await listInbox(provider, { needsReply: true, limit: 10 });
+
+    expect(threads).toHaveLength(1);
+    expect(threads[0].isFromMe).toBe(false);
+    expect(threads[0].awaitingReply).toBe(true);
+    expect(threads[0].from.email).toBe("them@x.com"); // from = last sender
+  });
+
+  test("isFromMe / awaitingReply are exposed on every thread (for --json)", async () => {
+    const portalResult = [
+      jsonThread("me-last", [
+        { id: "m1", from: { email: "them@x.com", name: "Them" },
+          date: "2026-03-20T10:00:00Z", labelIds: ["INBOX"] },
+        { id: "m2", from: { email: "owner-alias@other.org", name: "Owner" },
+          date: "2026-03-20T11:00:00Z", labelIds: ["SENT"] },
+      ]),
+      jsonThread("them-last", [
+        { id: "n1", from: { email: "them@x.com", name: "Them" },
+          date: "2026-03-21T10:00:00Z", labelIds: ["INBOX"] },
+      ]),
+    ];
+    const { provider } = createProviderWithPortal(portalResult);
+
+    const threads = await listInbox(provider, { limit: 10 });
+    // Returned `id` for json-shape threads is the latest message id, so key by
+    // the latest sender instead.
+    const byLatestId = Object.fromEntries(threads.map((t) => [t.id, t]));
+
+    expect(byLatestId["m2"].isFromMe).toBe(true);  // owner alias sent last
+    expect(byLatestId["m2"].awaitingReply).toBe(false);
+    expect(byLatestId["n1"].isFromMe).toBe(false); // them sent last
+    expect(byLatestId["n1"].awaitingReply).toBe(true);
+  });
+
+  test("needs-reply falls back to account-email match when SENT label is absent", async () => {
+    // A cached message with no SENT label but sent from the active account
+    // address should still be recognized as me-last via the email fallback.
+    const portalResult = [
+      jsonThread("no-label", [
+        { id: "m1", from: { email: "them@x.com", name: "Them" },
+          date: "2026-03-20T10:00:00Z", labelIds: ["INBOX"] },
+        { id: "m2", from: { email: "user@example.com", name: "User" },
+          date: "2026-03-20T11:00:00Z", labelIds: [] },
+      ]),
+    ];
+    const { provider } = createProviderWithPortal(portalResult);
+
+    const threads = await listInbox(provider, { needsReply: true, limit: 10 });
+
+    expect(threads).toHaveLength(0);
+  });
 });
 
 /** Build a fake searchTable query result (FTS format) */

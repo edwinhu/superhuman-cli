@@ -52,3 +52,6 @@ src/api-investigation/
 
 # planning artifacts
 .planning/
+
+# stray tool caches (Antigravity/Gemini CLI symlinks)
+.antigravitycli/

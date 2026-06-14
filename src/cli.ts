@@ -25,6 +25,7 @@ import {
 import { listInbox, searchInbox, streamListInbox, streamSearchInbox } from "./inbox";
 import type { InboxThread } from "./inbox";
 import { searchDirect, listLocalAccounts, lookupThreadInfoById, getThreadBodiesFromDB, resolveContactsByEmail } from "./sqlite-search";
+import { extractLatestMessage } from "./quote-strip";
 import { saveDraftMeta, loadDraftMeta, deleteDraftMeta } from "./draft-cache";
 import { listAccounts, listAccountsChrome, switchAccount, type Account } from "./accounts";
 import { archiveThread, deleteThread } from "./archive";
@@ -71,7 +72,7 @@ import { SuperhumanProvider } from "./superhuman-provider";
 import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.35.0";
+const VERSION = "0.36.0";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9252", 10);
 
 /**
@@ -313,11 +314,13 @@ ${colors.bold}OPTIONS${colors.reset}
                      "next-week", "tomorrow 9am", "fri 3pm", or an ISO datetime (for draft send)
   --no-signature     Don't append the account's Superhuman signature when sending
   --label <name|id>  Label name or ID (for label add/remove, or inbox filter; repeatable)
-  --needs-reply      Exclude threads where you were the last sender (for inbox)
+  --needs-reply      Exclude threads where you were the last sender (any alias; for inbox).
+                     --json output also carries isFromMe + awaitingReply on every thread.
   --exclude <patterns> Exclude threads matching patterns (comma-separated, matches from/subject)
   --ai-label <names> Filter to threads with a Superhuman AI label (Respond, Meeting, News, Waiting; comma-separated = any-of)
   --with-body        Attach full message body from local FTS index to each inbox thread (JSON only)
   --body-chars <n>   Cap --with-body body length to n characters (0 = no cap)
+  --latest-only      With --with-body: emit only the latest message (quotes stripped) as "body"; omit full thread concatenation (JSON only)
   --split <bucket>   Filter by Superhuman split inbox: "important" or "other" (uses CDP)
   --until <time>     Snooze until: preset (tomorrow, next-week, weekend, evening) or ISO datetime
   --output <path>    Output directory or file path (for attachment download)
@@ -548,6 +551,7 @@ interface CliOptions {
   aiLabel: string; // Superhuman AI label filter (e.g., "Respond", "Meeting")
   withBody: boolean; // attach full message body (from local FTS) to each inbox thread (JSON only)
   bodyChars: number; // cap body length attached by --with-body (0 = no cap)
+  latestOnly: boolean; // with --with-body: emit only the quote-stripped latest message as "body"
   // ai options
   aiQuery: string; // question to ask the AI
   // snippet options
@@ -621,6 +625,7 @@ function parseArgs(args: string[]): CliOptions {
     aiLabel: "",
     withBody: false,
     bodyChars: 0,
+    latestOnly: false,
     aiQuery: "",
     snippetQuery: "",
     vars: "",
@@ -833,6 +838,12 @@ function parseArgs(args: string[]): CliOptions {
           i += inc;
           break;
         case "with-body":
+          options.withBody = true;
+          i += 1;
+          break;
+        case "latest-only":
+          options.latestOnly = true;
+          // --latest-only implies --with-body (it needs the FTS body to derive from)
           options.withBody = true;
           i += 1;
           break;
@@ -2009,17 +2020,35 @@ async function cmdInbox(options: CliOptions) {
     const email = await provider.getCurrentEmail();
     const bodies = getThreadBodiesFromDB(email, threads.map((t) => t.id));
     for (const thread of threads) {
-      let body = bodies.get(thread.id) ?? "";
+      const raw = bodies.get(thread.id) ?? "";
+      // The newest message with its quoted reply chain stripped — full length.
+      // This is the clean signal for "does this thread need a reply"; unlike the
+      // full thread concatenation it isn't fooled by old quoted history.
+      const latestMessage = extractLatestMessage(raw);
+
+      if (options.latestOnly) {
+        // Lean output: emit only the clean latest message as `body` (no full
+        // oldest->newest concatenation). Respect --body-chars as a cap.
+        let body = latestMessage;
+        if (options.bodyChars > 0 && body.length > options.bodyChars) {
+          body = "…" + body.slice(body.length - options.bodyChars);
+        }
+        console.log(JSON.stringify({ ...thread, body, latestMessage }));
+        continue;
+      }
+
       // Superhuman delimits messages with private-use chars (U+F8F0–F8FF);
       // normalize them to a readable boundary marker.
-      body = body.replace(/[\u{F8F0}-\u{F8FF}]+/gu, "\n--- message break ---\n").trim();
+      let body = raw.replace(/[\u{F8F0}-\u{F8FF}]+/gu, "\n--- message break ---\n").trim();
       // The FTS body concatenates messages oldest->newest, so the latest message
       // (what determines whether a reply is owed) is at the TAIL. When capping,
       // keep the tail, not the head.
       if (options.bodyChars > 0 && body.length > options.bodyChars) {
         body = "…" + body.slice(body.length - options.bodyChars);
       }
-      console.log(JSON.stringify({ ...thread, body }));
+      // `latestMessage` is always added (non-breaking): existing `body` consumers
+      // are unaffected; new consumers can read the clean quote-stripped latest.
+      console.log(JSON.stringify({ ...thread, body, latestMessage }));
     }
   } else if (options.json) {
     // NDJSON streaming: yield each thread as it's fetched
