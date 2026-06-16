@@ -72,7 +72,7 @@ import { SuperhumanProvider } from "./superhuman-provider";
 import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.36.0";
+const VERSION = "0.36.1";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9252", 10);
 
 /**
@@ -2358,7 +2358,7 @@ async function resolveThreadInfo(token: any, accountEmail: string, threadId: str
 async function cmdReply(options: CliOptions) {
   if (!options.threadId) {
     error("Thread ID is required");
-    console.log(`Usage: superhuman reply <thread-id> [--body "text"] [--send] [--account <email>]`);
+    console.log(`Usage: superhuman reply <thread-id> [--body "text" | --html "<html>"] [--send] [--account <email>]`);
     process.exit(1);
   }
 
@@ -2386,7 +2386,9 @@ async function cmdReply(options: CliOptions) {
       const userInfo = buildUserInfo(token, options?.account);
       const accountEmail = (token.email || options.account || "").toLowerCase();
       const subject = threadInfo.subject.startsWith("Re:") ? threadInfo.subject : `Re: ${threadInfo.subject}`;
-      const htmlBody = textToHtml(body);
+      // --html takes the raw HTML verbatim; otherwise --body is converted (and
+      // bare URLs auto-linkified) by textToHtml.
+      const htmlBody = options.html || textToHtml(body);
 
       // When the last message is from ourselves, reply to the original
       // recipients instead of to ourselves.
@@ -2573,7 +2575,9 @@ async function cmdReplyAll(options: CliOptions) {
 
       const canonicalThreadId = (threadInfo as any).canonicalThreadId || options.threadId;
       const userInfo = buildUserInfo(token, options?.account);
-      const htmlBody = textToHtml(body);
+      // --html takes the raw HTML verbatim; otherwise --body is converted (and
+      // bare URLs auto-linkified) by textToHtml.
+      const htmlBody = options.html || textToHtml(body);
 
       if (options.send) {
         info(`Sending reply-all${attachLabel} via Superhuman API...`);
@@ -2732,10 +2736,13 @@ async function cmdForward(options: CliOptions) {
         const fetched = await fetchGmailMessageHtml(token.accessToken, threadInfo.gmailMessageId);
         if (fetched) originalHtml = fetched;
       }
+      // --html takes the user's raw HTML verbatim; otherwise --body is
+      // converted (and bare URLs auto-linkified) by textToHtml.
+      const userBodyHtml = options.html || (body ? textToHtml(body) : "");
       const htmlBody = options.asAttachment
-        ? (body ? textToHtml(body) : "<div></div>")
+        ? (userBodyHtml || "<div></div>")
         : buildForwardBody(
-            body ? textToHtml(body) : "",
+            userBodyHtml,
             originalHtml,
             { from: threadInfo.from, date: threadInfo.date, subject: threadInfo.subject, to: threadInfo.to }
           );

@@ -294,7 +294,27 @@ export function unescapeString(text: string): string {
 }
 
 /**
- * Convert plain text to HTML paragraphs (returns as-is if already HTML)
+ * Wrap bare http(s) URLs in plain text with clickable <a> anchors.
+ *
+ * Only operates on text known NOT to contain markup (callers gate on the
+ * absence of "<"), so there is no risk of double-linkifying existing anchors.
+ * Trailing sentence punctuation (.,;:!?) is left outside the link; closing
+ * brackets/parens are deliberately NOT stripped so URLs that legitimately end
+ * in them survive.
+ */
+export function linkifyUrls(text: string): string {
+  return text.replace(/https?:\/\/[^\s<]+/g, (url) => {
+    const trail = url.match(/[.,;:!?]+$/);
+    const href = trail ? url.slice(0, -trail[0].length) : url;
+    const tail = trail ? trail[0] : "";
+    return `<a href="${href}">${href}</a>${tail}`;
+  });
+}
+
+/**
+ * Convert plain text to HTML paragraphs (returns as-is if already HTML).
+ * Bare URLs in plain text are auto-linkified into clickable anchors so a
+ * `--body "https://…"` becomes a real hyperlink, matching the desktop client.
  */
 export function textToHtml(text: string): string {
   if (!text) return "";
@@ -303,7 +323,9 @@ export function textToHtml(text: string): string {
   // First unescape any literal \n sequences
   const unescaped = unescapeString(text);
 
-  return `<p>${unescaped.replace(/\n/g, "</p><p>")}</p>`;
+  const linked = linkifyUrls(unescaped);
+
+  return `<p>${linked.replace(/\n/g, "</p><p>")}</p>`;
 }
 
 /**
