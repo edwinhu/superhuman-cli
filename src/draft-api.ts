@@ -877,9 +877,14 @@ export function buildSendDraftOptions(input: BuildSendDraftInput): BuildSendDraf
     return {
       ok: false,
       error:
-        "Refusing to send: this draft's thread message ids aren't available locally, so " +
-        "the reply would be accepted by the server but silently NOT delivered. Open the " +
-        "thread in the Superhuman app to sync it, recreate the reply, then retry.",
+        "Refusing to send: this draft's thread isn't synced to the local Superhuman " +
+        "cache, so the reply's real message ids aren't available. The server would accept " +
+        "the send (HTTP 200) then silently NOT deliver it.\n" +
+        `  Thread: ${threadId}\n` +
+        `  Draft:  ${draftId}\n` +
+        "Fix: open this thread once in the Superhuman desktop app to sync it, then re-run " +
+        "`superhuman draft send " + draftId + "` (the CLI re-hydrates the real ids from the " +
+        "cache automatically — no need to recreate the draft).",
     };
   }
 

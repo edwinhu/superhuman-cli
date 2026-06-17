@@ -134,25 +134,59 @@ function sanitizeFilename(name: string): string {
 }
 
 /**
- * Guard a reply send against silent non-delivery. A reply needs the thread's real
- * provider message ids in `current_message_ids`; when they're unavailable (e.g. the
- * thread isn't in the local SQLite cache and we fell back to MS Graph, which only
- * yields the conversation id), the backend accepts the send (HTTP 200) then silently
- * drops it. Refuse to send rather than queue a doomed reply. `threadId` is the
- * conversation/inbox id the user passed; if the only id we have equals it, we don't
- * have a real per-message id.
+ * The real per-message provider ids usable for a reply's `current_message_ids`.
+ * Returns [] when the only thing we have is the bare conversation/inbox id the
+ * user passed (the MS-Graph / unsynced-thread fallback), which the backend won't
+ * accept as a per-message id. Single source of truth for both the send guard and
+ * the hydrate backfill decision.
  */
-function ensureReplyDeliverableOrExit(threadInfo: any, threadId: string): void {
+export function usableReplyMessageIds(threadInfo: any, threadId: string): string[] {
   const ids: string[] = ((threadInfo?.messageIds as string[]) || []).filter(Boolean);
-  const haveRealIds = ids.length > 0 && !(ids.length === 1 && ids[0] === threadId);
-  if (!haveRealIds) {
-    error(
-      "Refusing to send: this thread's message ids aren't available locally, so the " +
-      "reply would be accepted by the server but silently NOT delivered. Open the " +
-      "thread once in the Superhuman app to sync it to the local cache, then retry."
-    );
-    process.exit(1);
-  }
+  if (ids.length === 0) return [];
+  if (ids.length === 1 && ids[0] === threadId) return [];
+  return ids;
+}
+
+/**
+ * Pure predicate: can a reply on this thread actually be delivered? A reply needs
+ * the thread's real provider message ids in `current_message_ids`; when they're
+ * unavailable (the thread isn't in the local SQLite cache and we fell back to MS
+ * Graph, which only yields the conversation id), the backend accepts the send
+ * (HTTP 200) then silently drops it. Exported for unit testing without exiting.
+ */
+export function isReplyDeliverable(threadInfo: any, threadId: string): boolean {
+  return usableReplyMessageIds(threadInfo, threadId).length > 0;
+}
+
+/**
+ * Guard a reply send against silent non-delivery. Refuses (and exits) when the
+ * thread's real message ids aren't available, printing exactly which thread and
+ * the one command to recover. `accountEmail` is included so the message names the
+ * account to open the thread in.
+ */
+function ensureReplyDeliverableOrExit(
+  threadInfo: any,
+  threadId: string,
+  accountEmail: string,
+  draftId?: string
+): void {
+  if (isReplyDeliverable(threadInfo, threadId)) return;
+  const subject = (threadInfo?.subject as string) || "(unknown subject)";
+  const retry = draftId
+    ? `superhuman draft send ${draftId} --account ${accountEmail}`
+    : `superhuman draft send <draft-id> --account ${accountEmail}`;
+  error(
+    "Refusing to send: this thread isn't synced to the local Superhuman cache, so the " +
+    "reply's real message ids aren't available. The server would accept the send " +
+    "(HTTP 200) then silently NOT deliver it.\n" +
+    `  Thread:  ${threadId}\n` +
+    `  Subject: ${subject}\n` +
+    `  Account: ${accountEmail}\n` +
+    "Fix: open this thread once in the Superhuman desktop app (for the account above) — " +
+    "that writes it to the local cache — then retry. The reply draft was already created " +
+    `and synced, so you can send it from the app, or re-run:\n  ${retry}`
+  );
+  process.exit(1);
 }
 
 /**
@@ -1723,6 +1757,28 @@ async function cmdSendDraft(options: CliOptions) {
   // alias of SuperhumanAttachment, so the cached entries are used directly.
   const draftAttachments: SuperhumanAttachment[] = cachedMeta?.attachments ?? [];
 
+  // Re-hydrate reply message ids if the cached ones are unusable. A reply draft
+  // created while its thread was unsynced caches `replyItemIds: [threadId]` (the
+  // bare conversation id), which the send guard rejects. If the user has since
+  // opened the thread in the app, the local cache now has the real ids — re-resolve
+  // them here so a plain `draft send <id>` succeeds without recreating the draft.
+  // Only kicks in when the cached ids are unusable, so the working path is untouched.
+  let resolvedReplyItemIds = cachedMeta?.replyItemIds;
+  const cachedThreadInfo = { messageIds: cachedMeta?.replyItemIds ?? [] };
+  if (cachedMeta?.replyItemIds && usableReplyMessageIds(cachedThreadInfo, resolvedThreadId).length === 0) {
+    const acct = (token.email || options.account || "").toLowerCase();
+    try {
+      const fresh = await resolveThreadInfo(token, acct, resolvedThreadId);
+      const freshIds = usableReplyMessageIds(fresh, resolvedThreadId);
+      if (freshIds.length > 0) {
+        resolvedReplyItemIds = freshIds;
+        info(`Hydrated ${freshIds.length} message id(s) from the local cache for this reply.`);
+      }
+    } catch {
+      // best-effort; buildSendDraftOptions surfaces the guard if still unusable
+    }
+  }
+
   // Native "Send Later": parse --at into an absolute future timestamp. The
   // backend holds the message and dispatches server-side at this time (works
   // with this machine asleep/offline), exactly like the app's Send Later.
@@ -1755,7 +1811,7 @@ async function cmdSendDraft(options: CliOptions) {
     inReplyToItemId: cachedMeta?.inReplyToItemId,
     references: cachedMeta?.references,
     noSignature: options.noSignature,
-    replyItemIds: cachedMeta?.replyItemIds,
+    replyItemIds: resolvedReplyItemIds,
     attachments: draftAttachments.length > 0 ? draftAttachments : undefined,
     delay: options.sendDraftDelay,
     scheduledFor: scheduledForIso,
@@ -2342,17 +2398,45 @@ async function cmdRead(options: CliOptions) {
  */
 async function resolveThreadInfo(token: any, accountEmail: string, threadId: string) {
   // SQLite path works offline; REST API requires browser session (returns 400 otherwise)
-  const sqliteInfo = lookupThreadInfoById(accountEmail, threadId);
-  if (sqliteInfo) return sqliteInfo;
+  let info: any = lookupThreadInfoById(accountEmail, threadId);
+  let triedRpc = false;
 
-  // For Microsoft/Exchange accounts, userdata.getThreads returns 400 from CLI context.
-  // Fall back to MS Graph API using the cached OAuth access token.
-  if (token.isMicrosoft && token.accessToken) {
-    const graphInfo = await getThreadInfoMsGraph(threadId, token.accessToken);
-    if (graphInfo) return graphInfo;
+  if (!info) {
+    // For Microsoft/Exchange accounts, userdata.getThreads returns 400 from CLI context.
+    // Fall back to MS Graph API using the cached OAuth access token.
+    if (token.isMicrosoft && token.accessToken) {
+      info = await getThreadInfoMsGraph(threadId, token.accessToken);
+    }
+    if (!info) {
+      triedRpc = true;
+      info = await getThreadInfoSuperhuman(token, threadId);
+    }
   }
 
-  return getThreadInfoSuperhuman(token, threadId);
+  // Hydrate: if the chosen source lacks real per-message ids (e.g. the MS-Graph
+  // fallback, which only yields the conversation id, or a SQLite thread whose
+  // cached messages carry no ids), try the Superhuman backend RPC to backfill
+  // them. Without these, a reply is accepted (200) then silently dropped. This is
+  // best-effort and only ever ADDS real ids — it never overwrites good ones — so
+  // it can't make delivery worse. For MS accounts the RPC 400s (returns null) and
+  // we degrade to the actionable guard error.
+  if (info && !triedRpc && usableReplyMessageIds(info, threadId).length === 0) {
+    try {
+      const rpc: any = await getThreadInfoSuperhuman(token, threadId);
+      const rpcIds = usableReplyMessageIds(rpc, threadId);
+      if (rpcIds.length > 0) {
+        info.messageIds = rpcIds;
+        if (!info.gmailMessageId && rpc?.gmailMessageId) info.gmailMessageId = rpc.gmailMessageId;
+        if ((!info.references || info.references.length === 0) && Array.isArray(rpc?.references)) {
+          info.references = rpc.references;
+        }
+      }
+    } catch {
+      // best-effort; the send guard surfaces an actionable error if still empty
+    }
+  }
+
+  return info;
 }
 
 async function cmdReply(options: CliOptions) {
@@ -2479,7 +2563,7 @@ async function cmdReply(options: CliOptions) {
 
       // Send if requested
       if (options.send) {
-        ensureReplyDeliverableOrExit(threadInfo, options.threadId);
+        ensureReplyDeliverableOrExit(threadInfo, options.threadId, accountEmail, result.draftId!);
         const sent = await sendDraftSuperhuman(userInfo, {
           draftId: result.draftId!,
           threadId: result.threadId!,
@@ -2629,7 +2713,7 @@ async function cmdReplyAll(options: CliOptions) {
 
       // Send if requested
       if (options.send) {
-        ensureReplyDeliverableOrExit(threadInfo, options.threadId);
+        ensureReplyDeliverableOrExit(threadInfo, options.threadId, accountEmail, result.draftId!);
         const toRecipients = uniqueRecipients.map(parseRecipientStr);
         const sent = await sendDraftSuperhuman(userInfo, {
           draftId: result.draftId!,
