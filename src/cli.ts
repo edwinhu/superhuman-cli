@@ -72,7 +72,7 @@ import { SuperhumanProvider } from "./superhuman-provider";
 import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.36.2";
+const VERSION = "0.36.3";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9252", 10);
 
 /**
@@ -1429,11 +1429,21 @@ async function cmdDraft(options: CliOptions) {
         options.bcc,
       ]) as [string[], string[], string[]];
 
+      // Recipient fields REPLACE, they don't merge. If the user passes ANY
+      // recipient flag (--to/--cc/--bcc), the whole recipient set is treated as
+      // authoritative: omitted fields are cleared (empty array), so e.g.
+      // `draft update <id> --to X` drops a stale cc instead of leaving the
+      // recipient in both To and Cc. When NO recipient flag is passed at all,
+      // every field stays undefined so a body/subject-only edit preserves the
+      // existing recipients (the merge that updateDraftWithUserInfo provides).
+      const anyRecipientFlag =
+        options.to.length > 0 || options.cc.length > 0 || options.bcc.length > 0;
+
       info(`Updating native draft ${draftId}...`);
       const updateOk = await updateDraftWithUserInfo(userInfo, draft.threadId, draftId, {
-        to: updTo.length > 0 ? updTo : undefined,
-        cc: updCc.length > 0 ? updCc : undefined,
-        bcc: updBcc.length > 0 ? updBcc : undefined,
+        to: anyRecipientFlag ? updTo : undefined,
+        cc: anyRecipientFlag ? updCc : undefined,
+        bcc: anyRecipientFlag ? updBcc : undefined,
         subject: options.subject || undefined,
         body: bodyContent,
       });
@@ -1451,10 +1461,23 @@ async function cmdDraft(options: CliOptions) {
     // Provider draft update path
     const provider = await getProvider(options);
 
+    // Recipient fields REPLACE, not merge: passing any recipient flag makes the
+    // whole recipient set authoritative (omitted fields cleared); passing none
+    // leaves recipients untouched for a body/subject-only edit. Mirrors the
+    // native path above.
+    const anyRecipientFlag =
+      options.to.length > 0 || options.cc.length > 0 || options.bcc.length > 0;
+
     // Resolve names to emails
-    const resolvedTo = options.to.length > 0 ? await resolveAllRecipientsViaProvider(provider, options.to, options.account || undefined) : undefined;
-    const resolvedCc = options.cc.length > 0 ? await resolveAllRecipientsViaProvider(provider, options.cc, options.account || undefined) : undefined;
-    const resolvedBcc = options.bcc.length > 0 ? await resolveAllRecipientsViaProvider(provider, options.bcc, options.account || undefined) : undefined;
+    const resolvedTo = options.to.length > 0
+      ? await resolveAllRecipientsViaProvider(provider, options.to, options.account || undefined)
+      : anyRecipientFlag ? [] : undefined;
+    const resolvedCc = options.cc.length > 0
+      ? await resolveAllRecipientsViaProvider(provider, options.cc, options.account || undefined)
+      : anyRecipientFlag ? [] : undefined;
+    const resolvedBcc = options.bcc.length > 0
+      ? await resolveAllRecipientsViaProvider(provider, options.bcc, options.account || undefined)
+      : anyRecipientFlag ? [] : undefined;
 
     // Use HTML body if provided, otherwise convert plain text to HTML (if body provided)
     const bodyContent = options.html || (options.body ? textToHtml(options.body) : undefined);
@@ -1933,6 +1956,9 @@ async function cmdListDrafts(options: CliOptions) {
       log(`  To: ${draft.to.join(", ") || "(no recipients)"}`);
       if (draft.cc && draft.cc.length > 0) {
         log(`  Cc: ${draft.cc.join(", ")}`);
+      }
+      if (draft.bcc && draft.bcc.length > 0) {
+        log(`  Bcc: ${draft.bcc.join(", ")}`);
       }
       if (draft.from) {
         log(`  From: ${draft.from}`);
@@ -2505,11 +2531,12 @@ async function cmdReply(options: CliOptions) {
       // Resolve against local contacts: properly-cased "Name <email>" entries
       // are required for the desktop client to map recipients to contact
       // identifiers (unresolved entries make the draft unsendable). Shared
-      // dedup drops cc entries already present in to.
-      const [replyToResolved, replyCc] = canonicalizeRecipientLists(accountEmail, [
+      // dedup drops cc/bcc entries already present in to.
+      const [replyToResolved, replyCc, replyBcc] = canonicalizeRecipientLists(accountEmail, [
         replyTo,
         options.cc,
-      ]) as [string[], string[]];
+        options.bcc,
+      ]) as [string[], string[], string[]];
       replyTo = replyToResolved;
 
       if (options.send) {
@@ -2526,6 +2553,7 @@ async function cmdReply(options: CliOptions) {
       const result = await createDraftWithUserInfo(userInfo, {
         to: replyTo,
         cc: replyCc.length > 0 ? replyCc : undefined,
+        bcc: replyBcc.length > 0 ? replyBcc : undefined,
         subject,
         body: htmlBody,
         action: "reply",
@@ -2548,6 +2576,7 @@ async function cmdReply(options: CliOptions) {
         threadId: result.threadId!,
         to: replyTo,
         cc: replyCc.length > 0 ? replyCc : undefined,
+        bcc: replyBcc.length > 0 ? replyBcc : undefined,
         subject,
         htmlBody,
         inReplyTo: threadInfo.messageId || undefined,
@@ -2569,6 +2598,7 @@ async function cmdReply(options: CliOptions) {
           threadId: result.threadId!,
           to: replyTo.map(parseRecipientStr),
           cc: replyCc.length > 0 ? replyCc.map(parseRecipientStr) : undefined,
+          bcc: replyBcc.length > 0 ? replyBcc.map(parseRecipientStr) : undefined,
           subject,
           htmlBody,
           inReplyTo: threadInfo.messageId || undefined,
@@ -2645,11 +2675,12 @@ async function cmdReplyAll(options: CliOptions) {
 
       // Resolve against local contacts (canonical casing + dedupe by email) so
       // the desktop client can map every recipient to a contact identifier.
-      // Shared dedup drops cc entries already present in to.
-      const [uniqueRecipients, ccRecipientsList] = canonicalizeRecipientLists(accountEmail, [
+      // Shared dedup drops cc/bcc entries already present in to.
+      const [uniqueRecipients, ccRecipientsList, bccRecipientsList] = canonicalizeRecipientLists(accountEmail, [
         toRaw,
         ccRaw,
-      ]) as [string[], string[]];
+        options.bcc,
+      ]) as [string[], string[], string[]];
       if (uniqueRecipients.length === 0 && ccRecipientsList.length === 0) {
         // e.g. the thread's latest message has no usable sender address —
         // creating a recipient-less draft would only fail later at send.
@@ -2677,6 +2708,7 @@ async function cmdReplyAll(options: CliOptions) {
       const result = await createDraftWithUserInfo(userInfo, {
         to: uniqueRecipients,
         cc: ccRecipientsList.length > 0 ? ccRecipientsList : undefined,
+        bcc: bccRecipientsList.length > 0 ? bccRecipientsList : undefined,
         subject, body: htmlBody,
         action: "reply" as const,
         inReplyToThreadId: canonicalThreadId,
@@ -2698,6 +2730,7 @@ async function cmdReplyAll(options: CliOptions) {
         threadId: result.threadId!,
         to: uniqueRecipients,
         cc: ccRecipientsList.length > 0 ? ccRecipientsList : undefined,
+        bcc: bccRecipientsList.length > 0 ? bccRecipientsList : undefined,
         subject,
         htmlBody,
         inReplyTo: threadInfo.messageId || undefined,
@@ -2720,6 +2753,7 @@ async function cmdReplyAll(options: CliOptions) {
           threadId: result.threadId!,
           to: toRecipients,
           cc: ccRecipientsList.length > 0 ? ccRecipientsList.map(parseRecipientStr) : undefined,
+          bcc: bccRecipientsList.length > 0 ? bccRecipientsList.map(parseRecipientStr) : undefined,
           subject,
           htmlBody,
           inReplyTo: threadInfo.messageId || undefined,
@@ -2786,10 +2820,11 @@ async function cmdForward(options: CliOptions) {
       // Resolve recipients against local contacts (canonical casing) so the
       // desktop client can map them to contact identifiers; honor --cc too.
       const fwdAccountEmail = (token.email || options.account || "").toLowerCase();
-      const [fwdTo, fwdCc] = canonicalizeRecipientLists(fwdAccountEmail, [
+      const [fwdTo, fwdCc, fwdBcc] = canonicalizeRecipientLists(fwdAccountEmail, [
         options.to,
         options.cc,
-      ]) as [string[], string[]];
+        options.bcc,
+      ]) as [string[], string[], string[]];
 
       // --as-attachment: package the original message as a .eml file instead
       // of inlining its HTML. Raw RFC 822 bytes come from the provider, so the
@@ -2842,6 +2877,7 @@ async function cmdForward(options: CliOptions) {
       const result = await createDraftWithUserInfo(userInfo, {
         to: fwdTo,
         cc: fwdCc.length > 0 ? fwdCc : undefined,
+        bcc: fwdBcc.length > 0 ? fwdBcc : undefined,
         subject, body: htmlBody,
         action: "forward",
       });
@@ -2857,6 +2893,7 @@ async function cmdForward(options: CliOptions) {
         threadId: result.threadId!,
         to: fwdTo,
         cc: fwdCc.length > 0 ? fwdCc : undefined,
+        bcc: fwdBcc.length > 0 ? fwdBcc : undefined,
         subject,
         htmlBody,
         createdAt: new Date().toISOString(),
@@ -2884,6 +2921,7 @@ async function cmdForward(options: CliOptions) {
           threadId: result.threadId!,
           to: fwdTo.map(parseRecipientStr),
           cc: fwdCc.length > 0 ? fwdCc.map(parseRecipientStr) : undefined,
+          bcc: fwdBcc.length > 0 ? fwdBcc.map(parseRecipientStr) : undefined,
           subject,
           htmlBody,
           attachments: uploadedAttachments.length > 0 ? uploadedAttachments : undefined,

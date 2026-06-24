@@ -36,6 +36,7 @@ const EXISTING_DRAFT = {
   from: "eddyhu <eddyhu@gmail.com>",
   to: ["help@sleep.me"],
   cc: ["cc@example.com"],
+  bcc: ["bcc@example.com"],
   subject: "Re: [Sleep.me] Re: Leak",
   body: "<p>original body</p>",
   snippet: "original body",
@@ -123,6 +124,35 @@ describe("draft update — merge, not replace", () => {
     expect(w.fingerprint.to).toBe("new@example.comother@example.com"); // fingerprint follows To
     expect(w.subject).toBe("Re: [Sleep.me] Re: Leak"); // preserved
     expect(w.body).toBe("<p>original body</p>"); // preserved
+  });
+
+  it("body-only update preserves BCC", async () => {
+    const getWritten = mockBackend();
+    await updateDraftWithUserInfo(userInfo, THREAD_ID, DRAFT_ID, { body: "<p>new</p>" });
+    expect(getWritten().bcc).toEqual(["bcc@example.com"]); // preserved (was dropped before)
+  });
+
+  it("explicit bcc replaces the existing BCC", async () => {
+    const getWritten = mockBackend();
+    await updateDraftWithUserInfo(userInfo, THREAD_ID, DRAFT_ID, {
+      bcc: ["new-bcc@example.com"],
+    });
+    expect(getWritten().bcc).toEqual(["new-bcc@example.com"]); // changed
+  });
+
+  it("empty bcc array clears the existing BCC (replace semantics)", async () => {
+    // The CLI passes bcc:[] when the user updates recipients but omits --bcc, so
+    // an empty array MUST clear bcc rather than be treated as 'no change'.
+    const getWritten = mockBackend();
+    await updateDraftWithUserInfo(userInfo, THREAD_ID, DRAFT_ID, {
+      to: ["solo@example.com"],
+      cc: [],
+      bcc: [],
+    });
+    const w = getWritten();
+    expect(w.to).toEqual(["solo@example.com"]);
+    expect(w.cc).toEqual([]); // cleared
+    expect(w.bcc).toEqual([]); // cleared
   });
 
   it("carries forward unmanaged fields (autoDraftKind)", async () => {

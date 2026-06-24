@@ -110,6 +110,75 @@ describe("SuperhumanDraftProvider", () => {
       });
     });
 
+    it("should expose cc and bcc in parsed Draft[]", async () => {
+      // Regression: `draft list --json` previously dropped bcc entirely, so a
+      // bcc set on a draft was unverifiable. The provider must surface both
+      // cc and bcc (defaulting to []) from the userdata.getThreads payload.
+      const mockResponse = {
+        threadList: [
+          {
+            id: "draft00thread",
+            thread: {
+              messages: {
+                draft00abc123: {
+                  draft: {
+                    id: "draft00abc123",
+                    subject: "Test Subject",
+                    to: ["to@example.com"],
+                    cc: ["cc@example.com"],
+                    bcc: ["bcc@example.com"],
+                    from: "user@example.com",
+                    snippet: "Preview text",
+                    date: "2026-02-08T23:53:51.053Z",
+                  },
+                },
+              },
+            },
+          },
+        ],
+      };
+
+      globalThis.fetch = mock(async () => new Response(JSON.stringify(mockResponse)));
+
+      const provider = new SuperhumanDraftProvider(mockToken);
+      const drafts = await provider.listDrafts();
+
+      expect(drafts[0]!.cc).toEqual(["cc@example.com"]);
+      expect(drafts[0]!.bcc).toEqual(["bcc@example.com"]);
+    });
+
+    it("should default cc and bcc to [] when absent", async () => {
+      const mockResponse = {
+        threadList: [
+          {
+            id: "draft00thread",
+            thread: {
+              messages: {
+                draft00abc123: {
+                  draft: {
+                    id: "draft00abc123",
+                    subject: "No recipients beyond to",
+                    to: ["to@example.com"],
+                    from: "user@example.com",
+                    snippet: "x",
+                    date: "2026-02-08T23:53:51.053Z",
+                  },
+                },
+              },
+            },
+          },
+        ],
+      };
+
+      globalThis.fetch = mock(async () => new Response(JSON.stringify(mockResponse)));
+
+      const provider = new SuperhumanDraftProvider(mockToken);
+      const drafts = await provider.listDrafts();
+
+      expect(drafts[0]!.cc).toEqual([]);
+      expect(drafts[0]!.bcc).toEqual([]);
+    });
+
     it("should return empty array when threadList is empty", async () => {
       globalThis.fetch = mock(async () => {
         return new Response(JSON.stringify({ threadList: [] }));
