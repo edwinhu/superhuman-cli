@@ -7,7 +7,7 @@
 
 import type { ConnectionProvider } from "./connection-provider";
 import { SuperhumanProvider } from "./superhuman-provider";
-import { readThreadFromDB } from "./sqlite-search";
+import { readThreadFromDB, getThreadBodiesFromDB } from "./sqlite-search";
 import { getCachedToken, loadTokensFromDisk } from "./token-api";
 
 export interface ThreadMessage {
@@ -235,7 +235,32 @@ async function readThreadSQLite(
         new Date(a.date || 0).getTime() - new Date(b.date || 0).getTime()
     );
 
-    return messages.map((m) => toThreadMessage(m, threadId));
+    const result = messages.map((m) => toThreadMessage(m, threadId));
+
+    // The `threads` table only stores per-message *snippets* (~200 chars), so
+    // `read` would otherwise show truncated content. The full body text lives in
+    // the FTS index (thread_search_content.c2content), keyed per-thread, which is
+    // the whole thread concatenated oldest→newest. Pull it and attach it to the
+    // latest message (its block carries the complete text). Mirrors what
+    // `inbox --with-body` already does via getThreadBodiesFromDB. Best-effort:
+    // any failure leaves the snippet fallback intact.
+    try {
+      const ids = result.map((m) => m.id).filter(Boolean);
+      if (ids.length > 0) {
+        const bodies = getThreadBodiesFromDB(accountEmail, ids);
+        if (bodies.size > 0) {
+          const latest = result[result.length - 1];
+          const full = bodies.get(latest.id) ?? bodies.values().next().value;
+          if (full && (!latest.body || latest.body.length < full.length)) {
+            latest.body = full;
+          }
+        }
+      }
+    } catch {
+      // Enrichment is best-effort; fall back to snippets.
+    }
+
+    return result;
   } catch {
     return []; // SQLite failed, let caller fall back to network
   }
