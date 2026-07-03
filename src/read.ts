@@ -340,7 +340,10 @@ async function readThreadMsGraph(
       if (convId) {
         const folders = ["Inbox", "SentItems", "Archive", "DeletedItems"];
         const filterParam = `conversationId eq '${convId}'`;
-        const queryParams = `?$filter=${encodeURIComponent(filterParam)}&$select=${select}&$orderby=receivedDateTime+asc&$top=50`;
+        // NOTE: Do NOT combine $filter=conversationId with $orderby — Exchange
+        // rejects the pair with InefficientFilter (400) ("restriction or sort
+        // order is too complex"). We sort client-side below instead.
+        const queryParams = `?$filter=${encodeURIComponent(filterParam)}&$select=${select}&$top=50`;
 
         let items: any[] = [];
         for (const folder of folders) {
@@ -378,7 +381,9 @@ async function readThreadMsGraph(
     // (NOT /me/messages which returns InefficientFilter 400 on Exchange).
     const folders = ["Inbox", "SentItems", "Archive", "DeletedItems"];
     const filterParam = `conversationId eq '${threadId}'`;
-    const queryParams = `?$filter=${encodeURIComponent(filterParam)}&$select=${select}&$orderby=receivedDateTime+asc&$top=50`;
+    // See note above: $filter=conversationId + $orderby → InefficientFilter 400.
+    // Sort client-side after fetching.
+    const queryParams = `?$filter=${encodeURIComponent(filterParam)}&$select=${select}&$top=50`;
 
     let items: any[] = [];
     for (const folder of folders) {

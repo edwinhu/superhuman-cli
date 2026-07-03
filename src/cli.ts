@@ -2103,33 +2103,9 @@ async function cmdInbox(options: CliOptions) {
     const bodies = getThreadBodiesFromDB(email, threads.map((t) => t.id));
     for (const thread of threads) {
       const raw = bodies.get(thread.id) ?? "";
-      // The newest message with its quoted reply chain stripped — full length.
-      // This is the clean signal for "does this thread need a reply"; unlike the
-      // full thread concatenation it isn't fooled by old quoted history.
-      const latestMessage = extractLatestMessage(raw);
-
-      if (options.latestOnly) {
-        // Lean output: emit only the clean latest message as `body` (no full
-        // oldest->newest concatenation). Respect --body-chars as a cap.
-        let body = latestMessage;
-        if (options.bodyChars > 0 && body.length > options.bodyChars) {
-          body = "…" + body.slice(body.length - options.bodyChars);
-        }
-        console.log(JSON.stringify({ ...thread, body, latestMessage }));
-        continue;
-      }
-
-      // Superhuman delimits messages with private-use chars (U+F8F0–F8FF);
-      // normalize them to a readable boundary marker.
-      let body = raw.replace(/[\u{F8F0}-\u{F8FF}]+/gu, "\n--- message break ---\n").trim();
-      // The FTS body concatenates messages oldest->newest, so the latest message
-      // (what determines whether a reply is owed) is at the TAIL. When capping,
-      // keep the tail, not the head.
-      if (options.bodyChars > 0 && body.length > options.bodyChars) {
-        body = "…" + body.slice(body.length - options.bodyChars);
-      }
       // `latestMessage` is always added (non-breaking): existing `body` consumers
       // are unaffected; new consumers can read the clean quote-stripped latest.
+      const { body, latestMessage } = bodyFieldsFromFts(raw, options);
       console.log(JSON.stringify({ ...thread, body, latestMessage }));
     }
   } else if (options.json) {
@@ -2222,7 +2198,20 @@ async function cmdSearch(options: CliOptions) {
       // the local FTS index may simply not have the thread, or it may be stale.
       if (threads !== null && threads.length > 0) {
         if (options.json) {
-          for (const t of threads) console.log(JSON.stringify(t));
+          if (options.withBody) {
+            const bodyMap = await resolveBodiesForSearch(
+              provider,
+              accountEmail,
+              threads.map((t) => t.id),
+              options
+            );
+            for (const t of threads) {
+              const bf = bodyMap.get(t.id) ?? { body: "", latestMessage: "", bodyUnavailable: true };
+              console.log(JSON.stringify({ ...t, ...bf }));
+            }
+          } else {
+            for (const t of threads) console.log(JSON.stringify(t));
+          }
         } else {
           info(`Found ${total} result(s) for "${options.query}":\n`);
           console.log(
@@ -2278,16 +2267,33 @@ async function cmdSearch(options: CliOptions) {
 
       if (options.json) {
         // NDJSON: one line per retrieved thread (with id field for piping to forward/read)
-        // followed by a summary line with the AI response text
+        // followed by a summary line with the AI response text.
+        // With --with-body, resolve each retrieval's body. These are typically
+        // older/archived threads NOT in the local FTS cache, so resolution falls
+        // to a per-thread fetch (readThread → MS Graph for Exchange accounts).
+        const bodyMap = options.withBody
+          ? await resolveBodiesForSearch(
+              provider,
+              email,
+              aiResult.retrievals.map((r) => r.thread_id),
+              options
+            )
+          : null;
         for (const r of aiResult.retrievals) {
-          console.log(JSON.stringify({
+          const base = {
             id: r.thread_id,
             thread_id: r.thread_id,
             subject: r.subject,
             from: r.from,
             date: r.date,
             citation: r.index,
-          }));
+          };
+          if (bodyMap) {
+            const bf = bodyMap.get(r.thread_id) ?? { body: "", latestMessage: "", bodyUnavailable: true };
+            console.log(JSON.stringify({ ...base, ...bf }));
+          } else {
+            console.log(JSON.stringify(base));
+          }
         }
         // Final summary line (distinguishable by type field)
         console.log(JSON.stringify({ type: "ai_summary", query: options.query, response: aiResult.response }));
@@ -2352,6 +2358,135 @@ async function cmdSearch(options: CliOptions) {
   }
 
   await provider.disconnect();
+}
+
+// ---------------------------------------------------------------------------
+// --with-body helpers (shared by `inbox` and `search`)
+// ---------------------------------------------------------------------------
+
+interface BodyFields {
+  body: string;
+  latestMessage: string;
+  bodyUnavailable?: boolean;
+}
+
+/**
+ * Build { body, latestMessage } from a raw Superhuman FTS body string,
+ * honoring --latest-only and --body-chars. This is the exact logic `inbox
+ * --with-body` uses; factored out so `search --with-body` behaves identically.
+ */
+export function bodyFieldsFromFts(
+  raw: string,
+  opts: { latestOnly: boolean; bodyChars: number }
+): BodyFields {
+  // The newest message with its quoted reply chain stripped — full length.
+  const latestMessage = extractLatestMessage(raw);
+
+  if (opts.latestOnly) {
+    let body = latestMessage;
+    if (opts.bodyChars > 0 && body.length > opts.bodyChars) {
+      body = "…" + body.slice(body.length - opts.bodyChars);
+    }
+    return { body, latestMessage };
+  }
+
+  // Superhuman delimits messages with private-use chars (U+F8F0–F8FF);
+  // normalize them to a readable boundary marker.
+  let body = raw.replace(/[\u{F8F0}-\u{F8FF}]+/gu, "\n--- message break ---\n").trim();
+  // The FTS body concatenates oldest->newest, so the latest message is at the
+  // TAIL. When capping, keep the tail, not the head.
+  if (opts.bodyChars > 0 && body.length > opts.bodyChars) {
+    body = "…" + body.slice(body.length - opts.bodyChars);
+  }
+  return { body, latestMessage };
+}
+
+/**
+ * Build { body, latestMessage } from fetched thread messages (readThread),
+ * used for search results whose bodies aren't in the local FTS cache (e.g.
+ * older archived threads on Microsoft accounts). Renders HTML to text and
+ * concatenates oldest->newest. Unlike the FTS path, quoted history in the
+ * latest message is not stripped (no per-message quote delimiters available).
+ */
+export function bodyFieldsFromMessages(
+  messages: import("./read").ThreadMessage[],
+  opts: { latestOnly: boolean; bodyChars: number }
+): BodyFields {
+  const texts = messages
+    .map((m) => htmlToText(m.body || m.snippet || "").trim())
+    .filter(Boolean);
+  const latestMessage = texts.length ? texts[texts.length - 1]! : "";
+
+  if (opts.latestOnly) {
+    let body = latestMessage;
+    if (opts.bodyChars > 0 && body.length > opts.bodyChars) {
+      body = "…" + body.slice(body.length - opts.bodyChars);
+    }
+    return { body, latestMessage };
+  }
+
+  let body = texts.join("\n--- message break ---\n").trim();
+  if (opts.bodyChars > 0 && body.length > opts.bodyChars) {
+    body = "…" + body.slice(body.length - opts.bodyChars);
+  }
+  return { body, latestMessage };
+}
+
+/**
+ * Resolve { body, latestMessage } for a set of search-result thread ids.
+ * Fast path: the local FTS index (one DB pass). Miss path: fetch the thread
+ * via readThread (SQLite → portal → MS Graph → backend) so older archived
+ * threads that aren't in the local FTS cache still get bodies. Threads that
+ * resolve nowhere are marked `bodyUnavailable: true` rather than silently
+ * emitting an empty body.
+ */
+async function resolveBodiesForSearch(
+  provider: SuperhumanProvider,
+  email: string,
+  ids: string[],
+  opts: { latestOnly: boolean; bodyChars: number }
+): Promise<Map<string, BodyFields>> {
+  const out = new Map<string, BodyFields>();
+
+  let ftsBodies = new Map<string, string>();
+  try {
+    ftsBodies = getThreadBodiesFromDB(email, ids);
+  } catch {
+    // No local blob / DB unavailable — everything falls to the network path.
+  }
+
+  const misses = ids.filter((id) => !ftsBodies.get(id));
+  const fetched = new Map<string, import("./read").ThreadMessage[]>();
+  const CONCURRENCY = 5;
+  for (let i = 0; i < misses.length; i += CONCURRENCY) {
+    const batch = misses.slice(i, i + CONCURRENCY);
+    const results = await Promise.all(
+      batch.map(async (id) => {
+        try {
+          return [id, await readThread(provider, id)] as const;
+        } catch {
+          return [id, [] as import("./read").ThreadMessage[]] as const;
+        }
+      })
+    );
+    for (const [id, msgs] of results) fetched.set(id, msgs);
+  }
+
+  for (const id of ids) {
+    const raw = ftsBodies.get(id);
+    if (raw) {
+      out.set(id, bodyFieldsFromFts(raw, opts));
+      continue;
+    }
+    const msgs = fetched.get(id) ?? [];
+    if (msgs.length > 0) {
+      out.set(id, bodyFieldsFromMessages(msgs, opts));
+      continue;
+    }
+    out.set(id, { body: "", latestMessage: "", bodyUnavailable: true });
+  }
+
+  return out;
 }
 
 const READ_USAGE = `Usage: superhuman read <thread-id> [--account <email>] [--context N]`;
