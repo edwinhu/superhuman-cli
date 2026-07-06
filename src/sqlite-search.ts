@@ -17,7 +17,21 @@ import { join } from "path";
 import { tmpdir, homedir } from "os";
 import type { InboxThread } from "./inbox";
 
-// Browser OPFS storage roots, checked in preference order
+// The Superhuman Electron desktop app is the authoritative source: it's the
+// always-running client (CDP :9252, portal RPC, and token refresh all target
+// it) and it holds a per-account SQLite blob for EVERY linked account under its
+// own user-data dir. This is the ONLY location scanned when it exists.
+const DESKTOP_ROOTS = [
+  join(homedir(), "Library/Application Support/Superhuman"), // macOS
+  join(homedir(), ".config/Superhuman"), // Linux
+];
+
+// Browser OPFS roots are a last-resort fallback for a browser-only install
+// (Superhuman running as a web app / Chrome extension), used ONLY when no
+// desktop-app data dir exists. They are deliberately NOT scanned alongside the
+// desktop dir: a stale leftover blob (e.g. from once opening Superhuman in Dia)
+// must never shadow or silently substitute for the live desktop data. All use
+// the same OPFS layout: {root}/{Profile}/File System/{bucket}/t/00/{id}.
 const BROWSER_ROOTS = [
   join(homedir(), "Library/Application Support/Dia/User Data"),
   join(homedir(), "Library/Application Support/Chromium/User Data"),
@@ -33,13 +47,21 @@ const BROWSER_ROOTS = [
 const OPFS_HEADER_SIZE = 4096;
 
 /**
- * Find the OPFS blob file for a given account email across all known browser
- * data directories and profiles.
+ * Find the OPFS blob file for a given account email.
+ *
+ * Prefers the Superhuman desktop app's data dir (authoritative, holds every
+ * account). Browser roots are consulted ONLY when no desktop data dir exists —
+ * never as a same-run fallback, so a stale browser blob can't silently shadow
+ * missing desktop data (a missing desktop blob should surface as a portal-RPC
+ * fallback against live data, not months-old cached rows).
  */
 export function findOPFSBlob(accountEmail: string): string | null {
   const targetSuffix = `/${accountEmail}.sqlite3`;
 
-  for (const root of BROWSER_ROOTS) {
+  const desktopRoots = DESKTOP_ROOTS.filter((r) => existsSync(r));
+  const roots = desktopRoots.length > 0 ? desktopRoots : BROWSER_ROOTS;
+
+  for (const root of roots) {
     if (!existsSync(root)) continue;
 
     // Scan all File System buckets in all profiles under this root
