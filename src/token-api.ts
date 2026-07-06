@@ -627,10 +627,53 @@ export async function refreshTokenViaCDP(email: string): Promise<TokenInfo | und
       return iframeRefreshed;
     }
   } catch {
-    // Fall through to legacy path.
+    // Fall through.
+  }
+
+  // ---- Opt-in auto-heal: rebind a dead CDP port, then retry silently ----
+  // Superhuman's remote-debugging port can tear down mid-session; when it
+  // does, the iframe path above fails on every refresh. With
+  // SH_CDP_AUTOHEAL=1 the user permits a background quit+relaunch of the app
+  // to restore the port. The relaunch stays hidden/background (`open -gja`)
+  // so it never steals focus — unlike the legacy nav fallback below.
+  // Default off, because it closes+reopens the app window.
+  if (process.env.SH_CDP_AUTOHEAL === "1") {
+    try {
+      const { ensureCDPHealthy } = await import("./app-health");
+      const health = await ensureCDPHealthy({ allowRelaunch: true });
+      if (health.healthy) {
+        const retried = await refreshOneViaBackgroundPage(email, getCDPPort());
+        if (retried) {
+          tokenCache.set(retried.email, retried);
+          await saveTokensToDisk();
+          return retried;
+        }
+      }
+    } catch {
+      // Fall through.
+    }
   }
 
   // ---- Fallback: legacy navigation-based path ----
+  // DISABLED BY DEFAULT. This path calls switchAccount() → Page.navigate()
+  // on the *visible* mail.superhuman.com window, which brings the Electron
+  // app to the foreground and steals focus. When the background_page target
+  // is unreachable (e.g. Superhuman's CDP debug port has torn down mid-
+  // session — see `superhuman doctor`), this path fired on nearly every
+  // token refresh and caused recurring, unexpected focus grabs.
+  //
+  // Returning undefined here is safe: callers treat a failed refresh as
+  // "use the stale token" (getCachedToken returns `refreshed ?? token`),
+  // and write/AI paths retry on 401 via backendFetchWithRetry. Losing a
+  // silent refresh is strictly better than foregrounding the user's app.
+  //
+  // Set SH_ALLOW_NAV_REFRESH=1 to re-enable the legacy path for the rare
+  // headless case where no background_page is available but a visible page
+  // is (and stealing focus is acceptable).
+  if (process.env.SH_ALLOW_NAV_REFRESH !== "1") {
+    return undefined;
+  }
+
   // 2-second timeout to bound CDP hangs (frozen JS context, devtools
   // breakpoint, etc.). Connection is forcefully closed on timeout to
   // unblock pending Runtime.evaluate calls.

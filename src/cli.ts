@@ -67,13 +67,14 @@ import {
 } from "./token-api";
 import { refreshAllViaBackgroundPage } from "./background-page-refresh";
 import { ensureAccountSynced, listSyncableAccounts, getAccountFreshness, type EnsureSyncResult, type AccountFreshness } from "./account-sync";
+import { isBackgroundPageReachable, relaunchSuperhumanForCDP } from "./app-health";
 import type { ConnectionProvider } from "./connection-provider";
 import { CachedTokenProvider, CDPConnectionProvider, resolveProvider } from "./connection-provider";
 import { SuperhumanProvider } from "./superhuman-provider";
 import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.37.0";
+const VERSION = "0.38.0";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9252", 10);
 
 /**
@@ -314,6 +315,7 @@ ${colors.bold}COMMANDS${colors.reset}
   ${colors.cyan}ai${colors.reset} <id> <query>     Ask AI about a specific email thread
   ${colors.cyan}status${colors.reset}              Check Superhuman connection status
   ${colors.cyan}sync${colors.reset}                Force-sync a stale account's local cache (--account, --check, --force)
+  ${colors.cyan}doctor${colors.reset}              Check the CDP debug port; --fix relaunches the app to restore it
   ${colors.cyan}help${colors.reset}                Show this help message
 
 ${colors.bold}SUBCOMMAND GROUPS${colors.reset}
@@ -383,6 +385,7 @@ ${colors.bold}OPTIONS${colors.reset}
   --timeout <sec>    Max time to wait for a sync cycle to complete (default: 90, for sync)
   --force            Bypass the freshness check and force a sync anyway (for sync)
   --check            Report staleness only, don't trigger a sync (for sync)
+  --fix              Relaunch the app to restore a dead CDP debug port (for doctor)
 
 ${colors.bold}EXAMPLES${colors.reset}
   ${colors.dim}# Account management${colors.reset}
@@ -520,6 +523,11 @@ ${colors.bold}EXAMPLES${colors.reset}
   superhuman sync --account user@example.com --force --json
   superhuman sync ${colors.dim}# sync every linked account${colors.reset}
 
+  ${colors.dim}# Diagnose/fix silent-refresh CDP port (root cause of app focus-stealing:${colors.reset}
+  ${colors.dim}# Superhuman's debug port tears down mid-session → refresh falls back)${colors.reset}
+  superhuman doctor ${colors.dim}# is the CDP background_page reachable?${colors.reset}
+  superhuman doctor --fix ${colors.dim}# background relaunch to rebind the port (no focus steal)${colors.reset}
+
 ${colors.bold}REQUIREMENTS${colors.reset}
   Superhuman must be running with remote debugging enabled:
   ${colors.dim}/Applications/Superhuman.app/Contents/MacOS/Superhuman --remote-debugging-port=${CDP_PORT}${colors.reset}
@@ -622,6 +630,7 @@ interface CliOptions {
   syncTimeoutSeconds: number; // safety ceiling waiting for a completed poll cycle (default 90)
   force: boolean; // sync: bypass the freshness short-circuit + call forceSyncBackend()
   check: boolean; // sync: report staleness only, don't trigger a sync
+  fix: boolean; // doctor: relaunch the app to restore a dead CDP debug port
 }
 
 function parseArgs(args: string[]): CliOptions {
@@ -692,6 +701,7 @@ function parseArgs(args: string[]): CliOptions {
     syncTimeoutSeconds: 90,
     force: false,
     check: false,
+    fix: false,
   };
 
   let i = 0;
@@ -964,6 +974,10 @@ function parseArgs(args: string[]): CliOptions {
           break;
         case "check":
           options.check = true;
+          i += 1;
+          break;
+        case "fix":
+          options.fix = true;
           i += 1;
           break;
         default:
@@ -1355,6 +1369,62 @@ async function cmdSync(options: CliOptions) {
         break;
     }
     log(formatFreshnessLine(email, result.after));
+  }
+}
+
+/**
+ * `superhuman doctor [--fix] [--json]`
+ *
+ * Checks whether Superhuman's CDP remote-debugging port is exposing a
+ * background_page target — the precondition for silent (non-focus-stealing)
+ * token refresh. The app binds this port at launch but has been observed to
+ * tear it down mid-session (sleep/wake or auto-update), after which every
+ * refresh degrades to the legacy focus-stealing navigation path.
+ *
+ * With --fix, quits and relaunches the app in the background (no focus
+ * steal) to rebind the port. NOTE: --fix closes the current Superhuman
+ * window; `open` on a running app can't rebind the port, so a full
+ * relaunch is required.
+ */
+async function cmdDoctor(options: CliOptions) {
+  const port = options.port;
+  const reachable = await isBackgroundPageReachable(port);
+
+  if (reachable) {
+    if (options.json) {
+      printJson({ healthy: true, port, action: "none" });
+    } else {
+      success(`CDP debug port ${port}: healthy — background_page reachable, silent refresh works.`);
+    }
+    return;
+  }
+
+  // Unhealthy.
+  if (!options.fix) {
+    if (options.json) {
+      printJson({ healthy: false, port, action: "none", hint: "run with --fix to relaunch" });
+    } else {
+      error(`CDP debug port ${port}: UNHEALTHY — no Superhuman background_page target.`);
+      log(`  Token refresh will fall back and (unless SH_ALLOW_NAV_REFRESH=1) fail silently.`);
+      log(`  Run ${colors.cyan}superhuman doctor --fix${colors.reset} to relaunch the app and rebind the port.`);
+      log(`  ${colors.dim}(--fix closes and reopens the Superhuman window; the relaunch stays in the background.)${colors.reset}`);
+    }
+    process.exit(1);
+  }
+
+  // --fix: relaunch.
+  if (!options.json) info(`CDP port ${port} unhealthy — quitting and relaunching Superhuman in the background...`);
+  const result = await relaunchSuperhumanForCDP(port);
+  if (options.json) {
+    printJson({ healthy: result.healthy, port, action: "relaunch", ...result });
+    if (!result.healthy) process.exit(1);
+    return;
+  }
+  if (result.healthy) {
+    success(`CDP port ${port} restored in ${(result.waitedMs / 1000).toFixed(1)}s — silent refresh works again.`);
+  } else {
+    error(`Relaunched, but ${result.detail}. Check that Superhuman.app is installed and the LaunchAgent port matches.`);
+    process.exit(1);
   }
 }
 
@@ -4663,6 +4733,10 @@ async function main() {
 
     case "sync":
       await cmdSync(options);
+      break;
+
+    case "doctor":
+      await cmdDoctor(options);
       break;
 
     // account list|switch|auth
