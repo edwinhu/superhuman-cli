@@ -66,6 +66,7 @@ import {
   type TokenInfo,
 } from "./token-api";
 import { refreshAllViaBackgroundPage } from "./background-page-refresh";
+import { ensureAccountSynced, listSyncableAccounts, getAccountFreshness, type EnsureSyncResult, type AccountFreshness } from "./account-sync";
 import type { ConnectionProvider } from "./connection-provider";
 import { CachedTokenProvider, CDPConnectionProvider, resolveProvider } from "./connection-provider";
 import { SuperhumanProvider } from "./superhuman-provider";
@@ -312,6 +313,7 @@ ${colors.bold}COMMANDS${colors.reset}
   ${colors.cyan}ai${colors.reset} <query>          Ask AI to search, compose, or answer questions
   ${colors.cyan}ai${colors.reset} <id> <query>     Ask AI about a specific email thread
   ${colors.cyan}status${colors.reset}              Check Superhuman connection status
+  ${colors.cyan}sync${colors.reset}                Force-sync a stale account's local cache (--account, --check, --force)
   ${colors.cyan}help${colors.reset}                Show this help message
 
 ${colors.bold}SUBCOMMAND GROUPS${colors.reset}
@@ -377,6 +379,10 @@ ${colors.bold}OPTIONS${colors.reset}
   --location <text>  Event location (for calendar create/update)
   --event <id>       Event ID (for calendar update/delete)
   --port <number>    CDP port (default: ${CDP_PORT})
+  --max-age <min>    Skip syncing if local cache is newer than this (default: 15, for sync)
+  --timeout <sec>    Max time to wait for a sync cycle to complete (default: 90, for sync)
+  --force            Bypass the freshness check and force a sync anyway (for sync)
+  --check            Report staleness only, don't trigger a sync (for sync)
 
 ${colors.bold}EXAMPLES${colors.reset}
   ${colors.dim}# Account management${colors.reset}
@@ -507,6 +513,13 @@ ${colors.bold}EXAMPLES${colors.reset}
   ${colors.dim}# Send an existing draft by ID${colors.reset}
   superhuman draft send <draft-id>
 
+  ${colors.dim}# Force-sync a stale account's local cache (root cause: some accounts'${colors.reset}
+  ${colors.dim}# sync engine is never started for the app session — see CLAUDE.md)${colors.reset}
+  superhuman sync --check ${colors.dim}# staleness report for all linked accounts, no trigger${colors.reset}
+  superhuman sync --account user@example.com
+  superhuman sync --account user@example.com --force --json
+  superhuman sync ${colors.dim}# sync every linked account${colors.reset}
+
 ${colors.bold}REQUIREMENTS${colors.reset}
   Superhuman must be running with remote debugging enabled:
   ${colors.dim}/Applications/Superhuman.app/Contents/MacOS/Superhuman --remote-debugging-port=${CDP_PORT}${colors.reset}
@@ -604,6 +617,11 @@ interface CliOptions {
   // signature opt-out
   noSignature: boolean; // skip the automatic account-signature append on send
   asAttachment: boolean; // forward: attach the original message as a .eml file
+  // sync command options
+  syncMaxAgeMinutes: number; // skip syncing if on-disk freshness is newer than this (default 15)
+  syncTimeoutSeconds: number; // safety ceiling waiting for a completed poll cycle (default 90)
+  force: boolean; // sync: bypass the freshness short-circuit + call forceSyncBackend()
+  check: boolean; // sync: report staleness only, don't trigger a sync
 }
 
 function parseArgs(args: string[]): CliOptions {
@@ -670,6 +688,10 @@ function parseArgs(args: string[]): CliOptions {
     stream: false,
     noSignature: false,
     asAttachment: false,
+    syncMaxAgeMinutes: 15,
+    syncTimeoutSeconds: 90,
+    force: false,
+    check: false,
   };
 
   let i = 0;
@@ -926,6 +948,22 @@ function parseArgs(args: string[]): CliOptions {
         case "ndjson":
           options.stream = true;
           options.json = true;
+          i += 1;
+          break;
+        case "max-age":
+          options.syncMaxAgeMinutes = parseInt(value, 10);
+          i += inc;
+          break;
+        case "timeout":
+          options.syncTimeoutSeconds = parseInt(value, 10);
+          i += inc;
+          break;
+        case "force":
+          options.force = true;
+          i += 1;
+          break;
+        case "check":
+          options.check = true;
           i += 1;
           break;
         default:
@@ -1221,6 +1259,103 @@ async function cmdStatus(options: CliOptions) {
   success("Connected to Superhuman");
 
   await disconnect(conn);
+}
+
+/** Human-readable age, e.g. "4.2 min" / "1.8 hr" / "no data". */
+function formatFreshnessAge(f: AccountFreshness | null): string {
+  if (!f || f.ageMs == null) return "no data";
+  const minutes = f.ageMs / 60_000;
+  if (minutes < 60) return `${minutes.toFixed(1)} min ago`;
+  return `${(minutes / 60).toFixed(1)} hr ago`;
+}
+
+function formatFreshnessLine(email: string, f: AccountFreshness | null): string {
+  if (!f) return `  ${email}: no local cache found`;
+  return `  ${email}: ${f.threadCount} threads, ${f.messageCount} messages, newest activity ${formatFreshnessAge(f)}`;
+}
+
+/**
+ * `superhuman sync [--account <email>] [--max-age <min>] [--timeout <sec>] [--force] [--check] [--json]`
+ *
+ * Force-syncs a stale account's local OPFS SQLite cache by calling
+ * `sync.start()` in that account's background_page iframe context — the fix
+ * for the confirmed root cause where some accounts' sync engine is never
+ * started for the Electron session lifetime (see
+ * docs/investigations/2026-07-06_multi_account_staleness.md). Read-only /
+ * sync-triggering only: never switches the visible account, never drives the
+ * UI, never sends/composes anything.
+ */
+async function cmdSync(options: CliOptions) {
+  const maxAgeMs = Math.max(0, options.syncMaxAgeMinutes) * 60_000;
+  const timeoutMs = Math.max(0, options.syncTimeoutSeconds) * 1000;
+
+  const targets = options.account
+    ? [options.account]
+    : await listSyncableAccounts(options.port);
+
+  if (targets.length === 0) {
+    if (options.account) {
+      // Fall through — ensureAccountSynced will report no-connection/no-context.
+    } else {
+      error("No linked accounts found (background_page unreachable — is Superhuman.app running with --remote-debugging-port?)");
+      process.exit(1);
+    }
+  }
+
+  if (options.check) {
+    const report = targets.map((email) => ({ email, freshness: getAccountFreshness(email) }));
+    if (options.json) {
+      printJson(report);
+    } else {
+      log("Local cache staleness report:");
+      for (const r of report) log(formatFreshnessLine(r.email, r.freshness));
+    }
+    return;
+  }
+
+  const results: Array<{ email: string; result: EnsureSyncResult }> = [];
+  for (const email of targets) {
+    if (!options.json) info(`Syncing ${email}...`);
+    const result = await ensureAccountSynced(email, {
+      maxAgeMs,
+      timeoutMs,
+      force: options.force,
+      port: options.port,
+    });
+    results.push({ email, result });
+  }
+
+  if (options.json) {
+    printJson(results);
+    return;
+  }
+
+  for (const { email, result } of results) {
+    switch (result.reason) {
+      case "fresh":
+        success(`${email}: already fresh (${formatFreshnessAge(result.before)}) — skipped`);
+        break;
+      case "synced":
+        success(`${email}: synced (waited ${(result.waitedMs / 1000).toFixed(1)}s)`);
+        break;
+      case "degraded-wait":
+        warn(`${email}: synced via degraded timed wait (poller internals unreadable — Superhuman internals may have changed)`);
+        break;
+      case "timeout":
+        warn(`${email}: sync.start() called but no completed poll cycle observed within ${options.syncTimeoutSeconds}s`);
+        break;
+      case "no-connection":
+        error(`${email}: background_page unreachable — is Superhuman.app running with --remote-debugging-port?`);
+        break;
+      case "no-context":
+        error(`${email}: no background_page iframe for this account (not a linked account in this session?)`);
+        break;
+      case "error":
+        error(`${email}: sync trigger failed — ${result.error || "unknown error"}`);
+        break;
+    }
+    log(formatFreshnessLine(email, result.after));
+  }
 }
 
 /**
@@ -4524,6 +4659,10 @@ async function main() {
 
     case "status":
       await cmdStatus(options);
+      break;
+
+    case "sync":
+      await cmdSync(options);
       break;
 
     // account list|switch|auth
