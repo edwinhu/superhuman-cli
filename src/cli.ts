@@ -74,7 +74,7 @@ import { SuperhumanProvider } from "./superhuman-provider";
 import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.38.0";
+const VERSION = "0.38.1";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9252", 10);
 
 /**
@@ -145,7 +145,12 @@ function sanitizeFilename(name: string): string {
 export function usableReplyMessageIds(threadInfo: any, threadId: string): string[] {
   const ids: string[] = ((threadInfo?.messageIds as string[]) || []).filter(Boolean);
   if (ids.length === 0) return [];
-  if (ids.length === 1 && ids[0] === threadId) return [];
+  // A single id equal to the thread id is ambiguous: it's the fabricated
+  // MS-Graph/unsynced fallback (undeliverable), but it's ALSO what a genuinely
+  // synced single-message Gmail thread looks like (first message id == thread
+  // id). `idsVerified` is set only by sources that read real per-message ids
+  // (local SQLite cache, backend RPC) — trust those; refuse otherwise.
+  if (ids.length === 1 && ids[0] === threadId && !threadInfo?.idsVerified) return [];
   return ids;
 }
 
@@ -1992,6 +1997,7 @@ async function cmdSendDraft(options: CliOptions) {
   // them here so a plain `draft send <id>` succeeds without recreating the draft.
   // Only kicks in when the cached ids are unusable, so the working path is untouched.
   let resolvedReplyItemIds = cachedMeta?.replyItemIds;
+  let resolvedReplyItemIdsVerified = false;
   const cachedThreadInfo = { messageIds: cachedMeta?.replyItemIds ?? [] };
   if (cachedMeta?.replyItemIds && usableReplyMessageIds(cachedThreadInfo, resolvedThreadId).length === 0) {
     const acct = (token.email || options.account || "").toLowerCase();
@@ -2000,6 +2006,7 @@ async function cmdSendDraft(options: CliOptions) {
       const freshIds = usableReplyMessageIds(fresh, resolvedThreadId);
       if (freshIds.length > 0) {
         resolvedReplyItemIds = freshIds;
+        resolvedReplyItemIdsVerified = Boolean(fresh?.idsVerified);
         info(`Hydrated ${freshIds.length} message id(s) from the local cache for this reply.`);
       }
     } catch {
@@ -2040,6 +2047,7 @@ async function cmdSendDraft(options: CliOptions) {
     references: cachedMeta?.references,
     noSignature: options.noSignature,
     replyItemIds: resolvedReplyItemIds,
+    replyItemIdsVerified: resolvedReplyItemIdsVerified,
     attachments: draftAttachments.length > 0 ? draftAttachments : undefined,
     delay: options.sendDraftDelay,
     scheduledFor: scheduledForIso,
@@ -2792,6 +2800,7 @@ async function resolveThreadInfo(token: any, accountEmail: string, threadId: str
       const rpcIds = usableReplyMessageIds(rpc, threadId);
       if (rpcIds.length > 0) {
         info.messageIds = rpcIds;
+        info.idsVerified = Boolean(rpc?.idsVerified);
         if (!info.gmailMessageId && rpc?.gmailMessageId) info.gmailMessageId = rpc.gmailMessageId;
         if ((!info.references || info.references.length === 0) && Array.isArray(rpc?.references)) {
           info.references = rpc.references;

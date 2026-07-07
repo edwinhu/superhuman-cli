@@ -170,6 +170,10 @@ export interface SQLiteThreadInfo {
   canonicalThreadId: string | null;
   /** All unique participants across the thread (for reply-to-self fallback) */
   allParticipants?: string[];
+  /** True when messageIds were read from real per-message records (not the
+   *  conversation-id fallback). Lets the send guard accept a single-message
+   *  Gmail thread, whose only real message id legitimately equals the thread id. */
+  idsVerified?: boolean;
 }
 
 /**
@@ -260,6 +264,7 @@ export function lookupThreadInfoById(
         messageIds: messages
           .filter((m: any) => !m.draft && !(m.labelIds || []).includes("DRAFT") && m.id)
           .map((m: any) => m.id as string),
+        idsVerified: true,
         date: latest.date || null,
         canonicalThreadId: row.thread_id,
         allParticipants: [...participantSet].filter(Boolean),

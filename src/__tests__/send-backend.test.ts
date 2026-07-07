@@ -257,6 +257,21 @@ describe("buildSendDraftOptions", () => {
     expect(r.error).toContain("Refusing to send");
   });
 
+  test("allows a reply whose only message id equals the thread id when verified (single-message Gmail thread)", () => {
+    const r = buildSendDraftOptions({
+      draftId: "draft00single",
+      threadId: "19f3c38fd957a3e1",
+      to: [{ email: "a@b.com" }],
+      subject: "Re: x",
+      htmlBody: "<p>hi</p>",
+      replyItemIds: ["19f3c38fd957a3e1"], // == threadId, but confirmed real by the cache
+      replyItemIdsVerified: true,
+    });
+    expect(r.ok).toBe(true);
+    if (!r.ok) return;
+    expect(r.options.currentMessageIds).toEqual(["19f3c38fd957a3e1", "draft00single"]);
+  });
+
   test("empty cc/bcc arrays become undefined (not []), non-empty pass through", () => {
     const r = buildSendDraftOptions({
       draftId: "draft00cc",

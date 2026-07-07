@@ -840,6 +840,10 @@ export interface BuildSendDraftInput {
   references?: string[];
   /** Provider message ids of the prior thread messages (reply only). */
   replyItemIds?: string[];
+  /** True when replyItemIds were confirmed against real per-message records
+   *  (local SQLite cache / backend RPC). Allows a single id equal to the
+   *  thread id — a genuine single-message Gmail thread — past the guard. */
+  replyItemIdsVerified?: boolean;
   attachments?: SuperhumanAttachment[];
   delay?: number;
   /** Absolute server-side dispatch time (ISO 8601) for native Send Later. */
@@ -873,7 +877,7 @@ export function buildSendDraftOptions(input: BuildSendDraftInput): BuildSendDraf
     return { ok: false, error: "Draft has no recipients to send to." };
   }
 
-  if (replyItemIds.length === 1 && replyItemIds[0] === threadId) {
+  if (replyItemIds.length === 1 && replyItemIds[0] === threadId && !input.replyItemIdsVerified) {
     return {
       ok: false,
       error:

@@ -1138,6 +1138,10 @@ export interface ThreadInfoDirect {
    *  Populated from the Superhuman backend thread (correct ids); left empty on the MS Graph
    *  fallback because Graph item-ids differ from Superhuman's internal message ids. */
   messageIds?: string[];
+  /** True when messageIds came from real per-message records (backend thread map),
+   *  so a single id equal to the thread id is a genuine single-message thread,
+   *  not the conversation-id fallback. */
+  idsVerified?: boolean;
 }
 
 /**
@@ -1228,6 +1232,7 @@ export async function getThreadInfoSuperhuman(
       messageIds: entries
         .filter(([, m]: [string, any]) => !m?.draft && !(m?.labelIds || []).includes("DRAFT"))
         .map(([id]) => id),
+      idsVerified: true,
     };
   } catch (_e) {
     return null;

@@ -27,6 +27,16 @@ describe("usableReplyMessageIds", () => {
     expect(isReplyDeliverable(info, THREAD)).toBe(false);
   });
 
+  test("single id equal to the thread id WITH idsVerified → deliverable (single-message Gmail thread)", () => {
+    // Gmail: a one-message thread's real message id equals the thread id. When the
+    // ids were read from real per-message records (SQLite cache / backend RPC),
+    // that's a genuine deliverable reply, not the conversation-id fallback.
+    const gmailThread = "19f3c38fd957a3e1";
+    const info = { messageIds: [gmailThread], idsVerified: true };
+    expect(usableReplyMessageIds(info, gmailThread)).toEqual([gmailThread]);
+    expect(isReplyDeliverable(info, gmailThread)).toBe(true);
+  });
+
   test("empty messageIds → [] (unsynced thread, NOT deliverable)", () => {
     expect(usableReplyMessageIds({ messageIds: [] }, THREAD)).toEqual([]);
     expect(isReplyDeliverable({ messageIds: [] }, THREAD)).toBe(false);
