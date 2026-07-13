@@ -74,7 +74,7 @@ import { SuperhumanProvider } from "./superhuman-provider";
 import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.38.1";
+const VERSION = "0.38.2";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9252", 10);
 
 /**
@@ -3920,10 +3920,52 @@ async function cmdAuth(options: CliOptions) {
     return;
   }
 
-  // Fallback: legacy navigation-based path. Used when the Electron app
-  // isn't launched with --remote-debugging-port, or the bg page target
-  // isn't present. Steals focus per account.
-  log("Background page unreachable — falling back to navigation path (will steal focus)");
+  // Preferred non-disruptive path on Chrome-extension deployments (e.g. Linux,
+  // where there is no Superhuman Electron app): read + refresh tokens directly
+  // from the extension's in-memory Credential via the service worker. No
+  // navigation, no reload, no focus steal, no hang. This MUST be tried before
+  // the legacy navigation path below — on a Chrome-extension deployment the
+  // Electron `listAccounts` probe also succeeds, so if the navigation path ran
+  // first it would shadow this one and reload the user's live tab every time.
+  const chromeConn = await connectToSuperhumanChrome(options.port);
+  if (chromeConn) {
+    let refreshed = 0;
+    try {
+      const accounts = await listAccountsChrome(chromeConn);
+      if (accounts.length > 0) {
+        log(`Found ${accounts.length} account(s) (Chrome extension, in-memory)`);
+        for (const account of accounts) {
+          log(`Refreshing token for ${account.email}...`);
+          try {
+            await extractTokenChrome(chromeConn, account.email);
+            success(`  ${account.email} OK`);
+            refreshed++;
+          } catch (e) {
+            error(`  ${account.email} failed: ${(e as Error).message}`);
+          }
+        }
+      }
+    } catch (e) {
+      error(`Chrome extension path failed: ${(e as Error).message}`);
+    } finally {
+      await disconnectChrome(chromeConn);
+    }
+
+    if (refreshed > 0) {
+      await saveTokensToDisk();
+      success(`Tokens saved to ${getTokensFilePath()}`);
+      log("");
+      info("You can now use superhuman-cli without Superhuman running.");
+      info("Tokens are valid for ~1 hour. Run 'superhuman account auth' again to refresh.");
+      return;
+    }
+    log("In-memory extension path yielded no tokens — falling back.");
+  }
+
+  // Fallback: legacy navigation-based path. Steals focus per account. Only
+  // reached when the in-memory extension path is unavailable — i.e. the real
+  // macOS Electron app, or a future extension without the Credential API.
+  log("Falling back to navigation path (will steal focus)");
   const conn = await checkConnection(options.port);
 
   if (conn) {
@@ -3944,45 +3986,16 @@ async function cmdAuth(options: CliOptions) {
         info("Tokens are valid for ~1 hour. Run 'superhuman auth' again to refresh.");
         return;
       }
-      // 0 accounts from Electron path — try Chrome extension
       await disconnect(conn);
     } catch {
       await disconnect(conn);
     }
   }
 
-  // Chrome extension path
-  log("Trying Chrome extension path...");
-  const chromeConn = await connectToSuperhumanChrome(options.port);
-  if (!chromeConn) {
-    error("Cannot connect to Superhuman. Make sure it is running with CDP enabled.");
-    log(`  Chrome: launch with --remote-debugging-port=${options.port}`);
-    log(`  Electron: /Applications/Superhuman.app/Contents/MacOS/Superhuman --remote-debugging-port=${options.port}`);
-    process.exit(1);
-  }
-
-  try {
-    const accounts = await listAccountsChrome(chromeConn);
-    log(`Found ${accounts.length} account(s) (Chrome extension)`);
-
-    for (const account of accounts) {
-      log(`Extracting token for ${account.email}...`);
-      try {
-        await extractTokenChrome(chromeConn, account.email);
-        success(`  ${account.email} OK`);
-      } catch (e) {
-        error(`  ${account.email} failed: ${(e as Error).message}`);
-      }
-    }
-
-    await saveTokensToDisk();
-    success(`Tokens saved to ${getTokensFilePath()}`);
-    log("");
-    info("You can now use superhuman-cli without Superhuman running.");
-    info("Tokens are valid for ~1 hour. Run 'superhuman auth' again to refresh.");
-  } finally {
-    await disconnectChrome(chromeConn);
-  }
+  error("Cannot connect to Superhuman. Make sure it is running with CDP enabled.");
+  log(`  Chrome: launch with --remote-debugging-port=${options.port}`);
+  log(`  Electron: /Applications/Superhuman.app/Contents/MacOS/Superhuman --remote-debugging-port=${options.port}`);
+  process.exit(1);
 }
 
 async function cmdAccounts(options: CliOptions) {

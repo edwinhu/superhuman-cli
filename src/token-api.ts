@@ -251,90 +251,72 @@ export async function extractTokenChrome(
 
   const isMicrosoft = metadata.provider === "microsoft";
 
-  // 2. Set up CDP Fetch interception on service worker to capture backend tokens
-  const captured: CapturedToken[] = [];
-  const { Fetch } = swClient;
-  await Fetch.enable({
-    patterns: [{ urlPattern: "*superhuman.com/~backend*" }],
+  // 2. Refresh + read both tokens directly from the extension's in-memory
+  //    Credential — no page navigation/reload, no Fetch interception, no
+  //    hidden tab, no focus change.
+  //
+  //    The MV3 service worker holds an initialized `credential` component per
+  //    account in its dependency injector. Its own public
+  //    `getAuthDataInBackgroundAsync({ refresh: true })` runs Superhuman's
+  //    `~backend/v3/sessions.getTokens` flow and returns fresh credentials in
+  //    place. authData shape: { accessToken (provider OAuth), idToken
+  //    (Superhuman backend JWT), expires (provider-token expiry, ms) }.
+  //
+  //    The previous implementation navigated + reloaded the user's live
+  //    mail.superhuman.com tab TWICE (once per token class) and sniffed the
+  //    tokens off the resulting network requests — which reloaded the user's
+  //    window on every refresh and left Fetch handlers attached (the source of
+  //    the post-refresh hang). Reading the Credential directly avoids both.
+  const authEval = await swClient.Runtime.evaluate({
+    expression: `(async () => {
+      const bg = backgrounds[${JSON.stringify(email)}]?._accountBackground;
+      if (!bg?.di?.isInitialized?.("credential"))
+        throw new Error("credential component not initialized");
+      const credential = bg.di.get("credential");
+      const { authData } = await credential.getAuthDataInBackgroundAsync({ refresh: true });
+      if (!authData?.accessToken || !authData?.idToken || !authData?.expires)
+        throw new Error("incomplete in-memory auth data");
+      return {
+        accessToken: authData.accessToken,
+        idToken: authData.idToken,
+        expires: authData.expires,
+      };
+    })()`,
+    returnByValue: true,
+    awaitPromise: true,
   });
 
-  const handler = async ({ requestId, request }: any) => {
-    const auth = request.headers["Authorization"] || "";
-    if (auth.startsWith("Bearer ")) {
-      captured.push({
-        url: request.url,
-        token: auth.slice(7),
-        email: request.headers["x-superhuman-user-email"] || "",
-      });
-    }
-    try { await Fetch.continueRequest({ requestId }); } catch {}
+  if (authEval.exceptionDetails) {
+    throw new Error(
+      `In-memory token refresh failed for ${email}: ${
+        authEval.exceptionDetails.exception?.description ??
+        authEval.exceptionDetails.text ??
+        "unknown error"
+      }`
+    );
+  }
+
+  const authData = authEval.result.value as {
+    accessToken: string;
+    idToken: string;
+    expires: number;
   };
-  Fetch.requestPaused(handler);
 
-  // 3. Navigate to account and reload to trigger API calls
-  // Enable Page domain before navigating (required for Page.navigate/reload)
-  await mainClient.Page.enable();
-  await mainClient.Page.navigate({
-    url: `https://mail.superhuman.com/${email}`,
-  });
-  await new Promise((r) => setTimeout(r, 3000));
-  await mainClient.Page.reload();
+  // 3. Backend JWT (primary token for all API ops).
+  const bestToken = authData.idToken;
 
-  // 4. Wait for backend tokens (up to 20 seconds)
-  const deadline = Date.now() + 20_000;
-  while (captured.length === 0 && Date.now() < deadline) {
-    await new Promise((r) => setTimeout(r, 500));
-  }
-
-  await Fetch.disable();
-
-  // 5. Select best backend token
-  const bestToken = selectBestToken(captured, email);
-
-  // 6. Capture OAuth access token (provider token) via a second interception pass
-  let accessToken = "";
-  let accessTokenExpires = Date.now() + 3600_000;
-  const providerCapture: CapturedToken[] = [];
-
-  await Fetch.enable({
-    patterns: [
-      {
-        urlPattern: isMicrosoft
-          ? "*graph.microsoft.com*"
-          : "*googleapis.com*",
-      },
-    ],
-  });
-  const providerHandler = async ({ requestId, request }: any) => {
-    const auth = request.headers["Authorization"] || "";
-    if (auth.startsWith("Bearer ")) {
-      providerCapture.push({
-        url: request.url,
-        token: auth.slice(7),
-        email: "",
-      });
-    }
-    try { await Fetch.continueRequest({ requestId }); } catch {}
-  };
-  Fetch.requestPaused(providerHandler);
-
-  // Trigger a lightweight API call via reload
-  await mainClient.Page.reload();
-  const providerDeadline = Date.now() + 15_000;
-  while (providerCapture.length === 0 && Date.now() < providerDeadline) {
-    await new Promise((r) => setTimeout(r, 500));
-  }
-  await Fetch.disable();
-
-  if (providerCapture.length > 0) {
-    accessToken = providerCapture[0].token;
-    try {
-      const payload = JSON.parse(
-        Buffer.from(accessToken.split(".")[1], "base64url").toString()
-      );
-      if (payload.exp) accessTokenExpires = payload.exp * 1000;
-    } catch {}
-  }
+  // 4. Provider OAuth access token + expiry. Prefer the Credential's own
+  //    `expires`; if the token is a JWT (Microsoft), clamp to its `exp`.
+  //    Google access tokens (ya29.*) are opaque, so the JSON.parse throws and
+  //    we keep `authData.expires` — that's expected.
+  const accessToken = authData.accessToken;
+  let accessTokenExpires = authData.expires;
+  try {
+    const payload = JSON.parse(
+      Buffer.from(accessToken.split(".")[1], "base64url").toString()
+    );
+    if (payload.exp) accessTokenExpires = payload.exp * 1000;
+  } catch {}
 
   // 7. Build TokenInfo
   const tokenInfo: TokenInfo = {
