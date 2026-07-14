@@ -109,7 +109,7 @@ describe("snippet recipient handling", () => {
     const snippets = await listSnippets(FAKE_USER_INFO);
     expect(snippets).toHaveLength(1);
 
-    const snippet = snippets[0];
+    const snippet = snippets[0]!;
     expect(snippet.name).toBe("Securities Regulation Spring 25");
     expect(snippet.bcc).toHaveLength(3);
 
@@ -134,7 +134,7 @@ describe("snippet recipient handling", () => {
     const snippets = await listSnippets(FAKE_USER_INFO);
     expect(snippets).toHaveLength(1);
 
-    const snippet = snippets[0];
+    const snippet = snippets[0]!;
     expect(snippet.bcc).toHaveLength(2);
     expect(snippet.bcc[0]).toBe("Student One <student1@example.com>");
     expect(snippet.bcc[1]).toBe("Student Two <student2@example.com>");
@@ -154,7 +154,7 @@ describe("snippet recipient handling", () => {
     }) as any;
 
     const snippets = await listSnippets(FAKE_USER_INFO);
-    const snippet = snippets[0];
+    const snippet = snippets[0]!;
 
     // Simulate the merge logic from cmdSnippet
     const bcc =

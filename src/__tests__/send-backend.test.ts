@@ -147,7 +147,7 @@ describe("send-api with SuperhumanProvider", () => {
 
     expect(result.success).toBe(true);
     expect(result.draftId).toBeDefined();
-    expect(result.threadId).toBeDefined();
+    expect((result as { threadId?: string }).threadId).toBeDefined();
     // Should only call writeMessage, NOT messages/send
     const writeCall = calls.find((c) => c.includes("userdata.writeMessage"));
     const sendCall = calls.find((c) => c.includes("messages/send"));

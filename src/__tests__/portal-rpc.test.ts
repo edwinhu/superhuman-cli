@@ -16,7 +16,7 @@ describe("portalInvoke", () => {
     ]);
 
     expect(mockEvaluate).toHaveBeenCalledTimes(1);
-    const call = mockEvaluate.mock.calls[0][0];
+    const call = (mockEvaluate.mock.calls[0] as any[])[0];
     expect(call.expression).toContain(
       'window.GoogleAccount.portal.invoke("threadInternal", "listAsync",'
     );

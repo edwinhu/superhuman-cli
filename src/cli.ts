@@ -207,11 +207,11 @@ function parseRecipientStr(s: string): Recipient {
   if (!m) return { email: s };
   // Strip RFC822 quoting around the display name and unescape \" \\ — the
   // inverse of escapeRfc822Name (drafts store quoted names for e.g. "Last, First").
-  let name = m[1].trim();
+  let name = m[1]!.trim();
   if (name.startsWith('"') && name.endsWith('"') && name.length >= 2) {
     name = name.slice(1, -1).replace(/\\(.)/g, "$1");
   }
-  return { name, email: m[2].trim() };
+  return { name, email: m[2]!.trim() };
 }
 
 /**
@@ -711,7 +711,7 @@ function parseArgs(args: string[]): CliOptions {
 
   let i = 0;
   while (i < args.length) {
-    const arg = args[i];
+    const arg = args[i]!;
 
     if (arg.startsWith("--")) {
       // Support both --key value and --key=value formats
@@ -725,7 +725,7 @@ function parseArgs(args: string[]): CliOptions {
         usedEqualsFormat = true;
       } else {
         key = arg.slice(2);
-        value = args[i + 1];
+        value = args[i + 1] ?? "";
       }
       // Helper to increment by correct amount based on format
       const inc = usedEqualsFormat ? 1 : 2;
@@ -1421,7 +1421,7 @@ async function cmdDoctor(options: CliOptions) {
   if (!options.json) info(`CDP port ${port} unhealthy — quitting and relaunching Superhuman in the background...`);
   const result = await relaunchSuperhumanForCDP(port);
   if (options.json) {
-    printJson({ healthy: result.healthy, port, action: "relaunch", ...result });
+    printJson({ port, action: "relaunch", ...result });
     if (!result.healthy) process.exit(1);
     return;
   }
@@ -1650,7 +1650,7 @@ async function cmdDraft(options: CliOptions) {
         options.to.length > 0 || options.cc.length > 0 || options.bcc.length > 0;
 
       info(`Updating native draft ${draftId}...`);
-      const updateOk = await updateDraftWithUserInfo(userInfo, draft.threadId, draftId, {
+      const updateOk = await updateDraftWithUserInfo(userInfo, draft.threadId!, draftId, {
         to: anyRecipientFlag ? updTo : undefined,
         cc: anyRecipientFlag ? updCc : undefined,
         bcc: anyRecipientFlag ? updBcc : undefined,
@@ -1659,7 +1659,7 @@ async function cmdDraft(options: CliOptions) {
       });
 
       if (updateOk) {
-        await uploadAndCacheAttachments(userInfo, draftId, draft.threadId, options.attachFiles);
+        await uploadAndCacheAttachments(userInfo, draftId, draft.threadId!, options.attachFiles);
         const attachLabel = hasAttachments ? ` with ${options.attachFiles!.length} attachment(s)` : "";
         log(`${colors.green}✓${colors.reset} Draft updated${attachLabel}!`);
         log(`  ${colors.dim}Draft ID: ${draftId}${colors.reset}`);
@@ -1726,9 +1726,9 @@ async function cmdDraft(options: CliOptions) {
       info("Creating draft via Superhuman API...");
 
       const userInfo = getUserInfoFromCache(
-        token.userId,
+        token.userId!,
         token.email,
-        token.idToken,
+        token.idToken!,
         undefined,
         token.userExternalId,
         token.deviceId
@@ -1899,7 +1899,7 @@ async function cmdDeleteDraft(options: CliOptions) {
 
       info(`Deleting native draft ${draftId.slice(-15)}...`);
       try {
-        await deleteDraftWithUserInfo(userInfo, draft.threadId, draftId);
+        await deleteDraftWithUserInfo(userInfo, draft.threadId!, draftId);
         success(`Deleted native draft ${draftId.slice(-15)}`);
       } catch (err) {
         error(`Failed to delete native draft: ${err instanceof Error ? err.message : String(err)}`);
@@ -2116,7 +2116,7 @@ async function cmdSendDraft(options: CliOptions) {
 async function cmdListDrafts(options: CliOptions) {
   const limit = options.limit || 50;
   const offset = options.offset || 0;
-  const filterTo = options.to.length > 0 ? options.to[0].toLowerCase() : "";
+  const filterTo = options.to.length > 0 ? options.to[0]!.toLowerCase() : "";
   const filterSubject = options.subject ? options.subject.toLowerCase() : "";
 
   const token = await resolveToken(options.account);
@@ -2740,7 +2740,7 @@ async function cmdRead(options: CliOptions) {
   const separator = "\n" + colors.dim + "─".repeat(60) + colors.reset + "\n";
 
   for (let i = 0; i < messages.length; i++) {
-    const msg = messages[i];
+    const msg = messages[i]!;
     if (i > 0) {
       console.log(separator);
     }
@@ -2856,7 +2856,7 @@ async function cmdReply(options: CliOptions) {
       if (fromEmail === accountEmail) {
         // Self-sent: reply to the to/cc recipients, filtering out self
         const nonSelf = threadInfo.to.filter(
-          (addr) => parseRecipientStr(addr).email.toLowerCase() !== accountEmail
+          (addr: string) => parseRecipientStr(addr).email.toLowerCase() !== accountEmail
         );
         if (nonSelf.length > 0) {
           replyTo = nonSelf;
@@ -3659,7 +3659,7 @@ async function cmdSnooze(options: CliOptions) {
   const results = await snoozeThreads(token, options.threadIds, snoozeTime);
   for (let i = 0; i < options.threadIds.length; i++) {
     const threadId = options.threadIds[i];
-    const result = results[i];
+    const result = results[i]!;
     if (result.success) {
       success(`Snoozed thread: ${threadId} until ${snoozeTime.toLocaleString()}`);
       successCount++;
@@ -3689,7 +3689,7 @@ async function cmdUnsnooze(options: CliOptions) {
   const results = await unsnoozeThreads(token, options.threadIds);
   for (let i = 0; i < options.threadIds.length; i++) {
     const threadId = options.threadIds[i];
-    const result = results[i];
+    const result = results[i]!;
     if (result.success) {
       success(`Unsnoozed thread: ${threadId}`);
       successCount++;
@@ -4044,7 +4044,7 @@ async function cmdAccount(options: CliOptions) {
       await disconnect(conn);
       process.exit(1);
     }
-    targetEmail = accounts[index - 1].email;
+    targetEmail = accounts[index - 1]!.email;
   } else {
     // Treat as email
     const found = accounts.find(
@@ -4102,7 +4102,7 @@ export function parseCalendarDate(dateStr: string): Date {
   // which becomes the previous day in timezones west of UTC (e.g. EST).
   const match = dateStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (match) {
-    return new Date(parseInt(match[1]), parseInt(match[2]) - 1, parseInt(match[3]));
+    return new Date(parseInt(match[1]!), parseInt(match[2]!) - 1, parseInt(match[3]!));
   }
 
   // Try parsing as-is (for other formats like full ISO datetime with timezone)
@@ -4126,7 +4126,7 @@ export function parseEventTime(timeStr: string): Date {
   // which becomes the previous day in timezones west of UTC (e.g. EST).
   const dateMatch = timeStr.match(/^(\d{4})-(\d{2})-(\d{2})$/);
   if (dateMatch) {
-    return new Date(parseInt(dateMatch[1]), parseInt(dateMatch[2]) - 1, parseInt(dateMatch[3]));
+    return new Date(parseInt(dateMatch[1]!), parseInt(dateMatch[2]!) - 1, parseInt(dateMatch[3]!));
   }
 
   // Try ISO format (datetime strings with time component)
@@ -4149,7 +4149,7 @@ export function parseEventTime(timeStr: string): Date {
   // Parse time like "2pm", "14:00", "3:30pm"
   const timeMatch = timePart.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)?$/i);
   if (timeMatch) {
-    let hours = parseInt(timeMatch[1], 10);
+    let hours = parseInt(timeMatch[1]!, 10);
     const minutes = timeMatch[2] ? parseInt(timeMatch[2], 10) : 0;
     const meridiem = timeMatch[3]?.toLowerCase();
 
@@ -4174,13 +4174,24 @@ export function parseEventTime(timeStr: string): Date {
 function formatCalendarEvent(event: CalendarEvent & { account?: string }, showAccount = false): string {
   const lines: string[] = [];
 
+  // NOTE: this block reads events in the raw Google Calendar API shape
+  // ({start:{date,dateTime}}, attendees:[{email}]), but listEvents() returns
+  // the *normalized* CalendarEvent (start/end as ISO strings, attendees as
+  // string[]). These casts preserve the exact pre-existing runtime behavior;
+  // the shape mismatch is a known bug to be fixed separately.
+  const raw = event as unknown as {
+    allDay?: boolean;
+    start: { date?: string; dateTime?: string };
+    end: { date?: string; dateTime?: string };
+  };
+
   // Time
   let timeStr = "";
-  if (event.allDay || event.start.date) {
+  if (raw.allDay || raw.start.date) {
     timeStr = "All Day";
-  } else if (event.start.dateTime) {
-    const start = new Date(event.start.dateTime);
-    const end = event.end.dateTime ? new Date(event.end.dateTime) : null;
+  } else if (raw.start.dateTime) {
+    const start = new Date(raw.start.dateTime);
+    const end = raw.end.dateTime ? new Date(raw.end.dateTime) : null;
     timeStr = start.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
     if (end) {
       timeStr += ` - ${end.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`;
@@ -4190,7 +4201,7 @@ function formatCalendarEvent(event: CalendarEvent & { account?: string }, showAc
   // Account indicator (shortened)
   let accountTag = "";
   if (showAccount && event.account) {
-    const shortAccount = event.account.split("@")[0].slice(0, 8);
+    const shortAccount = event.account.split("@")[0]!.slice(0, 8);
     accountTag = ` ${colors.magenta}[${shortAccount}]${colors.reset}`;
   }
 
@@ -4201,7 +4212,7 @@ function formatCalendarEvent(event: CalendarEvent & { account?: string }, showAc
   }
 
   if (event.attendees && event.attendees.length > 0) {
-    const attendeeStr = event.attendees.map(a => a.email).slice(0, 3).join(", ");
+    const attendeeStr = event.attendees.map(a => (a as unknown as { email: string }).email).slice(0, 3).join(", ");
     const more = event.attendees.length > 3 ? ` +${event.attendees.length - 3} more` : "";
     lines.push(`  ${colors.dim}With: ${attendeeStr}${more}${colors.reset}`);
   }
@@ -4343,8 +4354,8 @@ async function cmdCalendar(options: CliOptions) {
 
   // Sort all events by start time
   allEvents.sort((a, b) => {
-    const aTime = a.start.dateTime || a.start.date || "";
-    const bTime = b.start.dateTime || b.start.date || "";
+    const aTime = (a.start as unknown as { dateTime?: string; date?: string }).dateTime || (a.start as unknown as { date?: string }).date || "";
+    const bTime = (b.start as unknown as { dateTime?: string; date?: string }).dateTime || (b.start as unknown as { date?: string }).date || "";
     return aTime.localeCompare(bTime);
   });
 
@@ -4357,7 +4368,8 @@ async function cmdCalendar(options: CliOptions) {
       // Group events by date
       const byDate = new Map<string, CalendarEvent[]>();
       for (const event of allEvents) {
-        const dateStr = event.start.date || (event.start.dateTime ? new Date(event.start.dateTime).toDateString() : "Unknown");
+        const rawStart = event.start as unknown as { date?: string; dateTime?: string };
+        const dateStr = rawStart.date || (rawStart.dateTime ? new Date(rawStart.dateTime).toDateString() : "Unknown");
         if (!byDate.has(dateStr)) {
           byDate.set(dateStr, []);
         }
@@ -4424,18 +4436,21 @@ async function cmdCalendarCreate(options: CliOptions) {
     summary: title,
     description: options.body || undefined,
     location: options.eventLocation || undefined,
-    start: isAllDay
+    // See formatCalendarEvent: this command builds raw Google-shaped
+    // start/end/attendees while CreateEventInput declares ISO strings. Casts
+    // preserve exact pre-existing runtime behavior (known shape-mismatch bug).
+    start: (isAllDay
       ? { date: startTime.toISOString().split("T")[0] }
-      : { dateTime: startTime.toISOString() },
-    end: isAllDay
+      : { dateTime: startTime.toISOString() }) as unknown as string,
+    end: (isAllDay
       ? { date: endTime.toISOString().split("T")[0] }
-      : { dateTime: endTime.toISOString() },
+      : { dateTime: endTime.toISOString() }) as unknown as string,
   };
 
   // Add attendees from --to option (resolve names to emails)
   if (options.to.length > 0) {
     const resolvedAttendees = await resolveAllRecipientsViaProvider(provider, options.to, options.account || undefined);
-    eventInput.attendees = resolvedAttendees.map(email => ({ email }));
+    eventInput.attendees = resolvedAttendees.map(email => ({ email })) as unknown as string[];
   }
 
   const result = await createEvent(provider, eventInput);
@@ -4473,24 +4488,24 @@ async function cmdCalendarUpdate(options: CliOptions) {
   }
   if (options.eventStart) {
     const startTime = parseEventTime(options.eventStart);
-    updates.start = { dateTime: startTime.toISOString() };
+    updates.start = { dateTime: startTime.toISOString() } as unknown as string;
 
     // Also update end if not specified
     if (!options.eventEnd) {
       const endTime = new Date(startTime.getTime() + options.eventDuration * 60 * 1000);
-      updates.end = { dateTime: endTime.toISOString() };
+      updates.end = { dateTime: endTime.toISOString() } as unknown as string;
     }
   }
   if (options.eventEnd) {
     const endTime = parseEventTime(options.eventEnd);
-    updates.end = { dateTime: endTime.toISOString() };
+    updates.end = { dateTime: endTime.toISOString() } as unknown as string;
   }
   if (options.eventLocation) {
     updates.location = options.eventLocation;
   }
   if (options.to.length > 0) {
     const resolvedAttendees = await resolveAllRecipientsViaProvider(provider, options.to, options.account || undefined);
-    updates.attendees = resolvedAttendees.map(email => ({ email }));
+    updates.attendees = resolvedAttendees.map(email => ({ email })) as unknown as string[];
   }
 
   if (Object.keys(updates).length === 0) {

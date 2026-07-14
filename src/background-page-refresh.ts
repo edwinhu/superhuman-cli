@@ -78,7 +78,9 @@ export async function connectToBackgroundPage(
   // Give CDP a brief moment to replay all existing contexts.
   await new Promise((r) => setTimeout(r, 250));
 
-  client.off("Runtime.executionContextCreated", onCtxCreated);
+  (client as unknown as {
+    off(event: string, cb: (...args: any[]) => void): void;
+  }).off("Runtime.executionContextCreated", onCtxCreated);
 
   // Walk frame tree to map email → frameId.
   const tree = await Page.getFrameTree();

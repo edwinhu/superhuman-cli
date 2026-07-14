@@ -103,7 +103,7 @@ function parseFrom(from: string): { email: string; name: string } {
   if (!from) return { email: "", name: "" };
   const match = from.match(/^(.+?)\s*<(.+?)>$/);
   if (match) {
-    return { name: match[1].trim(), email: match[2].trim() };
+    return { name: match[1]!.trim(), email: match[2]!.trim() };
   }
   return { email: from, name: from };
 }

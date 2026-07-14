@@ -30,10 +30,10 @@ function createMockPortalProvider() {
 
   const provider = new SuperhumanProvider(sampleToken, mockConn);
 
-  const portalMock = mock(() => Promise.resolve(undefined));
+  const portalMock = mock((): Promise<any> => Promise.resolve(undefined));
   provider.portalInvoke = portalMock;
 
-  const runtimeMock = mock(() => Promise.resolve(undefined));
+  const runtimeMock = mock((): Promise<any> => Promise.resolve(undefined));
   provider.runtimeEvaluate = runtimeMock;
 
   return { provider, portalMock, runtimeMock };
@@ -123,8 +123,8 @@ describe("listStarred", () => {
       ["STARRED", { limit: 10, query: "" }]
     );
     expect(starred).toHaveLength(2);
-    expect(starred[0].id).toBe("thread_1");
-    expect(starred[1].id).toBe("thread_2");
+    expect(starred[0]!.id).toBe("thread_1");
+    expect(starred[1]!.id).toBe("thread_2");
   });
 
   test("uses default limit of 50", async () => {

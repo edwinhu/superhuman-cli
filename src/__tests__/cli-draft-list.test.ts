@@ -26,7 +26,7 @@ describe("superhuman draft list", () => {
 
   it("should format drafts with source column for display", () => {
     // Test the display logic by verifying that drafts with source are formatted correctly
-    const drafts: Draft[] = [
+    const drafts = [
       {
         id: "gmail-draft-1",
         subject: "Gmail Test",
@@ -67,7 +67,7 @@ describe("superhuman draft list", () => {
 
   it("should format native drafts with source column for display", () => {
     // Test the display logic for native Superhuman drafts
-    const drafts: Draft[] = [
+    const drafts = [
       {
         id: "gmail-draft-1",
         subject: "Gmail Test",
@@ -121,7 +121,7 @@ describe("superhuman draft list", () => {
   });
 
   it("should filter drafts by --to recipient", () => {
-    const drafts: Draft[] = [
+    const drafts = [
       {
         id: "draft-1",
         subject: "Meeting Follow-up",
@@ -150,11 +150,11 @@ describe("superhuman draft list", () => {
     );
 
     expect(filtered).toHaveLength(1);
-    expect(filtered[0].id).toBe("draft-1");
+    expect(filtered[0]!.id).toBe("draft-1");
   });
 
   it("should filter drafts by --subject substring", () => {
-    const drafts: Draft[] = [
+    const drafts = [
       {
         id: "draft-1",
         subject: "Meeting Follow-up",
@@ -183,12 +183,12 @@ describe("superhuman draft list", () => {
     );
 
     expect(filtered).toHaveLength(1);
-    expect(filtered[0].id).toBe("draft-1");
-    expect(filtered[0].subject).toBe("Meeting Follow-up");
+    expect(filtered[0]!.id).toBe("draft-1");
+    expect(filtered[0]!.subject).toBe("Meeting Follow-up");
   });
 
   it("should return empty array when no drafts match --to filter", () => {
-    const drafts: Draft[] = [
+    const drafts = [
       {
         id: "draft-1",
         subject: "Test",
@@ -210,7 +210,7 @@ describe("superhuman draft list", () => {
   });
 
   it("should return all drafts when no filter is applied", () => {
-    const drafts: Draft[] = [
+    const drafts = [
       {
         id: "draft-1",
         subject: "First",
@@ -252,7 +252,7 @@ describe("superhuman draft list", () => {
   });
 
   it("should produce valid JSON output for drafts", () => {
-    const drafts: Draft[] = [
+    const drafts = [
       {
         id: "draft-abc123",
         subject: "Meeting Follow-up",
@@ -270,14 +270,14 @@ describe("superhuman draft list", () => {
 
     expect(Array.isArray(parsed)).toBe(true);
     expect(parsed).toHaveLength(1);
-    expect(parsed[0].id).toBe("draft-abc123");
-    expect(parsed[0].subject).toBe("Meeting Follow-up");
-    expect(parsed[0].to).toEqual(["jon@example.com"]);
-    expect(parsed[0].source).toBe("gmail");
+    expect(parsed[0]!.id).toBe("draft-abc123");
+    expect(parsed[0]!.subject).toBe("Meeting Follow-up");
+    expect(parsed[0]!.to).toEqual(["jon@example.com"]);
+    expect(parsed[0]!.source).toBe("gmail");
   });
 
   it("should match --to filter case-insensitively", () => {
-    const drafts: Draft[] = [
+    const drafts = [
       {
         id: "draft-1",
         subject: "Hello",

@@ -25,5 +25,11 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
-  }
+  },
+
+  // Only type-check the actual CLI source. The ~80 top-level debug-*.ts /
+  // capture-*.ts / check-*.ts files are throwaway API-investigation scratch
+  // scripts (not imported by src/, not in package.json scripts) and are
+  // intentionally excluded from the typecheck gate.
+  "include": ["src/**/*.ts"]
 }

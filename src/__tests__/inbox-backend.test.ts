@@ -127,7 +127,7 @@ describe("inbox with SuperhumanProvider (portal path)", () => {
     const threads = await listInbox(provider, { limit: 10 });
 
     expect(threads).toHaveLength(1);
-    const t = threads[0];
+    const t = threads[0]!;
     expect(t.id).toBe("thread_0");
     expect(t.subject).toBe("Subject 0");
     expect(t.from.email).toBe("sender0@example.com");
@@ -151,7 +151,7 @@ describe("inbox with SuperhumanProvider (portal path)", () => {
     const threads = await listInbox(provider, { unreadOnly: true, limit: 10 });
 
     expect(threads).toHaveLength(1);
-    expect(threads[0].labelIds).toContain("UNREAD");
+    expect(threads[0]!.labelIds).toContain("UNREAD");
   });
 
   test("parses to/cc recipients of the latest message (string and object forms)", async () => {
@@ -166,8 +166,8 @@ describe("inbox with SuperhumanProvider (portal path)", () => {
 
     const threads = await listInbox(provider, { limit: 10 });
 
-    expect(threads[0].to).toEqual([{ email: "user@example.com", name: "User" }]);
-    expect(threads[0].cc).toEqual([
+    expect(threads[0]!.to).toEqual([{ email: "user@example.com", name: "User" }]);
+    expect(threads[0]!.cc).toEqual([
       { email: "bob@example.com", name: "Bob" },
       { email: "carol@example.com", name: "Carol" },
     ]);
@@ -176,8 +176,8 @@ describe("inbox with SuperhumanProvider (portal path)", () => {
   test("to/cc default to empty arrays when the message omits them", async () => {
     const { provider } = createProviderWithPortal(makePortalListResult(1));
     const threads = await listInbox(provider, { limit: 10 });
-    expect(threads[0].to).toEqual([]);
-    expect(threads[0].cc).toEqual([]);
+    expect(threads[0]!.to).toEqual([]);
+    expect(threads[0]!.cc).toEqual([]);
   });
 
   test("aiLabel filter keeps only threads carrying the AI label (short name)", async () => {
@@ -197,7 +197,7 @@ describe("inbox with SuperhumanProvider (portal path)", () => {
     const threads = await listInbox(provider, { aiLabel: "Respond", limit: 10 });
 
     expect(threads).toHaveLength(1);
-    expect(threads[0].id).toBe("t0");
+    expect(threads[0]!.id).toBe("t0");
   });
 
   test("aiLabel filter accepts comma-separated list (any-of) and full label strings", async () => {
@@ -245,8 +245,8 @@ describe("inbox with SuperhumanProvider (portal path)", () => {
 
     const threads = await listInbox(provider, { limit: 10 });
 
-    expect(threads[0].from.email).toBe("alice@example.com");
-    expect(threads[0].from.name).toBe("Alice Smith");
+    expect(threads[0]!.from.email).toBe("alice@example.com");
+    expect(threads[0]!.from.name).toBe("Alice Smith");
   });
 
   // --- needs-reply / me-last detection -------------------------------------
@@ -294,9 +294,9 @@ describe("inbox with SuperhumanProvider (portal path)", () => {
     const threads = await listInbox(provider, { needsReply: true, limit: 10 });
 
     expect(threads).toHaveLength(1);
-    expect(threads[0].isFromMe).toBe(false);
-    expect(threads[0].awaitingReply).toBe(true);
-    expect(threads[0].from.email).toBe("them@x.com"); // from = last sender
+    expect(threads[0]!.isFromMe).toBe(false);
+    expect(threads[0]!.awaitingReply).toBe(true);
+    expect(threads[0]!.from.email).toBe("them@x.com"); // from = last sender
   });
 
   test("isFromMe / awaitingReply are exposed on every thread (for --json)", async () => {
@@ -319,10 +319,10 @@ describe("inbox with SuperhumanProvider (portal path)", () => {
     // the latest sender instead.
     const byLatestId = Object.fromEntries(threads.map((t) => [t.id, t]));
 
-    expect(byLatestId["m2"].isFromMe).toBe(true);  // owner alias sent last
-    expect(byLatestId["m2"].awaitingReply).toBe(false);
-    expect(byLatestId["n1"].isFromMe).toBe(false); // them sent last
-    expect(byLatestId["n1"].awaitingReply).toBe(true);
+    expect(byLatestId["m2"]!.isFromMe).toBe(true);  // owner alias sent last
+    expect(byLatestId["m2"]!.awaitingReply).toBe(false);
+    expect(byLatestId["n1"]!.isFromMe).toBe(false); // them sent last
+    expect(byLatestId["n1"]!.awaitingReply).toBe(true);
   });
 
   test("needs-reply falls back to account-email match when SENT label is absent", async () => {
@@ -398,10 +398,10 @@ describe("searchInbox with SuperhumanProvider", () => {
 
     expect(results).toHaveLength(2);
     // Results are sorted by date descending — thread_1 (2026-03-21) before thread_0 (2026-03-20)
-    expect(results[0].id).toBe("thread_1");
-    expect(results[1].id).toBe("thread_0");
-    expect(results[1].subject).toBe("Invoice 0");
-    expect(results[1].from.email).toBe("sender0@example.com");
+    expect(results[0]!.id).toBe("thread_1");
+    expect(results[1]!.id).toBe("thread_0");
+    expect(results[1]!.subject).toBe("Invoice 0");
+    expect(results[1]!.from.email).toBe("sender0@example.com");
   });
 
   test("searchInbox returns empty array when no portal available", async () => {
@@ -481,8 +481,8 @@ describe("listInbox SQLite-first path", () => {
     expect(dbMock).toHaveBeenCalledTimes(1);
     expect(portalMock).not.toHaveBeenCalled();
     expect(threads).toHaveLength(3);
-    expect(threads[0].subject).toBe("SQLite Subject 0");
-    expect(threads[0].from.email).toBe("sqlite0@example.com");
+    expect(threads[0]!.subject).toBe("SQLite Subject 0");
+    expect(threads[0]!.from.email).toBe("sqlite0@example.com");
 
     mock.module("../sqlite-search", () => sqliteSearch);
   });
@@ -519,7 +519,7 @@ describe("listInbox SQLite-first path", () => {
 
     expect(portalMock).not.toHaveBeenCalled();
     expect(threads).toHaveLength(1);
-    expect(threads[0].labelIds).toContain("UNREAD");
+    expect(threads[0]!.labelIds).toContain("UNREAD");
 
     mock.module("../sqlite-search", () => sqliteSearch);
   });
