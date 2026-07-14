@@ -743,9 +743,11 @@ function queryFTS(dbPath: string, queryStr: string, limit: number): DirectSearch
         snippet: row.body_snippet.replace(/<[^>]*>/g, "") || latest?.snippet || "",
         labelIds: labelMap.get(row.thread_id) ?? latest?.labelIds ?? [],
         messageCount: messages.length,
-        isFromMe: false,
-        awaitingReply: false,
-      };
+        // NOTE: FTS search results do not compute me-status (no me-set is
+        // plumbed into queryFTS). Historically these two fields were simply
+        // absent from search --json output; cast to preserve that exact shape
+        // rather than emit a hardcoded (and possibly wrong) `false`.
+      } as unknown as InboxThread;
     }).filter((t): t is InboxThread => t !== null);
 
     return { threads, total, capped };
