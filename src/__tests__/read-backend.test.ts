@@ -9,6 +9,13 @@ import { SuperhumanProvider } from "../superhuman-provider";
 import type { SuperhumanTokenInfo } from "../superhuman-provider";
 import { readThread, type ThreadMessage } from "../read";
 import * as sqliteSearch from "../sqlite-search";
+// Snapshot the REAL exports once, before any mock.module runs. Restoring to the
+// live `sqliteSearch` namespace is self-defeating: mock.module mutates that
+// namespace's bindings, so `() => sqliteSearch` re-installs the *mock*. A plain
+// snapshot captured here holds the real function refs and can't be polluted —
+// preventing this file's readThreadFromDB fake from leaking into later files
+// (e.g. thread-mutations, which relies on the real disk-lookup fallback).
+const REAL_SQLITE = { ...sqliteSearch };
 
 const sampleToken: SuperhumanTokenInfo = {
   token: "test-jwt-token",
@@ -107,7 +114,7 @@ describe("readThread with SuperhumanProvider", () => {
   beforeEach(() => {
     originalFetch = globalThis.fetch;
     // Ensure sqlite-search is always restored to real module before each test
-    mock.module("../sqlite-search", () => sqliteSearch);
+    mock.module("../sqlite-search", () => REAL_SQLITE);
   });
 
   afterEach(() => {
@@ -234,6 +241,11 @@ describe("readThread with SuperhumanProvider", () => {
     (provider as any).conn = {};
     provider.portalInvoke = mockPortalInvoke as any;
 
+    // Portal returns no matching thread → readThreadSuperhuman falls through to
+    // the backend. Mock an empty backend response so the test stays hermetic
+    // (no real fetch to mail.superhuman.com in offline/CI).
+    setupMockFetch({ threadList: [] });
+
     const messages = await readThread(provider, "nonexistent_id");
     expect(messages).toEqual([]);
   });
@@ -344,6 +356,10 @@ describe("readThread with SuperhumanProvider", () => {
     const mockPortalInvoke = mock(() => Promise.resolve({ threads: [] }));
     (provider as any).conn = {};
     provider.portalInvoke = mockPortalInvoke as any;
+
+    // Empty portal result → falls through to the backend; mock an empty backend
+    // response so the test never makes a real network call in offline/CI.
+    setupMockFetch({ threadList: [] });
 
     const messages = await readThread(provider, "thread_empty");
     expect(messages).toEqual([]);
@@ -509,13 +525,13 @@ describe("readThread with SuperhumanProvider", () => {
 
     function mockSQLite(readThreadFromDB: (...args: any[]) => any) {
       mock.module("../sqlite-search", () => ({
-        ...sqliteSearch,
+        ...REAL_SQLITE,
         readThreadFromDB,
       }));
     }
 
     afterEach(() => {
-      mock.module("../sqlite-search", () => sqliteSearch);
+      mock.module("../sqlite-search", () => REAL_SQLITE);
     });
 
     test("readThread uses SQLite when DB has thread", async () => {
