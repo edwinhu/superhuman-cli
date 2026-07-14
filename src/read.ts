@@ -36,7 +36,7 @@ function parseFrom(from: string): { email: string; name: string } {
   if (!from) return { email: "", name: "" };
   const match = from.match(/^(.+?)\s*<(.+?)>$/);
   if (match) {
-    return { name: match[1].trim(), email: match[2].trim() };
+    return { name: match[1]!.trim(), email: match[2]!.trim() };
   }
   return { email: from, name: from };
 }
@@ -250,8 +250,8 @@ async function readThreadSQLite(
         const bodies = getThreadBodiesFromDB(accountEmail, ids);
         if (bodies.size > 0) {
           const latest = result[result.length - 1];
-          const full = bodies.get(latest.id) ?? bodies.values().next().value;
-          if (full && (!latest.body || latest.body.length < full.length)) {
+          const full = latest ? bodies.get(latest.id) ?? bodies.values().next().value : undefined;
+          if (latest && full && (!latest.body || latest.body.length < full.length)) {
             latest.body = full;
           }
         }

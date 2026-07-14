@@ -11,7 +11,7 @@
  * Supported browsers: Dia, Chromium, Chrome, Brave (all use the same OPFS layout).
  */
 
-import { Database } from "bun:sqlite";
+import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { existsSync, mkdirSync, rmSync, writeFileSync } from "fs";
 import { join } from "path";
 import { tmpdir, homedir } from "os";
@@ -195,7 +195,7 @@ export function lookupThreadInfoById(
     const db = new Database(tmpPath, { readonly: true });
     try {
       // 1. Exact match on thread_id (conversation ID)
-      let row = db.query<{ thread_id: string; json: string }>(
+      let row = db.query<{ thread_id: string; json: string }, SQLQueryBindings[]>(
         "SELECT thread_id, json FROM threads WHERE thread_id = ?"
       ).get(threadId);
 
@@ -203,7 +203,7 @@ export function lookupThreadInfoById(
       // Inbox returns message-level IDs (O365 Item IDs) which differ from
       // the thread_id (O365 Conversation ID) stored as the primary key.
       if (!row) {
-        row = db.query<{ thread_id: string; json: string }>(
+        row = db.query<{ thread_id: string; json: string }, SQLQueryBindings[]>(
           "SELECT t.thread_id, t.json FROM threads t WHERE t.json LIKE ? LIMIT 1"
         ).get(`%"id":"${threadId}"%`);
       }
@@ -628,7 +628,7 @@ function runCandidateQuery(
   db: Database,
   matchExpr: string
 ): Array<{ thread_id: string; sort: number; mi: Uint8Array }> {
-  return db.query<{ thread_id: string; sort: number; mi: Uint8Array }>(`
+  return db.query<{ thread_id: string; sort: number; mi: Uint8Array }, SQLQueryBindings[]>(`
     SELECT ts.thread_id AS thread_id, t.sort AS sort,
            matchinfo(thread_search, 'pcx') AS mi
     FROM thread_search ts
@@ -680,7 +680,7 @@ function queryFTS(dbPath: string, queryStr: string, limit: number): DirectSearch
       json: string;
       subject_snippet: string;
       body_snippet: string;
-    }>(`
+    }, SQLQueryBindings[]>(`
       SELECT
         ts.thread_id,
         t.json,
@@ -695,7 +695,7 @@ function queryFTS(dbPath: string, queryStr: string, limit: number): DirectSearch
     // Batch list_ids query for the page's threads.
     const labelMap = new Map<string, string[]>();
     if (topIds.length > 0) {
-      const labelRows = db.query<{ thread_id: string; list_id: string }>(
+      const labelRows = db.query<{ thread_id: string; list_id: string }, SQLQueryBindings[]>(
         `SELECT thread_id, list_id FROM list_ids WHERE thread_id IN (${placeholders})`
       ).all(...topIds);
       for (const lr of labelRows) {
@@ -743,6 +743,8 @@ function queryFTS(dbPath: string, queryStr: string, limit: number): DirectSearch
         snippet: row.body_snippet.replace(/<[^>]*>/g, "") || latest?.snippet || "",
         labelIds: labelMap.get(row.thread_id) ?? latest?.labelIds ?? [],
         messageCount: messages.length,
+        isFromMe: false,
+        awaitingReply: false,
       };
     }).filter((t): t is InboxThread => t !== null);
 
@@ -754,7 +756,7 @@ function queryFTS(dbPath: string, queryStr: string, limit: number): DirectSearch
 
 function parseFromStr(from: string): { email: string; name: string } {
   const match = from.match(/^(.+?)\s*<(.+?)>$/);
-  if (match) return { name: match[1].trim(), email: match[2].trim() };
+  if (match) return { name: match[1]!.trim(), email: match[2]!.trim() };
   return { email: from, name: from };
 }
 
@@ -783,13 +785,13 @@ export function readThreadFromDB(
     const db = new Database(tmpPath, { readonly: true });
     try {
       // 1. Exact match on thread_id
-      let row = db.query<{ thread_id: string; json: string }>(
+      let row = db.query<{ thread_id: string; json: string }, SQLQueryBindings[]>(
         "SELECT thread_id, json FROM threads WHERE thread_id = ?"
       ).get(threadId);
 
       // 2. Fallback: search by message ID inside the JSON
       if (!row) {
-        row = db.query<{ thread_id: string; json: string }>(
+        row = db.query<{ thread_id: string; json: string }, SQLQueryBindings[]>(
           "SELECT t.thread_id, t.json FROM threads t WHERE t.json LIKE ? LIMIT 1"
         ).get(`%"id":"${threadId}"%`);
       }
@@ -912,7 +914,7 @@ export function listInboxFromDB(
   try {
     const db = new Database(tmpPath, { readonly: true });
     try {
-      const rows = db.query<{ thread_id: string; json: string }>(`
+      const rows = db.query<{ thread_id: string; json: string }, SQLQueryBindings[]>(`
         SELECT t.thread_id, t.json
         FROM threads t
         JOIN list_ids li ON t.thread_id = li.thread_id
@@ -926,7 +928,7 @@ export function listInboxFromDB(
       // Batch-query list_ids for all returned threads
       const threadIds = rows.map(r => r.thread_id);
       const placeholders = threadIds.map(() => "?").join(",");
-      const labelRows = db.query<{ thread_id: string; list_id: string }>(
+      const labelRows = db.query<{ thread_id: string; list_id: string }, SQLQueryBindings[]>(
         `SELECT thread_id, list_id FROM list_ids WHERE thread_id IN (${placeholders})`
       ).all(...threadIds);
 

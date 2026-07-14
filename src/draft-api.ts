@@ -85,7 +85,7 @@ function formatRecipients(emails?: string[]): string[] {
 /** Extract the bare email from a "Name <email>" recipient string. */
 function bareEmail(s: string): string {
   const m = s.match(/<\s*([^<>]+@[^@<>]+)\s*>/);
-  return (m ? m[1] : s).trim();
+  return (m ? m[1]! : s).trim();
 }
 
 /**
@@ -758,7 +758,7 @@ export async function uploadAttachmentSuperhuman(
     throw new Error(`Attachment upload failed (${response.status}): ${text}`);
   }
 
-  const data = await response.json();
+  const data = (await response.json()) as { downloadUrl: string };
 
   // Write attachment metadata so the draft shows the attachment in Superhuman UI
   const cid = crypto.randomUUID();
@@ -1086,7 +1086,7 @@ export async function sendDraftSuperhuman(
       };
     }
 
-    const data = await response.json();
+    const data = (await response.json()) as { send_at?: number };
     return {
       success: true,
       sendAt: data.send_at,

@@ -14,8 +14,8 @@ function spawnCli(...args: string[]) {
 
 async function getOutput(proc: ReturnType<typeof Bun.spawn>) {
   const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
+    new Response(proc.stdout as ReadableStream).text(),
+    new Response(proc.stderr as ReadableStream).text(),
     proc.exited,
   ]);
   return { stdout, stderr, output: stdout + stderr, exitCode };

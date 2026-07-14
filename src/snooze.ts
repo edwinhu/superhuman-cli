@@ -127,7 +127,7 @@ export function parseSendAtTime(input: string): Date {
   const parseClock = (s: string): { h: number; m: number } | null => {
     const m = s.match(/\b(\d{1,2})(?::(\d{2}))?\s*(am|pm)?\b/);
     if (!m) return null;
-    let h = parseInt(m[1], 10);
+    let h = parseInt(m[1]!, 10);
     const min = m[2] ? parseInt(m[2], 10) : 0;
     const ap = m[3];
     if (h > 23 || min > 59) return null;
@@ -153,7 +153,7 @@ export function parseSendAtTime(input: string): Date {
     /\b(next\s+)?(sun|mon|tue|wed|thu|fri|sat)[a-z]*\b/
   );
   if (dayMatch) {
-    const abbr = dayMatch[2];
+    const abbr = dayMatch[2]!;
     const target = weekdays.findIndex((d) => d.startsWith(abbr));
     if (target !== -1) {
       const result = new Date(now);
@@ -197,7 +197,7 @@ export function parseSendAtTime(input: string): Date {
   const todWord = Object.keys(timeOfDay).find((w) => lower === w);
   const bareClock = parseClock(lower);
   if (todWord || (bareClock && /^[\d:apm\s]+$/.test(lower))) {
-    const { h, m } = todWord ? { h: timeOfDay[todWord], m: 0 } : bareClock!;
+    const { h, m } = todWord ? { h: timeOfDay[todWord]!, m: 0 } : bareClock!;
     const result = new Date(now);
     result.setHours(h, m, 0, 0);
     if (result <= now) result.setDate(result.getDate() + 1);

@@ -40,7 +40,7 @@ describe("accounts (CDP integration)", () => {
     expect(Array.isArray(accounts)).toBe(true);
     expect(accounts.length).toBeGreaterThan(0);
 
-    const account = accounts[0];
+    const account = accounts[0]!;
     expect(account).toHaveProperty("email");
     expect(account).toHaveProperty("isCurrent");
     expect(typeof account.email).toBe("string");

@@ -90,13 +90,13 @@ describe("SuperhumanDraftProvider update/delete", () => {
       }
 
       return new Response(JSON.stringify({}));
-    }) as typeof fetch;
+    }) as unknown as typeof fetch;
 
     // === WORKFLOW START ===
 
     // 1. CREATE (setup)
     const userInfo = getUserInfoFromCache(
-      mockToken.userId,
+      mockToken.userId!,
       mockToken.email,
       mockToken.superhumanToken!.token,
       "Test User"
@@ -116,7 +116,7 @@ describe("SuperhumanDraftProvider update/delete", () => {
     // 2. Verify created (list)
     const draftsAfterCreate = await provider.listDrafts();
     expect(draftsAfterCreate).toHaveLength(1);
-    expect(draftsAfterCreate[0].subject).toBe("Original Subject");
+    expect(draftsAfterCreate[0]!.subject).toBe("Original Subject");
 
     // 3. UPDATE subject only — body/to must be preserved by the merge.
     const updateSuccess = await provider.updateDraft!(testDraftId, {
@@ -127,7 +127,7 @@ describe("SuperhumanDraftProvider update/delete", () => {
     // 4. Verify updated (list)
     const draftsAfterUpdate = await provider.listDrafts();
     expect(draftsAfterUpdate).toHaveLength(1);
-    expect(draftsAfterUpdate[0].subject).toBe("Updated Subject");
+    expect(draftsAfterUpdate[0]!.subject).toBe("Updated Subject");
 
     // 5. DELETE
     const deleteSuccess = await provider.deleteDraft!(testDraftId);
@@ -166,7 +166,7 @@ describe("SuperhumanDraftProvider update/delete", () => {
         return new Response(JSON.stringify({ threadList: [] }));
       }
       return new Response(JSON.stringify({}));
-    }) as typeof fetch;
+    }) as unknown as typeof fetch;
 
     // Attempt to update non-existent draft
     await expect(
@@ -181,7 +181,7 @@ describe("SuperhumanDraftProvider update/delete", () => {
         return new Response(JSON.stringify({ threadList: [] }));
       }
       return new Response(JSON.stringify({}));
-    }) as typeof fetch;
+    }) as unknown as typeof fetch;
 
     // Attempt to delete non-existent draft
     await expect(provider.deleteDraft!("draft00nonexistent")).rejects.toThrow();

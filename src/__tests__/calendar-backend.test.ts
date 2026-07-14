@@ -29,7 +29,7 @@ const sampleToken: SuperhumanTokenInfo = {
  * captures expressions and returns a canned value.
  */
 function makeMockConn(returnValue: any) {
-  const evaluateMock = mock(() =>
+  const evaluateMock = mock((_opts: { expression: string }) =>
     Promise.resolve({
       result: { type: "object" as const, value: returnValue },
     })
@@ -99,17 +99,17 @@ describe("calendar with SuperhumanProvider (CDP gcal)", () => {
       });
 
       expect(evaluateMock).toHaveBeenCalledTimes(1);
-      const expr = evaluateMock.mock.calls[0][0].expression as string;
+      const expr = evaluateMock.mock.calls[0]![0].expression as string;
       expect(expr).toContain("di.get('gcal').getEventsList");
       expect(expr).toContain('"primary"');
       expect(expr).toContain('"singleEvents":true');
       expect(expr).toContain('"maxResults":10');
 
       expect(events).toHaveLength(1);
-      expect(events[0].id).toBe("evt_1");
-      expect(events[0].summary).toBe("Team Standup");
-      expect(events[0].start).toBe("2026-03-31T09:00:00Z");
-      expect(events[0].attendees).toEqual(["alice@example.com"]);
+      expect(events[0]!.id).toBe("evt_1");
+      expect(events[0]!.summary).toBe("Team Standup");
+      expect(events[0]!.start).toBe("2026-03-31T09:00:00Z");
+      expect(events[0]!.attendees).toEqual(["alice@example.com"]);
     });
 
     test("uses custom calendarId when provided", async () => {
@@ -117,7 +117,7 @@ describe("calendar with SuperhumanProvider (CDP gcal)", () => {
 
       await listEvents(provider, { calendarId: "work@example.com" });
 
-      const expr = evaluateMock.mock.calls[0][0].expression as string;
+      const expr = evaluateMock.mock.calls[0]![0].expression as string;
       expect(expr).toContain('"work@example.com"');
     });
 
@@ -151,7 +151,7 @@ describe("calendar with SuperhumanProvider (CDP gcal)", () => {
         timeMax: "2026-04-01T00:00:00Z",
       });
 
-      const expr = evaluateMock.mock.calls[0][0].expression as string;
+      const expr = evaluateMock.mock.calls[0]![0].expression as string;
       expect(expr).toContain('"calendarAccountEmail":"user@example.com"');
     });
 
@@ -169,8 +169,8 @@ describe("calendar with SuperhumanProvider (CDP gcal)", () => {
       const { provider } = providerWithPortal(rawEvents);
       const events = await listEvents(provider);
 
-      expect(events[0].isAllDay).toBe(true);
-      expect(events[0].start).toBe("2026-04-01");
+      expect(events[0]!.isAllDay).toBe(true);
+      expect(events[0]!.start).toBe("2026-04-01");
     });
   });
 
@@ -194,7 +194,7 @@ describe("calendar with SuperhumanProvider (CDP gcal)", () => {
       expect(result.success).toBe(true);
       expect(result.eventId).toBe("new_evt_1");
 
-      const expr = evaluateMock.mock.calls[0][0].expression as string;
+      const expr = evaluateMock.mock.calls[0]![0].expression as string;
       expect(expr).toContain("di.get('gcal').importEvent");
       expect(expr).toContain('"user@example.com"');
       expect(expr).toContain('"summary":"Lunch"');
@@ -247,7 +247,7 @@ describe("calendar with SuperhumanProvider (CDP gcal)", () => {
       expect(result.success).toBe(true);
       expect(result.eventId).toBe("evt_1");
 
-      const expr = evaluateMock.mock.calls[0][0].expression as string;
+      const expr = evaluateMock.mock.calls[0]![0].expression as string;
       expect(expr).toContain("di.get('gcal').patchEvent");
       expect(expr).toContain('"work@example.com"');
       expect(expr).toContain('"evt_1"');
@@ -259,7 +259,7 @@ describe("calendar with SuperhumanProvider (CDP gcal)", () => {
 
       await updateEvent(provider, "evt_1", { summary: "X" });
 
-      const expr = evaluateMock.mock.calls[0][0].expression as string;
+      const expr = evaluateMock.mock.calls[0]![0].expression as string;
       expect(expr).toContain('"primary"');
     });
   });
@@ -274,7 +274,7 @@ describe("calendar with SuperhumanProvider (CDP gcal)", () => {
 
       expect(result.success).toBe(true);
 
-      const expr = evaluateMock.mock.calls[0][0].expression as string;
+      const expr = evaluateMock.mock.calls[0]![0].expression as string;
       expect(expr).toContain("di.get('gcal').deleteEvent");
       expect(expr).toContain('"work@example.com"');
       expect(expr).toContain('"evt_1"');
@@ -285,7 +285,7 @@ describe("calendar with SuperhumanProvider (CDP gcal)", () => {
 
       await deleteEvent(provider, "evt_1");
 
-      const expr = evaluateMock.mock.calls[0][0].expression as string;
+      const expr = evaluateMock.mock.calls[0]![0].expression as string;
       expect(expr).toContain('"primary"');
     });
 
@@ -333,14 +333,14 @@ describe("calendar with SuperhumanProvider (CDP gcal)", () => {
         calendarIds: ["user@example.com"],
       });
 
-      const expr = evaluateMock.mock.calls[0][0].expression as string;
+      const expr = evaluateMock.mock.calls[0]![0].expression as string;
       expect(expr).toContain("di.get('gcal').queryFreeBusy");
       expect(expr).toContain('"timeMin"');
       expect(expr).toContain('"items"');
 
       expect(result.busy).toHaveLength(1);
-      expect(result.busy[0].start).toBe("2026-03-31T09:00:00Z");
-      expect(result.busy[0].end).toBe("2026-03-31T10:00:00Z");
+      expect(result.busy[0]!.start).toBe("2026-03-31T09:00:00Z");
+      expect(result.busy[0]!.end).toBe("2026-03-31T10:00:00Z");
     });
 
     test("returns empty on error", async () => {
@@ -430,7 +430,7 @@ describe("calendar with SuperhumanProvider (MS Graph)", () => {
   };
 
   function makeMsMockConn(returnValue: any) {
-    const evaluateMock = mock(() =>
+    const evaluateMock = mock((_opts: { expression: string }) =>
       Promise.resolve({
         result: { type: "object" as const, value: returnValue },
       })
@@ -492,7 +492,7 @@ describe("calendar with SuperhumanProvider (MS Graph)", () => {
       });
 
       expect(evaluateMock).toHaveBeenCalledTimes(1);
-      const expr = evaluateMock.mock.calls[0][0].expression as string;
+      const expr = evaluateMock.mock.calls[0]![0].expression as string;
 
       // Must use MS Graph proxy, NOT gcal DI
       expect(expr).toContain("requestMicrosoftCalendar");
@@ -502,11 +502,11 @@ describe("calendar with SuperhumanProvider (MS Graph)", () => {
 
       // Verify normalization from MS field names
       expect(events).toHaveLength(1);
-      expect(events[0].id).toBe("ms_evt_1");
-      expect(events[0].summary).toBe("Team Standup");
-      expect(events[0].description).toBe("Daily sync");
-      expect(events[0].location).toBe("Teams Room");
-      expect(events[0].attendees).toEqual(["alice@outlook.com"]);
+      expect(events[0]!.id).toBe("ms_evt_1");
+      expect(events[0]!.summary).toBe("Team Standup");
+      expect(events[0]!.description).toBe("Daily sync");
+      expect(events[0]!.location).toBe("Teams Room");
+      expect(events[0]!.attendees).toEqual(["alice@outlook.com"]);
     });
   });
 
@@ -530,7 +530,7 @@ describe("calendar with SuperhumanProvider (MS Graph)", () => {
       expect(result.success).toBe(true);
       expect(result.eventId).toBe("ms_new_evt_1");
 
-      const expr = evaluateMock.mock.calls[0][0].expression as string;
+      const expr = evaluateMock.mock.calls[0]![0].expression as string;
       expect(expr).toContain("requestMicrosoftCalendar");
       expect(expr).not.toContain("di.get('gcal')");
       expect(expr).toContain("me/events");
@@ -562,7 +562,7 @@ describe("calendar with SuperhumanProvider (MS Graph)", () => {
       expect(result.success).toBe(true);
       expect(result.eventId).toBe("ms_evt_1");
 
-      const expr = evaluateMock.mock.calls[0][0].expression as string;
+      const expr = evaluateMock.mock.calls[0]![0].expression as string;
       expect(expr).toContain("requestMicrosoftCalendar");
       expect(expr).not.toContain("di.get('gcal')");
       expect(expr).toContain("me/events/ms_evt_1");
@@ -583,7 +583,7 @@ describe("calendar with SuperhumanProvider (MS Graph)", () => {
 
       expect(result.success).toBe(true);
 
-      const expr = evaluateMock.mock.calls[0][0].expression as string;
+      const expr = evaluateMock.mock.calls[0]![0].expression as string;
       expect(expr).toContain("requestMicrosoftCalendar");
       expect(expr).not.toContain("di.get('gcal')");
       expect(expr).toContain("me/events/ms_evt_1");

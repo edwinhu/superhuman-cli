@@ -149,14 +149,14 @@ describe("readThread with SuperhumanProvider", () => {
 
     // Must call listAsync, NOT getAsync
     expect(mockPortalInvoke).toHaveBeenCalledTimes(1);
-    const [service, method] = mockPortalInvoke.mock.calls[0] as [string, string, any[]];
+    const [service, method] = mockPortalInvoke.mock.calls[0] as unknown as [string, string, any[]];
     expect(service).toBe("threadInternal");
     expect(method).toBe("listAsync");
     expect(method).not.toBe("getAsync");
 
     // Should return both messages
     expect(messages).toHaveLength(2);
-    expect(messages[1].id).toBe(latestMsgId);
+    expect(messages[1]!.id).toBe(latestMsgId);
   });
 
   test("REGRESSION: backend path does not send listId filter (listId caused 400 on Exchange)", async () => {
@@ -173,7 +173,7 @@ describe("readThread with SuperhumanProvider", () => {
     await readThread(provider, threadId);
 
     expect(mf).toHaveBeenCalledTimes(1);
-    const [, opts] = mf.mock.calls[0] as [string, RequestInit];
+    const [, opts] = mf.mock.calls[0] as unknown as [string, RequestInit];
     const body = JSON.parse(opts.body as string);
     // Must NOT contain listId
     expect(body.filter).toBeDefined();
@@ -198,18 +198,18 @@ describe("readThread with SuperhumanProvider", () => {
     const messages = await readThread(provider, latestMsgId);
 
     expect(mockPortalInvoke).toHaveBeenCalledTimes(1);
-    const [service, method, args] = mockPortalInvoke.mock.calls[0] as [string, string, any[]];
+    const [service, method, args] = mockPortalInvoke.mock.calls[0] as unknown as [string, string, any[]];
     expect(service).toBe("threadInternal");
     expect(method).toBe("listAsync");
     expect(args[0]).toBe("INBOX");
 
     expect(messages).toHaveLength(2);
     // Messages sorted oldest-first
-    expect(messages[0].id).toBe("msg_1");
-    expect(messages[1].id).toBe(latestMsgId);
-    expect(messages[0].subject).toBe("Hello World");
-    expect(messages[0].from.email).toBe("alice@example.com");
-    expect(messages[0].from.name).toBe("Alice Smith");
+    expect(messages[0]!.id).toBe("msg_1");
+    expect(messages[1]!.id).toBe(latestMsgId);
+    expect(messages[0]!.subject).toBe("Hello World");
+    expect(messages[0]!.from.email).toBe("alice@example.com");
+    expect(messages[0]!.from.name).toBe("Alice Smith");
   });
 
   test("portal: also matches by thread internal ID (json.id)", async () => {
@@ -253,7 +253,7 @@ describe("readThread with SuperhumanProvider", () => {
     const messages = await readThread(provider, threadId);
 
     expect(mf).toHaveBeenCalledTimes(1);
-    const [url, opts] = mf.mock.calls[0] as [string, RequestInit];
+    const [url, opts] = mf.mock.calls[0] as unknown as [string, RequestInit];
     expect(url).toBe(
       "https://mail.superhuman.com/~backend/v3/userdata.getThreads"
     );
@@ -263,7 +263,7 @@ describe("readThread with SuperhumanProvider", () => {
     expect(body.limit).toBeDefined();
 
     expect(messages).toHaveLength(2);
-    expect(messages[0].subject).toBe("Hello World");
+    expect(messages[0]!.subject).toBe("Hello World");
   });
 
   // ---------------------------------------------------------------------------
@@ -282,7 +282,7 @@ describe("readThread with SuperhumanProvider", () => {
 
     const messages = await readThread(provider, latestMsgId);
 
-    const m1 = messages[0];
+    const m1 = messages[0]!;
     expect(m1.id).toBe("msg_1");
     expect(m1.threadId).toBe(threadInternalId);
     expect(m1.subject).toBe("Hello World");
@@ -293,7 +293,7 @@ describe("readThread with SuperhumanProvider", () => {
     expect(m1.snippet).toBe("Hi there, this is a test");
     expect(m1.body).toBe("<p>Hi there, this is a test email.</p>");
 
-    const m2 = messages[1];
+    const m2 = messages[1]!;
     expect(m2.id).toBe(latestMsgId);
     expect(m2.from.email).toBe("user@example.com");
   });
@@ -308,14 +308,14 @@ describe("readThread with SuperhumanProvider", () => {
 
     expect(messages).toHaveLength(2);
 
-    const m1 = messages[0];
+    const m1 = messages[0]!;
     expect(m1.id).toBe("msg_1");
     expect(m1.subject).toBe("Hello World");
     expect(m1.from.email).toBe("alice@example.com");
     expect(m1.from.name).toBe("Alice Smith");
     expect(m1.body).toBe("<p>Hi there, this is a test email.</p>");
 
-    const m2 = messages[1];
+    const m2 = messages[1]!;
     expect(m2.id).toBe("msg_2");
     expect(m2.from.email).toBe("user@example.com");
   });
@@ -390,8 +390,8 @@ describe("readThread with SuperhumanProvider", () => {
     provider.portalInvoke = mockPortalInvoke as any;
 
     const messages = await readThread(provider, "m1");
-    expect(messages[0].from.email).toBe("plain@example.com");
-    expect(messages[0].from.name).toBe("plain@example.com");
+    expect(messages[0]!.from.email).toBe("plain@example.com");
+    expect(messages[0]!.from.name).toBe("plain@example.com");
   });
 
   test("from field parses 'Name <email>' format", async () => {
@@ -424,8 +424,8 @@ describe("readThread with SuperhumanProvider", () => {
     provider.portalInvoke = mockPortalInvoke as any;
 
     const messages = await readThread(provider, "m1");
-    expect(messages[0].from.email).toBe("bob@example.com");
-    expect(messages[0].from.name).toBe("Bob Jones");
+    expect(messages[0]!.from.email).toBe("bob@example.com");
+    expect(messages[0]!.from.name).toBe("Bob Jones");
   });
 
   test("messages are sorted by date ascending (oldest first)", async () => {
@@ -468,8 +468,8 @@ describe("readThread with SuperhumanProvider", () => {
     provider.portalInvoke = mockPortalInvoke as any;
 
     const messages = await readThread(provider, "newer");
-    expect(messages[0].id).toBe("older");
-    expect(messages[1].id).toBe("newer");
+    expect(messages[0]!.id).toBe("older");
+    expect(messages[1]!.id).toBe("newer");
   });
 
   // ---------------------------------------------------------------------------
@@ -532,8 +532,8 @@ describe("readThread with SuperhumanProvider", () => {
 
       // Should have messages from SQLite
       expect(messages).toHaveLength(2);
-      expect(messages[0].id).toBe("msg_sqlite_1");
-      expect(messages[1].id).toBe("msg_sqlite_2");
+      expect(messages[0]!.id).toBe("msg_sqlite_1");
+      expect(messages[1]!.id).toBe("msg_sqlite_2");
       // Portal should NOT have been called
       expect(mockPortalInvoke).not.toHaveBeenCalled();
 
@@ -594,8 +594,8 @@ describe("readThread with SuperhumanProvider", () => {
       const messages = await readThreadFresh(provider, threadId);
 
       // from should be properly parsed from object format
-      expect(messages[0].from).toEqual({ email: "alice@example.com", name: "Alice" });
-      expect(messages[1].from).toEqual({ email: "user@example.com", name: "User" });
+      expect(messages[0]!.from).toEqual({ email: "alice@example.com", name: "Alice" });
+      expect(messages[1]!.from).toEqual({ email: "user@example.com", name: "User" });
 
     });
   });

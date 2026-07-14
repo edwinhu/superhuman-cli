@@ -81,48 +81,48 @@ describe("Gmail thread label mutations (token-direct, provider API)", () => {
     const r = await archiveThread(gmailToken, "T1");
     expect(r.success).toBe(true);
     expect(calls).toHaveLength(1);
-    expect(calls[0].method).toBe("POST");
-    expect(calls[0].url).toBe(
+    expect(calls[0]!.method).toBe("POST");
+    expect(calls[0]!.url).toBe(
       "https://gmail.googleapis.com/gmail/v1/users/me/threads/T1/modify"
     );
-    expect(calls[0].body).toEqual({ addLabelIds: [], removeLabelIds: ["INBOX"] });
+    expect(calls[0]!.body).toEqual({ addLabelIds: [], removeLabelIds: ["INBOX"] });
   });
 
   test("deleteThread adds the TRASH label", async () => {
     mockFetch();
     const r = await deleteThread(gmailToken, "T2");
     expect(r.success).toBe(true);
-    expect(calls[0].body).toEqual({ addLabelIds: ["TRASH"], removeLabelIds: [] });
+    expect(calls[0]!.body).toEqual({ addLabelIds: ["TRASH"], removeLabelIds: [] });
   });
 
   test("starThread adds STARRED, unstarThread removes it", async () => {
     mockFetch();
     expect((await starThread(gmailToken, "T3")).success).toBe(true);
-    expect(calls[0].body).toEqual({ addLabelIds: ["STARRED"], removeLabelIds: [] });
+    expect(calls[0]!.body).toEqual({ addLabelIds: ["STARRED"], removeLabelIds: [] });
 
     mockFetch();
     expect((await unstarThread(gmailToken, "T3")).success).toBe(true);
-    expect(calls[0].body).toEqual({ addLabelIds: [], removeLabelIds: ["STARRED"] });
+    expect(calls[0]!.body).toEqual({ addLabelIds: [], removeLabelIds: ["STARRED"] });
   });
 
   test("addLabel / removeLabel write the given label id", async () => {
     mockFetch();
     await addLabel(gmailToken, "T4", "Label_42");
-    expect(calls[0].body).toEqual({ addLabelIds: ["Label_42"], removeLabelIds: [] });
+    expect(calls[0]!.body).toEqual({ addLabelIds: ["Label_42"], removeLabelIds: [] });
 
     mockFetch();
     await removeLabel(gmailToken, "T4", "Label_42");
-    expect(calls[0].body).toEqual({ addLabelIds: [], removeLabelIds: ["Label_42"] });
+    expect(calls[0]!.body).toEqual({ addLabelIds: [], removeLabelIds: ["Label_42"] });
   });
 
   test("markAsRead removes UNREAD, markAsUnread adds it", async () => {
     mockFetch();
     expect((await markAsRead(gmailToken, "T5")).success).toBe(true);
-    expect(calls[0].body).toEqual({ addLabelIds: [], removeLabelIds: ["UNREAD"] });
+    expect(calls[0]!.body).toEqual({ addLabelIds: [], removeLabelIds: ["UNREAD"] });
 
     mockFetch();
     expect((await markAsUnread(gmailToken, "T5")).success).toBe(true);
-    expect(calls[0].body).toEqual({ addLabelIds: ["UNREAD"], removeLabelIds: [] });
+    expect(calls[0]!.body).toEqual({ addLabelIds: ["UNREAD"], removeLabelIds: [] });
   });
 
   test("sends the provider OAuth accessToken as the bearer", async () => {
@@ -163,20 +163,20 @@ describe("Microsoft thread label mutations (token-direct, MS Graph)", () => {
     const r = await markAsRead(msToken, "C1");
     expect(r.success).toBe(true);
     expect(calls).toHaveLength(1);
-    expect(calls[0].method).toBe("PATCH");
-    expect(calls[0].url).toBe("https://graph.microsoft.com/v1.0/me/messages/C1");
-    expect(calls[0].body).toEqual({ isRead: true });
+    expect(calls[0]!.method).toBe("PATCH");
+    expect(calls[0]!.url).toBe("https://graph.microsoft.com/v1.0/me/messages/C1");
+    expect(calls[0]!.body).toEqual({ isRead: true });
   });
 
   test("star PATCHes flag=flagged; unstar PATCHes flag=complete", async () => {
     mockFetch();
     await starThread(msToken, "C2");
-    expect(calls[0].url).toBe("https://graph.microsoft.com/v1.0/me/messages/C2");
-    expect(calls[0].body).toEqual({ flag: { flagStatus: "flagged" } });
+    expect(calls[0]!.url).toBe("https://graph.microsoft.com/v1.0/me/messages/C2");
+    expect(calls[0]!.body).toEqual({ flag: { flagStatus: "flagged" } });
 
     mockFetch();
     await unstarThread(msToken, "C2");
-    expect(calls[0].body).toEqual({ flag: { flagStatus: "complete" } });
+    expect(calls[0]!.body).toEqual({ flag: { flagStatus: "complete" } });
   });
 
   test("archive MOVEs the message to the archive folder (no PATCH)", async () => {
@@ -184,16 +184,16 @@ describe("Microsoft thread label mutations (token-direct, MS Graph)", () => {
     const r = await archiveThread(msToken, "C3");
     expect(r.success).toBe(true);
     expect(calls).toHaveLength(1);
-    expect(calls[0].method).toBe("POST");
-    expect(calls[0].url).toBe("https://graph.microsoft.com/v1.0/me/messages/C3/move");
-    expect(calls[0].body).toEqual({ destinationId: "archive" });
+    expect(calls[0]!.method).toBe("POST");
+    expect(calls[0]!.url).toBe("https://graph.microsoft.com/v1.0/me/messages/C3/move");
+    expect(calls[0]!.body).toEqual({ destinationId: "archive" });
   });
 
   test("delete MOVEs the message to deleteditems", async () => {
     mockFetch();
     await deleteThread(msToken, "C4");
-    expect(calls[0].url).toBe("https://graph.microsoft.com/v1.0/me/messages/C4/move");
-    expect(calls[0].body).toEqual({ destinationId: "deleteditems" });
+    expect(calls[0]!.url).toBe("https://graph.microsoft.com/v1.0/me/messages/C4/move");
+    expect(calls[0]!.body).toEqual({ destinationId: "deleteditems" });
   });
 });
 

@@ -44,13 +44,13 @@ describe("SuperhumanDraftProvider", () => {
       const mockFetch = mock(async () => {
         return new Response(JSON.stringify({ threadList: [] }));
       });
-      globalThis.fetch = mockFetch;
+      globalThis.fetch = mockFetch as any;
 
       const provider = new SuperhumanDraftProvider(mockToken);
       await provider.listDrafts();
 
       expect(mockFetch).toHaveBeenCalledTimes(1);
-      const [url, options] = mockFetch.mock.calls[0] as [string, RequestInit];
+      const [url, options] = mockFetch.mock.calls[0] as unknown as [string, RequestInit];
 
       expect(url).toBe("https://mail.superhuman.com/~backend/v3/userdata.getThreads");
       expect(options.method).toBe("POST");
@@ -93,7 +93,7 @@ describe("SuperhumanDraftProvider", () => {
 
       globalThis.fetch = mock(async () => {
         return new Response(JSON.stringify(mockResponse));
-      });
+      }) as any;
 
       const provider = new SuperhumanDraftProvider(mockToken);
       const drafts = await provider.listDrafts();
@@ -138,7 +138,7 @@ describe("SuperhumanDraftProvider", () => {
         ],
       };
 
-      globalThis.fetch = mock(async () => new Response(JSON.stringify(mockResponse)));
+      globalThis.fetch = mock(async () => new Response(JSON.stringify(mockResponse))) as any;
 
       const provider = new SuperhumanDraftProvider(mockToken);
       const drafts = await provider.listDrafts();
@@ -170,7 +170,7 @@ describe("SuperhumanDraftProvider", () => {
         ],
       };
 
-      globalThis.fetch = mock(async () => new Response(JSON.stringify(mockResponse)));
+      globalThis.fetch = mock(async () => new Response(JSON.stringify(mockResponse))) as any;
 
       const provider = new SuperhumanDraftProvider(mockToken);
       const drafts = await provider.listDrafts();
@@ -182,7 +182,7 @@ describe("SuperhumanDraftProvider", () => {
     it("should return empty array when threadList is empty", async () => {
       globalThis.fetch = mock(async () => {
         return new Response(JSON.stringify({ threadList: [] }));
-      });
+      }) as any;
 
       const provider = new SuperhumanDraftProvider(mockToken);
       const drafts = await provider.listDrafts();
@@ -224,7 +224,7 @@ describe("SuperhumanDraftProvider", () => {
 
       globalThis.fetch = mock(async () => {
         return new Response(JSON.stringify(mockResponse));
-      });
+      }) as any;
 
       const provider = new SuperhumanDraftProvider(mockToken);
       const drafts = await provider.listDrafts();
@@ -284,7 +284,7 @@ describe("SuperhumanDraftProvider", () => {
 
       globalThis.fetch = mock(async () => {
         return new Response(JSON.stringify(mockResponse));
-      });
+      }) as any;
 
       const provider = new SuperhumanDraftProvider(mockToken);
       const drafts = await provider.listDrafts();

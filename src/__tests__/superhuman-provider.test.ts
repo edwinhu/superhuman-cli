@@ -24,7 +24,7 @@ describe("SuperhumanProvider", () => {
     expect(token.accessToken).toBe(sampleToken.token);
     expect(token.email).toBe(sampleToken.email);
     expect(token.isMicrosoft).toBe(false);
-    expect(token.expires).toBe(sampleToken.expires);
+    expect(token.expires).toBe(sampleToken.expires!);
     // superhumanToken nested field should also be set
     expect(token.superhumanToken).toEqual({
       token: sampleToken.token,
@@ -54,7 +54,7 @@ describe("SuperhumanProvider", () => {
   test("getAccountInfo() returns provider: superhuman", async () => {
     const provider = new SuperhumanProvider(sampleToken);
     const info = await provider.getAccountInfo();
-    expect(info).toEqual({
+    expect(info as unknown as Record<string, unknown>).toEqual({
       email: "user@example.com",
       isMicrosoft: false,
       provider: "superhuman",
@@ -117,7 +117,7 @@ describe("SuperhumanProvider", () => {
       expect(result).toEqual({ ok: true });
       expect(mockFetch).toHaveBeenCalledTimes(1);
 
-      const [url, opts] = mockFetch.mock.calls[0] as [string, RequestInit];
+      const [url, opts] = mockFetch.mock.calls[0] as unknown as [string, RequestInit];
       expect(url).toBe(
         "https://mail.superhuman.com/~backend/v3/userdata.getThreads"
       );

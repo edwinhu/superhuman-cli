@@ -13,8 +13,8 @@ class MockProvider implements IDraftProvider {
   readonly source: Draft["source"];
   private drafts: Draft[];
 
-  constructor(source: Draft["source"], drafts: Draft[]) {
-    this.source = source;
+  constructor(source: string, drafts: Draft[]) {
+    this.source = source as Draft["source"];
     this.drafts = drafts;
   }
 
@@ -31,7 +31,7 @@ describe("DraftService", () => {
 
   describe("listDrafts", () => {
     it("should merge drafts from multiple providers", async () => {
-      const gmailDrafts: Draft[] = [
+      const gmailDrafts: any[] = [
         {
           id: "gmail-1",
           subject: "Gmail Draft 1",
@@ -39,7 +39,7 @@ describe("DraftService", () => {
           to: ["recipient@example.com"],
           preview: "Gmail preview 1",
           timestamp: "2024-02-08T12:00:00Z",
-          source: "gmail",
+          source: "gmail" as any,
         },
         {
           id: "gmail-2",
@@ -48,11 +48,11 @@ describe("DraftService", () => {
           to: ["other@example.com"],
           preview: "Gmail preview 2",
           timestamp: "2024-02-08T12:30:00Z",
-          source: "gmail",
+          source: "gmail" as any,
         },
       ];
 
-      const outlookDrafts: Draft[] = [
+      const outlookDrafts: any[] = [
         {
           id: "outlook-1",
           subject: "Outlook Draft 1",
@@ -60,7 +60,7 @@ describe("DraftService", () => {
           to: ["someone@example.com"],
           preview: "Outlook preview 1",
           timestamp: "2024-02-08T13:00:00Z",
-          source: "outlook",
+          source: "outlook" as any,
         },
       ];
 
@@ -71,10 +71,10 @@ describe("DraftService", () => {
       const drafts = await service.listDrafts();
 
       expect(drafts).toHaveLength(3);
-      expect(drafts.some((d) => d.source === "gmail")).toBe(true);
-      expect(drafts.some((d) => d.source === "outlook")).toBe(true);
-      expect(drafts.filter((d) => d.source === "gmail")).toHaveLength(2);
-      expect(drafts.filter((d) => d.source === "outlook")).toHaveLength(1);
+      expect(drafts.some((d) => d.source === ("gmail" as string))).toBe(true);
+      expect(drafts.some((d) => d.source === ("outlook" as string))).toBe(true);
+      expect(drafts.filter((d) => d.source === ("gmail" as string))).toHaveLength(2);
+      expect(drafts.filter((d) => d.source === ("outlook" as string))).toHaveLength(1);
     });
 
     it("should return empty array when no providers", async () => {
@@ -85,13 +85,13 @@ describe("DraftService", () => {
 
     it("should handle provider errors gracefully", async () => {
       const errorProvider: IDraftProvider = {
-        source: "gmail",
+        source: "gmail" as any,
         async listDrafts() {
           throw new Error("Provider failed");
         },
       };
 
-      const successDrafts: Draft[] = [
+      const successDrafts: any[] = [
         {
           id: "outlook-1",
           subject: "Outlook Draft",
@@ -99,7 +99,7 @@ describe("DraftService", () => {
           to: ["recipient@example.com"],
           preview: "Works!",
           timestamp: "2024-02-08T12:00:00Z",
-          source: "outlook",
+          source: "outlook" as any,
         },
       ];
       const successProvider = new MockProvider("outlook", successDrafts);
@@ -109,7 +109,7 @@ describe("DraftService", () => {
 
       // Should still return drafts from the working provider
       expect(drafts).toHaveLength(1);
-      expect(drafts[0].source).toBe("outlook");
+      expect(drafts[0]!.source as string).toBe("outlook");
     });
   });
 

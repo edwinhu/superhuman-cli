@@ -279,7 +279,7 @@ function parseFromField(from: any): { email: string; name: string } {
   if (!from) return { email: "", name: "" };
   if (typeof from === "string") {
     const m = from.match(/^(.+?)\s*<(.+?)>$/);
-    if (m) return { name: m[1].trim(), email: m[2].trim() };
+    if (m) return { name: m[1]!.trim(), email: m[2]!.trim() };
     return { email: from, name: from };
   }
   return {

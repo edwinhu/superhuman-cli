@@ -49,7 +49,7 @@ export function stripQuotedReply(text: string): string {
   let cut = lines.length;
 
   for (let i = 0; i < lines.length; i++) {
-    const line = lines[i].trim();
+    const line = lines[i]!.trim();
 
     // "On <...> wrote:" — may wrap across up to 3 lines before "wrote:".
     if (/^On\b/.test(line)) {
@@ -112,5 +112,5 @@ export function stripQuotedReply(text: string): string {
 export function extractLatestMessage(ftsBody: string): string {
   const segments = splitMessages(ftsBody);
   if (segments.length === 0) return "";
-  return stripQuotedReply(segments[segments.length - 1]);
+  return stripQuotedReply(segments[segments.length - 1]!);
 }

@@ -74,12 +74,12 @@ describe("token persistence", () => {
       const data = (await file.json()) as PersistedTokens;
       expect(data.version).toBe(1);
       expect(data.accounts["test1@example.com"]).toBeDefined();
-      expect(data.accounts["test1@example.com"].type).toBe("google");
-      expect(data.accounts["test1@example.com"].accessToken).toBe(
+      expect(data.accounts["test1@example.com"]!.type).toBe("google");
+      expect(data.accounts["test1@example.com"]!.accessToken).toBe(
         "test-token-1"
       );
       expect(data.accounts["test2@outlook.com"]).toBeDefined();
-      expect(data.accounts["test2@outlook.com"].type).toBe("microsoft");
+      expect(data.accounts["test2@outlook.com"]!.type).toBe("microsoft");
       expect(data.lastUpdated).toBeGreaterThan(0);
     });
 

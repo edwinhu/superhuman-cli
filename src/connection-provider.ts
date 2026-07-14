@@ -183,9 +183,9 @@ export async function resolveProvider(
   // Try cached accounts — getCachedToken() will attempt CDP refresh if expired
   const accounts = getCachedAccounts();
   if (accounts.length > 0) {
-    const token = await getCachedToken(accounts[0]);
+    const token = await getCachedToken(accounts[0]!);
     if (token) {
-      return providerFromToken(token, accounts[0]);
+      return providerFromToken(token, accounts[0]!);
     }
     // Token expired and CDP refresh failed — return CachedTokenProvider so
     // caller gets a meaningful error rather than falling through to CDP auth

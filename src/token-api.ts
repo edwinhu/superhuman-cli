@@ -54,7 +54,7 @@ export interface TokenInfo {
   /** Superhuman backend JWT — the primary token for all API operations */
   superhumanToken?: {
     token: string;
-    expires: number;
+    expires?: number;
   };
 }
 
@@ -189,7 +189,7 @@ export function selectBestToken(
   for (const t of forAccount) {
     try {
       const payload = JSON.parse(
-        Buffer.from(t.token.split(".")[1], "base64url").toString()
+        Buffer.from(t.token.split(".")[1]!, "base64url").toString()
       );
       if (payload.iss?.includes("securetoken.googleapis.com")) {
         return t.token;
@@ -313,7 +313,7 @@ export async function extractTokenChrome(
   let accessTokenExpires = authData.expires;
   try {
     const payload = JSON.parse(
-      Buffer.from(accessToken.split(".")[1], "base64url").toString()
+      Buffer.from(accessToken.split(".")[1]!, "base64url").toString()
     );
     if (payload.exp) accessTokenExpires = payload.exp * 1000;
   } catch {}
@@ -330,7 +330,7 @@ export async function extractTokenChrome(
       ? (() => {
           try {
             const p = JSON.parse(
-              Buffer.from(bestToken.split(".")[1], "base64url").toString()
+              Buffer.from(bestToken.split(".")[1]!, "base64url").toString()
             );
             return p.exp ? p.exp * 1000 : undefined;
           } catch {
@@ -1199,7 +1199,7 @@ export async function getThreadInfoSuperhuman(
     entries.sort(([, a], [, b]) => dateOf(a) - dateOf(b));
 
     // Get the last message (most recent) for reply metadata
-    const lastMsg = entries[entries.length - 1][1];
+    const lastMsg = entries[entries.length - 1]![1];
     const msg = lastMsg.message || lastMsg.draft || lastMsg;
 
     return {
@@ -1497,7 +1497,7 @@ function decodeJwtPayload(jwt: string): Record<string, unknown> {
   const parts = jwt.split(".");
   if (parts.length !== 3) return {};
   try {
-    const payload = Buffer.from(parts[1], "base64url").toString("utf-8");
+    const payload = Buffer.from(parts[1]!, "base64url").toString("utf-8");
     return JSON.parse(payload);
   } catch {
     return {};
