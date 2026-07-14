@@ -443,6 +443,10 @@ describe("inbox without portal (no CDP connection)", () => {
 // ---------------------------------------------------------------------------
 
 import * as sqliteSearch from "../sqlite-search";
+// Snapshot REAL exports before any mock.module runs — restoring to the live
+// `sqliteSearch` namespace is self-defeating (mock.module mutates its bindings),
+// so a stable snapshot is what prevents cross-file mock leakage.
+const REAL_SQLITE = { ...sqliteSearch };
 
 /** Build a fake ListInboxRow[] with parsed JSON thread data */
 function makeSQLiteRows(count: number, opts?: { allUnread?: boolean }): sqliteSearch.ListInboxRow[] {
@@ -484,7 +488,7 @@ describe("listInbox SQLite-first path", () => {
     expect(threads[0]!.subject).toBe("SQLite Subject 0");
     expect(threads[0]!.from.email).toBe("sqlite0@example.com");
 
-    mock.module("../sqlite-search", () => sqliteSearch);
+    mock.module("../sqlite-search", () => REAL_SQLITE);
   });
 
   test("falls back to portal when SQLite returns null", async () => {
@@ -502,7 +506,7 @@ describe("listInbox SQLite-first path", () => {
     expect(portalMock).toHaveBeenCalledTimes(1);
     expect(threads).toHaveLength(2);
 
-    mock.module("../sqlite-search", () => sqliteSearch);
+    mock.module("../sqlite-search", () => REAL_SQLITE);
   });
 
   test("SQLite path respects unreadOnly filter", async () => {
@@ -521,7 +525,7 @@ describe("listInbox SQLite-first path", () => {
     expect(threads).toHaveLength(1);
     expect(threads[0]!.labelIds).toContain("UNREAD");
 
-    mock.module("../sqlite-search", () => sqliteSearch);
+    mock.module("../sqlite-search", () => REAL_SQLITE);
   });
 
   test("SQLite path respects splitInbox option (passes correct listId)", async () => {
@@ -540,6 +544,6 @@ describe("listInbox SQLite-first path", () => {
     const [emailArg, listIdArg] = dbMock.mock.calls[0] as [string, string, number];
     expect(listIdArg).toBe("SH_IMPORTANT");
 
-    mock.module("../sqlite-search", () => sqliteSearch);
+    mock.module("../sqlite-search", () => REAL_SQLITE);
   });
 });

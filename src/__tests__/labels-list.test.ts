@@ -8,6 +8,10 @@ import type { SuperhumanTokenInfo } from "../superhuman-provider";
 import type { SuperhumanConnection } from "../superhuman-api";
 import { listLabels, listStarred } from "../labels";
 import * as sqliteSearch from "../sqlite-search";
+// Snapshot REAL exports before any mock.module runs — restoring to the live
+// `sqliteSearch` namespace is self-defeating (mock.module mutates its bindings),
+// so a stable snapshot is what prevents cross-file mock leakage.
+const REAL_SQLITE = { ...sqliteSearch };
 
 const sampleToken: SuperhumanTokenInfo = {
   token: "test-jwt-token",
@@ -98,12 +102,12 @@ describe("listStarred", () => {
   // override explicitly before each test here.
   beforeEach(() => {
     mock.module("../sqlite-search", () => ({
-      ...sqliteSearch,
+      ...REAL_SQLITE,
       listInboxFromDB: () => null,
     }));
   });
   afterAll(() => {
-    mock.module("../sqlite-search", () => sqliteSearch);
+    mock.module("../sqlite-search", () => REAL_SQLITE);
   });
 
   test("calls portalInvoke with STARRED listId", async () => {

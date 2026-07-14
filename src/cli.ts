@@ -25,6 +25,7 @@ import {
 import { listInbox, searchInbox, streamListInbox, streamSearchInbox } from "./inbox";
 import type { InboxThread } from "./inbox";
 import { searchDirect, listLocalAccounts, lookupThreadInfoById, getThreadBodiesFromDB, resolveContactsByEmail } from "./sqlite-search";
+// listLocalAccounts doubles as the CDP-free account enumerator for `sync`.
 import { extractLatestMessage } from "./quote-strip";
 import { saveDraftMeta, loadDraftMeta, deleteDraftMeta } from "./draft-cache";
 import { listAccounts, listAccountsChrome, switchAccount, type Account } from "./accounts";
@@ -74,7 +75,7 @@ import { SuperhumanProvider } from "./superhuman-provider";
 import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 
-const VERSION = "0.38.2";
+const VERSION = "0.38.3";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9252", 10);
 
 /**
@@ -1308,25 +1309,41 @@ async function cmdSync(options: CliOptions) {
   const maxAgeMs = Math.max(0, options.syncMaxAgeMinutes) * 60_000;
   const timeoutMs = Math.max(0, options.syncTimeoutSeconds) * 1000;
 
-  const targets = options.account
+  // Prefer the live background_page enumeration (ground truth for "what's
+  // linked" this session). When the app isn't running with the debug port that
+  // returns [] — fall back to a pure on-disk scan of the OPFS caches so `sync`
+  // still works offline. This is essential for `--check`, which is a filesystem
+  // staleness report that needs no CDP at all: without the fallback it used to
+  // hard-exit with "No linked accounts found" the moment the app was closed,
+  // defeating its own purpose (and the morning-briefing freshness gate).
+  let targets = options.account
     ? [options.account]
     : await listSyncableAccounts(options.port);
+  let enumeratedFromDisk = false;
+  if (targets.length === 0 && !options.account) {
+    targets = listLocalAccounts();
+    enumeratedFromDisk = targets.length > 0;
+  }
 
-  if (targets.length === 0) {
-    if (options.account) {
-      // Fall through — ensureAccountSynced will report no-connection/no-context.
-    } else {
-      error("No linked accounts found (background_page unreachable — is Superhuman.app running with --remote-debugging-port?)");
-      process.exit(1);
-    }
+  if (targets.length === 0 && !options.account) {
+    error("No linked accounts found — none reachable via the app (is Superhuman running with --remote-debugging-port?) and no cached account blobs found on disk.");
+    process.exit(1);
   }
 
   if (options.check) {
-    const report = targets.map((email) => ({ email, freshness: getAccountFreshness(email) }));
+    const report = targets.map((email) => ({
+      email,
+      source: enumeratedFromDisk ? "disk" : "app",
+      freshness: getAccountFreshness(email),
+    }));
     if (options.json) {
+      // Backward-compatible array shape; each entry gains a `source` field.
       printJson(report);
     } else {
       log("Local cache staleness report:");
+      if (enumeratedFromDisk) {
+        log(`  ${colors.dim}(app not reachable over CDP — accounts enumerated from on-disk caches)${colors.reset}`);
+      }
       for (const r of report) log(formatFreshnessLine(r.email, r.freshness));
     }
     return;

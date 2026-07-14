@@ -409,18 +409,31 @@ export async function searchDirect(options: DirectSearchOptions): Promise<Direct
 }
 
 /**
- * List all accounts that have a local Superhuman SQLite database.
+ * Enumerate every account that has a local OPFS SQLite cache on disk — a pure
+ * filesystem scan, no CDP / no running app required. This is the CDP-free
+ * counterpart to `listSyncableAccounts()` (which reads the live background_page
+ * iframes): used for cross-account fallback (contacts/attachments), for cache
+ * staleness reporting (`sync --check`), and as an account-enumeration fallback
+ * when Superhuman isn't running with the debug port.
+ *
+ * Applies the same desktop-over-browser root precedence as `findOPFSBlob`: the
+ * desktop app's data dir is authoritative and holds a blob for EVERY linked
+ * account, so browser roots are consulted ONLY when no desktop data dir exists.
+ * (Previously this scanned browser roots only, so it returned nothing on a
+ * desktop-app install — silently breaking every fallback that relies on it.)
  */
 export function listLocalAccounts(): string[] {
+  const desktopRoots = DESKTOP_ROOTS.filter((r) => existsSync(r));
+  const roots = desktopRoots.length > 0 ? desktopRoots : BROWSER_ROOTS;
+
   const accounts: string[] = [];
-  for (const root of BROWSER_ROOTS) {
+  for (const root of roots) {
     if (!existsSync(root)) continue;
-    const blobs = findBlobsInRoot(root);
-    for (const blobPath of blobs) {
+    for (const blobPath of findBlobsInRoot(root)) {
       const header = readOPFSHeader(blobPath);
       if (!header) continue;
       // Strip leading '/' and trailing '.sqlite3'
-      const email = header.replace(/^\//, "").replace(/\.sqlite3$/, "");
+      const email = header.replace(/^\//, "").replace(/\.sqlite3$/i, "");
       if (email.includes("@") && !accounts.includes(email)) {
         accounts.push(email);
       }
