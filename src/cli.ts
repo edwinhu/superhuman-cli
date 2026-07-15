@@ -1298,9 +1298,11 @@ function formatFreshnessLine(email: string, f: AccountFreshness | null): string 
  * `superhuman sync [--account <email>] [--max-age <min>] [--timeout <sec>] [--force] [--check] [--json]`
  *
  * Force-syncs a stale account's local OPFS SQLite cache by calling
- * `sync.start()` in that account's background_page iframe context — the fix
- * for the confirmed root cause where some accounts' sync engine is never
- * started for the Electron session lifetime (see
+ * `sync.start()` in that account's background sync context — the extension
+ * service worker (`backgrounds[email]._accountBackground`) on Chrome-extension
+ * deployments, or the Electron `background_page` iframe on the desktop app.
+ * Fixes the confirmed root cause where some accounts' sync engine is never
+ * started for the app-session lifetime (see
  * docs/investigations/2026-07-06_multi_account_staleness.md). Read-only /
  * sync-triggering only: never switches the visible account, never drives the
  * UI, never sends/composes anything.
@@ -1381,10 +1383,10 @@ async function cmdSync(options: CliOptions) {
         warn(`${email}: sync.start() called but no completed poll cycle observed within ${options.syncTimeoutSeconds}s`);
         break;
       case "no-connection":
-        error(`${email}: background_page unreachable — is Superhuman.app running with --remote-debugging-port?`);
+        error(`${email}: no Superhuman sync target reachable over CDP — is Superhuman running with --remote-debugging-port (extension service worker or desktop background_page)?`);
         break;
       case "no-context":
-        error(`${email}: no background_page iframe for this account (not a linked account in this session?)`);
+        error(`${email}: account not present in the live Superhuman session (not a linked account in this session?)`);
         break;
       case "error":
         error(`${email}: sync trigger failed — ${result.error || "unknown error"}`);

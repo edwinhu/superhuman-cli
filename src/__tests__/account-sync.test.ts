@@ -1,19 +1,27 @@
 /**
  * Tests for src/account-sync.ts — multi-account staleness detection + the
  * per-account force-sync trigger (root cause: some accounts' `sync` engine
- * is never `.start()`-ed for the Electron session lifetime — see
+ * is never `.start()`-ed for the app-session lifetime — see
  * docs/investigations/2026-07-06_multi_account_staleness.md).
  *
  * Two layers:
  *  - `computeFreshness` against an in-memory fixture DB (mirrors the real
  *    `threads`/`messages` schema) — no CDP, no blob extraction.
  *  - `ensureAccountSynced` with injected `getFreshness`/`connect` seams — no
- *    live app needed, mocks the background_page CDP surface.
+ *    live app needed, mocks the `SyncSession` CDP surface. The same seam
+ *    covers both deployment shapes (Chrome-extension service worker and
+ *    Electron background_page), since ensureAccountSynced only ever talks to
+ *    the backend-agnostic SyncSession.
  */
 import { test, expect, describe, beforeEach } from "bun:test";
 import { Database } from "bun:sqlite";
-import { computeFreshness, ensureAccountSynced, type AccountFreshness } from "../account-sync";
-import type { BgPageConn } from "../background-page-refresh";
+import {
+  computeFreshness,
+  ensureAccountSynced,
+  type AccountFreshness,
+  type EvalResult,
+  type SyncSession,
+} from "../account-sync";
 
 // ---------------------------------------------------------------------------
 // computeFreshness — pure SQL, fixture DB
@@ -64,7 +72,7 @@ describe("computeFreshness", () => {
 });
 
 // ---------------------------------------------------------------------------
-// ensureAccountSynced — mocked freshness + CDP seams (no live app needed)
+// ensureAccountSynced — mocked freshness + SyncSession seams (no live app)
 // ---------------------------------------------------------------------------
 
 function makeFreshness(ageMs: number | null): AccountFreshness {
@@ -73,6 +81,26 @@ function makeFreshness(ageMs: number | null): AccountFreshness {
     ageMs,
     threadCount: 10,
     messageCount: 20,
+  };
+}
+
+/**
+ * Build a fake SyncSession. `evaluate(email, expr)` receives the *built*
+ * expression string (via `build("window.background")`) so tests can branch on
+ * `expr.includes("sync.start()")` exactly as they did against the raw CDP
+ * evaluate seam.
+ */
+function fakeSession(
+  emails: string[],
+  evaluate: (email: string, expr: string) => EvalResult
+): SyncSession {
+  return {
+    kind: "extension",
+    emails,
+    async evaluateForAccount(email, build) {
+      return evaluate(email, build("window.background"));
+    },
+    async disconnect() {},
   };
 }
 
@@ -93,7 +121,7 @@ describe("ensureAccountSynced", () => {
     expect(connectCalled).toBe(false);
   });
 
-  test("stale account with no reachable background_page -> no-connection", async () => {
+  test("stale account with no reachable sync target -> no-connection", async () => {
     const result = await ensureAccountSynced("stale@example.com", {
       getFreshness: () => makeFreshness(999_999_999),
       connect: async () => null,
@@ -103,15 +131,11 @@ describe("ensureAccountSynced", () => {
     expect(result.reason).toBe("no-connection");
   });
 
-  test("stale account, connected, but no iframe context for this email -> no-context", async () => {
-    const fakeConn: BgPageConn = {
-      client: {} as any,
-      contextByEmail: new Map(),
-      frameByEmail: new Map(),
-    };
+  test("stale account, connected, but this email isn't in the session -> no-context", async () => {
+    const session = fakeSession([], () => ({ ok: true, value: null }));
     const result = await ensureAccountSynced("missing@example.com", {
       getFreshness: () => makeFreshness(999_999_999),
-      connect: async () => fakeConn,
+      connect: async () => session,
     });
 
     expect(result.synced).toBe(false);
@@ -120,28 +144,20 @@ describe("ensureAccountSynced", () => {
 
   test("stale account: calls sync.start(), polls _lastRunEnded until it advances -> synced", async () => {
     let evalCount = 0;
-    const fakeConn: BgPageConn = {
-      client: {
-        Runtime: {
-          evaluate: async ({ expression }: { expression: string }) => {
-            evalCount++;
-            if (expression.includes("sync.start()")) {
-              // Snapshot call: report a pre-call _lastRunEnded of 1000.
-              return { result: { value: { ok: true, lastRunEnded: 1000, isStarted: true } } };
-            }
-            // Poll calls: advance past 1000 on the 2nd poll.
-            const advanced = evalCount >= 3; // 1 snapshot + 2 polls
-            return { result: { value: advanced ? 2000 : 1000 } };
-          },
-        },
-      } as any,
-      contextByEmail: new Map([["stale@example.com", 42]]),
-      frameByEmail: new Map(),
-    };
+    const session = fakeSession(["stale@example.com"], (_email, expr) => {
+      evalCount++;
+      if (expr.includes("sync.start()")) {
+        // Snapshot call: report a pre-call _lastRunEnded of 1000.
+        return { ok: true, value: { ok: true, lastRunEnded: 1000, isStarted: true } };
+      }
+      // Poll calls: advance past 1000 on the 2nd poll.
+      const advanced = evalCount >= 3; // 1 snapshot + 2 polls
+      return { ok: true, value: advanced ? 2000 : 1000 };
+    });
 
     const result = await ensureAccountSynced("stale@example.com", {
       getFreshness: () => makeFreshness(999_999_999),
-      connect: async () => fakeConn,
+      connect: async () => session,
       pollIntervalMs: 1, // keep the test fast
       timeoutMs: 5000,
     });
@@ -151,24 +167,16 @@ describe("ensureAccountSynced", () => {
   });
 
   test("stale account: poller never advances within timeout -> timeout", async () => {
-    const fakeConn: BgPageConn = {
-      client: {
-        Runtime: {
-          evaluate: async ({ expression }: { expression: string }) => {
-            if (expression.includes("sync.start()")) {
-              return { result: { value: { ok: true, lastRunEnded: 1000, isStarted: true } } };
-            }
-            return { result: { value: 1000 } }; // never advances
-          },
-        },
-      } as any,
-      contextByEmail: new Map([["stuck@example.com", 7]]),
-      frameByEmail: new Map(),
-    };
+    const session = fakeSession(["stuck@example.com"], (_email, expr) => {
+      if (expr.includes("sync.start()")) {
+        return { ok: true, value: { ok: true, lastRunEnded: 1000, isStarted: true } };
+      }
+      return { ok: true, value: 1000 }; // never advances
+    });
 
     const result = await ensureAccountSynced("stuck@example.com", {
       getFreshness: () => makeFreshness(999_999_999),
-      connect: async () => fakeConn,
+      connect: async () => session,
       pollIntervalMs: 1,
       timeoutMs: 10, // tiny timeout so the test stays fast
     });
@@ -178,26 +186,18 @@ describe("ensureAccountSynced", () => {
   });
 
   test("poller shape unreadable (version drift): degrades to a timed wait, doesn't throw", async () => {
-    const fakeConn: BgPageConn = {
-      client: {
-        Runtime: {
-          evaluate: async ({ expression }: { expression: string }) => {
-            if (expression.includes("sync.start()")) {
-              // Simulate a renamed/missing poller: lastRunEnded is null.
-              return { result: { value: { ok: true, lastRunEnded: null, isStarted: true } } };
-            }
-            return { result: { value: null } };
-          },
-        },
-      } as any,
-      contextByEmail: new Map([["driftaccount@example.com", 9]]),
-      frameByEmail: new Map(),
-    };
+    const session = fakeSession(["driftaccount@example.com"], (_email, expr) => {
+      if (expr.includes("sync.start()")) {
+        // Simulate a renamed/missing poller: lastRunEnded is null.
+        return { ok: true, value: { ok: true, lastRunEnded: null, isStarted: true } };
+      }
+      return { ok: true, value: null };
+    });
 
     const start = Date.now();
     const result = await ensureAccountSynced("driftaccount@example.com", {
       getFreshness: () => makeFreshness(999_999_999),
-      connect: async () => fakeConn,
+      connect: async () => session,
       timeoutMs: 50, // degraded wait is capped at min(DEGRADED_WAIT_MS, timeoutMs)
     });
     const elapsed = Date.now() - start;
@@ -207,22 +207,15 @@ describe("ensureAccountSynced", () => {
     expect(elapsed).toBeGreaterThanOrEqual(40); // waited roughly the capped timeout
   });
 
-  test("eval throws entirely -> error result, doesn't throw", async () => {
-    const fakeConn: BgPageConn = {
-      client: {
-        Runtime: {
-          evaluate: async () => {
-            throw new Error("target closed");
-          },
-        },
-      } as any,
-      contextByEmail: new Map([["errors@example.com", 1]]),
-      frameByEmail: new Map(),
-    };
+  test("eval fails entirely -> error result, doesn't throw", async () => {
+    const session = fakeSession(["errors@example.com"], () => ({
+      ok: false,
+      error: "target closed",
+    }));
 
     const result = await ensureAccountSynced("errors@example.com", {
       getFreshness: () => makeFreshness(999_999_999),
-      connect: async () => fakeConn,
+      connect: async () => session,
     });
 
     expect(result.synced).toBe(false);
@@ -232,27 +225,19 @@ describe("ensureAccountSynced", () => {
 
   test("force: true bypasses the freshness short-circuit even when fresh", async () => {
     let connected = false;
-    const fakeConn: BgPageConn = {
-      client: {
-        Runtime: {
-          evaluate: async ({ expression }: { expression: string }) => {
-            if (expression.includes("sync.start()")) {
-              return { result: { value: { ok: true, lastRunEnded: 1, isStarted: true } } };
-            }
-            return { result: { value: 2 } }; // advances immediately
-          },
-        },
-      } as any,
-      contextByEmail: new Map([["fresh-but-forced@example.com", 3]]),
-      frameByEmail: new Map(),
-    };
+    const session = fakeSession(["fresh-but-forced@example.com"], (_email, expr) => {
+      if (expr.includes("sync.start()")) {
+        return { ok: true, value: { ok: true, lastRunEnded: 1, isStarted: true } };
+      }
+      return { ok: true, value: 2 }; // advances immediately
+    });
 
     const result = await ensureAccountSynced("fresh-but-forced@example.com", {
       force: true,
       getFreshness: () => makeFreshness(60_000), // very fresh
       connect: async () => {
         connected = true;
-        return fakeConn;
+        return session;
       },
       pollIntervalMs: 1,
     });
@@ -263,24 +248,16 @@ describe("ensureAccountSynced", () => {
   });
 
   test("no on-disk blob yet (getFreshness returns null) still attempts a sync", async () => {
-    const fakeConn: BgPageConn = {
-      client: {
-        Runtime: {
-          evaluate: async ({ expression }: { expression: string }) => {
-            if (expression.includes("sync.start()")) {
-              return { result: { value: { ok: true, lastRunEnded: 1, isStarted: true } } };
-            }
-            return { result: { value: 2 } };
-          },
-        },
-      } as any,
-      contextByEmail: new Map([["neverseen@example.com", 5]]),
-      frameByEmail: new Map(),
-    };
+    const session = fakeSession(["neverseen@example.com"], (_email, expr) => {
+      if (expr.includes("sync.start()")) {
+        return { ok: true, value: { ok: true, lastRunEnded: 1, isStarted: true } };
+      }
+      return { ok: true, value: 2 };
+    });
 
     const result = await ensureAccountSynced("neverseen@example.com", {
       getFreshness: () => null,
-      connect: async () => fakeConn,
+      connect: async () => session,
       pollIntervalMs: 1,
     });
 
