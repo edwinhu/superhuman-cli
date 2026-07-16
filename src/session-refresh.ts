@@ -66,6 +66,18 @@ interface GetTokensResponse {
 const DEFAULT_CDP_TIMEOUT_MS = 10_000;
 
 /**
+ * Per-target ceiling inside the page sweep.
+ *
+ * Without it, handing each call the whole remaining budget means the first tab
+ * that HANGS (rather than errors) consumes everything and the deadline then
+ * skips every later candidate — measured: a wedged tab burned 10002ms and the
+ * sweep yielded nothing while three responsive tabs sat further down the list.
+ * The sweep could only advance on a fast failure, never on a hang, which is the
+ * one failure mode it exists to survive. Responsive targets answer in ~20ms.
+ */
+const PER_TARGET_CAP_MS = 2_000;
+
+/**
  * Upper bound on a single CDP round-trip, and on the whole cookie read.
  *
  * Validated rather than trusted: an unparseable or non-positive value would
@@ -262,16 +274,17 @@ async function* readCookiesFromPageTargets(
     if (deadline.expired()) return;
     let client: CDP.Client | null = null;
     try {
+      const budget = () => Math.min(deadline.remaining(), PER_TARGET_CAP_MS);
       client = await withTimeout(
         CDP({ target: target.id, host, port }),
         "CDP attach (page)",
-        deadline.remaining()
+        budget()
       );
-      await withTimeout(client.Network.enable(), "Network.enable", deadline.remaining());
+      await withTimeout(client.Network.enable(), "Network.enable", budget());
       const { cookies } = await withTimeout(
         client.Network.getCookies({ urls: COOKIE_URLS }),
         "Network.getCookies",
-        deadline.remaining()
+        budget()
       );
       if (cookies?.length) yield cookies;
     } catch {
@@ -320,53 +333,19 @@ async function* readCookiesFromPageTargets(
 export async function readSessionCookieHeader(
   port = getCDPPort()
 ): Promise<string | null> {
-  for await (const header of cookieHeaderCandidates(port)) return header;
-  return null;
-}
-
-/**
- * Yield candidate Cookie headers, best first, lazily.
- *
- * Browser-level first, then each page target. Lazy on purpose: when the first
- * candidate authenticates, the page sweep never runs.
- *
- * Why more than one candidate — and why the caller must gate on AUTHENTICATION
- * rather than on cookies merely existing:
- *
- * `Storage.getCookies` reads the DEFAULT browser context. A page can live in a
- * different context (incognito, Target.createBrowserContext) or, on Electron, a
- * `webPreferences.partition: "persist:..."` session — each with its own cookie
- * jar. So the browser-level read can return cookies that are present but belong
- * to the wrong jar: a stale, signed-out login in the default context while the
- * live Superhuman session sits in a partition. Presence proves nothing —
- * cookies survive sign-out (see isSessionRefreshHealthy). Returning the first
- * non-empty header would hand back stale cookies and never fall back, which is
- * exactly the silent stale-token failure this module exists to prevent.
- */
-async function* cookieHeaderCandidates(
-  port: number,
-  deadline: Deadline = deadlineIn(cdpTimeoutMs())
-): AsyncGenerator<string> {
   const host = getCDPHost();
-  const seen = new Set<string>();
+  const deadline = deadlineIn(cdpTimeoutMs());
 
   const fromBrowser = toCookieHeader(
     (await readCookiesFromBrowserTarget(host, port, deadline)) ?? undefined
   );
-  if (fromBrowser) {
-    seen.add(fromBrowser);
-    yield fromBrowser;
-  }
+  if (fromBrowser) return fromBrowser;
 
   for await (const cookies of readCookiesFromPageTargets(host, port, deadline)) {
     const header = toCookieHeader(cookies);
-    // Skip a page whose jar is the same as one already tried (the common case
-    // on Chromium, where every page shares the default context).
-    if (header && !seen.has(header)) {
-      seen.add(header);
-      yield header;
-    }
+    if (header) return header;
   }
+  return null;
 }
 
 /**
@@ -376,17 +355,18 @@ async function* cookieHeaderCandidates(
  * another (incognito, or an Electron `webPreferences.partition`). So a populated
  * but stale default-context jar is returned without trying the page fallback.
  *
- * Gating on real authentication instead was tried and reverted: sessions.
- * getCsrfToken is NOT an auth check (measured: it returns 200 and a csrfToken
- * with bogus cookies, and with no Cookie header at all), so the only real proof
- * is sessions.getTokens — and looping that over every candidate turns a fast
- * "no session" failure into a full page sweep per account, which the read-hang
- * regression tests reject outright.
+ * Gating on real authentication instead was implemented and reverted, for two
+ * reasons. sessions.getCsrfToken is NOT an auth check — measured against the
+ * live backend it returns 200 and a csrfToken with bogus cookies, and with no
+ * Cookie header at all — so the only real proof is sessions.getTokens, and
+ * looping that over every candidate turns a fast "no session" failure into a
+ * full page sweep per account. That broke three read-hang regression tests, the
+ * suite guarding exactly this class of bug. A real regression is not worth a
+ * theoretical fix.
  *
- * Doing this properly means enumerating browserContextId from CDP.List and
+ * Doing it properly means enumerating browserContextId from CDP.List and
  * reading each context via Storage.getCookies({ browserContextId }) — no page
- * attach, no sweep, no cost when there is only the default context. Left for a
- * follow-up rather than shipped half-done.
+ * attach, no sweep, and no cost when only the default context exists. Follow-up.
  */
 
 /** Reject rather than wait forever — an unbounded CDP wait is the bug above. */
@@ -394,8 +374,14 @@ function withTimeout<T>(p: Promise<T>, what: string, ms = cdpTimeoutMs()): Promi
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms);
     p.then(
-      (v) => { clearTimeout(timer); resolve(v); },
-      (e) => { clearTimeout(timer); reject(e); }
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      }
     );
   });
 }
