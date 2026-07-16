@@ -17,8 +17,12 @@
  * token. Anything hitting a live API with the cached OAuth token — notably
  * `attachment download` — then 401'd until the user manually re-ran
  * `superhuman account auth`. This path needs no CDP scripting of extension
- * contexts: it only reads cookies (which page targets serve fine) and then
- * talks HTTP to Superhuman's backend.
+ * contexts: it only reads cookies, and then talks HTTP to Superhuman's
+ * backend.
+ *
+ * The cookie read goes to the browser-level target, not a page — page targets
+ * are subject to the same never-answers failure when their renderer is busy
+ * (see readSessionCookieHeader).
  *
  * The flow (reverse-engineered from the extension bundle,
  * `background/background_page.js` → `Credential.refreshSession()`):
@@ -45,7 +49,6 @@ import { getCDPHost, getCDPPort } from "./superhuman-api";
 import type { TokenInfo } from "./token-api";
 
 const ACCOUNTS_HOST = "https://accounts.superhuman.com";
-const COOKIE_URLS = [ACCOUNTS_HOST, "https://mail.superhuman.com"];
 
 /** Backend response shape for sessions.getTokens (fields we consume). */
 interface GetTokensResponse {
@@ -58,13 +61,58 @@ interface GetTokensResponse {
   };
 }
 
+/** Upper bound on the cookie read. Override with CDP_TIMEOUT_MS. */
+const CDP_TIMEOUT_MS = parseInt(process.env.CDP_TIMEOUT_MS || "10000", 10);
+
+/** Hosts whose cookies authenticate the backend calls below. */
+const COOKIE_HOSTS = ["accounts.superhuman.com", "mail.superhuman.com"];
+
+/**
+ * Does a cookie apply to `host`, per RFC 6265 domain-matching?
+ *
+ * A leading dot means the cookie covers the domain and its subdomains;
+ * otherwise it is host-only and must match exactly. Storage.getCookies returns
+ * the entire store with no `urls` filter, so this reproduces the scoping that
+ * Network.getCookies({ urls }) used to do for us — without it we would also
+ * pick up same-named cookies from other superhuman.com subdomains (media.*
+ * carries its own device-id) and send duplicates with the wrong values.
+ */
+function cookieAppliesToHost(domain: string, host: string): boolean {
+  const d = domain.toLowerCase();
+  const h = host.toLowerCase();
+  if (d.startsWith(".")) {
+    const base = d.slice(1);
+    return h === base || h.endsWith(`.${base}`);
+  }
+  return d === h;
+}
+
 /**
  * Read Superhuman's session cookies out of the live browser via CDP and
  * format them as a `Cookie` request header.
  *
- * Uses a page target: `Network.getCookies` reads the shared browser cookie
- * store (the `urls` argument selects the cookies, not the page's origin), and
- * unlike the extension's own targets, page targets respond to CDP reliably.
+ * Uses the BROWSER-level target (`Storage.getCookies`), not a page target.
+ *
+ * The extension's own targets refuse CDP attachment (see the module header),
+ * which is why this path reads cookies at all. But page targets are not a safe
+ * fallback either: a CDP command routed through a page goes through its
+ * renderer, and a busy renderer simply never answers. Measured against a live
+ * browser with six page targets, `Network.getCookies` hung indefinitely on one
+ * of them while the other five answered in milliseconds — and *which* target
+ * hangs drifts over time (a tab that hung on one probe answered three hours
+ * later, while a different tab had started hanging). It is not a property of a
+ * particular site, so no page target can be assumed responsive.
+ *
+ * That made the old `?? pages[0]` fallback a coin flip: with no Superhuman tab
+ * open it attached to an arbitrary tab, and if that tab's renderer was wedged
+ * the read never returned. A hang is not a rejection, so the surrounding
+ * try/catch could not convert it into the documented `null` — the caller just
+ * stopped, and on-demand refresh silently failed exactly as it did before this
+ * module existed.
+ *
+ * The browser target has no renderer, so nothing can wedge it, and it needs no
+ * Superhuman tab (or any tab) to be open. The read is still bounded, so a
+ * future stall degrades to `null` rather than hanging.
  *
  * Returns null when no browser is reachable or no Superhuman cookies exist.
  */
@@ -72,26 +120,34 @@ export async function readSessionCookieHeader(
   port = getCDPPort()
 ): Promise<string | null> {
   const host = getCDPHost();
-  let targets: any[];
+
+  // Attach to the browser endpoint by its websocket URL. Passing target:"browser"
+  // does not work: chrome-remote-interface treats a target string as a target id
+  // and looks it up in CDP.List(), which never contains the browser itself.
+  // CDP.Version() (not fetch) keeps discovery on the library's own transport,
+  // so callers that assert "no network call without a browser" still hold.
+  let browserWsUrl: string;
   try {
-    targets = await CDP.List({ host, port });
+    const ver = (await CDP.Version({ host, port })) as { webSocketDebuggerUrl?: string };
+    if (!ver.webSocketDebuggerUrl) return null;
+    browserWsUrl = ver.webSocketDebuggerUrl;
   } catch {
     return null;
   }
 
-  // Prefer a Superhuman tab, but any page target can read the cookie store.
-  const pages = targets.filter((t: any) => t.type === "page");
-  const target =
-    pages.find((t: any) => t.url.includes("superhuman.com")) ?? pages[0];
-  if (!target) return null;
-
   let client: CDP.Client | null = null;
   try {
-    client = await CDP({ target: target.id, host, port });
-    await client.Network.enable();
-    const { cookies } = await client.Network.getCookies({ urls: COOKIE_URLS });
+    client = await CDP({ target: browserWsUrl, host, port });
+    const { cookies } = await withTimeout(
+      client.Storage.getCookies({}),
+      "Storage.getCookies"
+    );
     if (!cookies?.length) return null;
-    return cookies.map((c) => `${c.name}=${c.value}`).join("; ");
+    const relevant = cookies.filter((c) =>
+      COOKIE_HOSTS.some((h) => cookieAppliesToHost(c.domain, h))
+    );
+    if (!relevant.length) return null;
+    return relevant.map((c) => `${c.name}=${c.value}`).join("; ");
   } catch {
     return null;
   } finally {
@@ -103,6 +159,17 @@ export async function readSessionCookieHeader(
       }
     }
   }
+}
+
+/** Reject rather than wait forever — an unbounded CDP wait is the bug above. */
+function withTimeout<T>(p: Promise<T>, what: string, ms = CDP_TIMEOUT_MS): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms);
+    p.then(
+      (v) => { clearTimeout(timer); resolve(v); },
+      (e) => { clearTimeout(timer); reject(e); }
+    );
+  });
 }
 
 /**

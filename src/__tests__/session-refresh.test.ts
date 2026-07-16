@@ -18,6 +18,27 @@ test("refreshViaSessionCookies returns null (never throws) with no browser", asy
     .toBeNull();
 });
 
+test("readSessionCookieHeader never attaches to a page target", async () => {
+  // The point of the browser-level read: a page target routes through a
+  // renderer, and a busy renderer never answers — measured live, one of six
+  // page targets hung indefinitely on Network.getCookies while five answered
+  // in milliseconds, and which one hangs drifts over time. Attaching to any
+  // page at all reintroduces that gamble, so assert we never enumerate them.
+  const CDP = (await import("chrome-remote-interface")).default as any;
+  const realList = CDP.List;
+  let listed = false;
+  CDP.List = async (...args: unknown[]) => {
+    listed = true;
+    return realList(...args);
+  };
+  try {
+    await readSessionCookieHeader(DEAD_PORT);
+    expect(listed).toBe(false);
+  } finally {
+    CDP.List = realList;
+  }
+});
+
 test("refreshViaSessionCookies short-circuits before any network call", async () => {
   // Without cookies it must not reach accounts.superhuman.com at all.
   const realFetch = globalThis.fetch;
