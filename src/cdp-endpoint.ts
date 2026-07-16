@@ -50,11 +50,23 @@ const DEFAULT_CHROME_PORT = 9222;
  * Is this target the product's Electron desktop app?
  *
  * The desktop app is the one exposing background_page.html; the Chrome
- * extension has no background_page at all. Matching on that rather than a URL
- * scheme is what distinguishes the two deployments here.
+ * extension has no background_page at all. That, not a URL scheme, is what
+ * distinguishes the deployments here.
+ *
+ * The host must still be ours. Electron ranks FIRST, so a false positive does
+ * not merely add noise — it beats the genuine tab and gets credential-reading
+ * code pointed at the impostor. A bare substring test accepted
+ * https://evil.example/superhuman/background_page.html; the sibling CLI had the
+ * same hole with /morgen/i and it ranked an attacker page ahead of the real one.
+ *
+ * file:// is allowed because a packaged app can serve background_page.html from
+ * its install dir; forging that needs local filesystem access, by which point
+ * the credential store is already readable.
  */
 function isElectronTarget(url: string): boolean {
-  return url.includes("background_page.html") && /superhuman/i.test(url);
+  if (!url.includes("background_page.html")) return false;
+  if (url.startsWith("file://")) return /superhuman/i.test(url);
+  return hostMatches(url, "superhuman.com");
 }
 
 /** Is this target the product's web app in a browser? */
