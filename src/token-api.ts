@@ -13,6 +13,7 @@ import {
   refreshAllViaBackgroundPage,
   refreshOneViaBackgroundPage,
 } from "./background-page-refresh";
+import { refreshViaSessionCookies } from "./session-refresh";
 
 /**
  * Full token info stored in the token cache.
@@ -607,6 +608,33 @@ export async function refreshTokenViaCDP(email: string): Promise<TokenInfo | und
       tokenCache.set(iframeRefreshed.email, iframeRefreshed);
       await saveTokensToDisk();
       return iframeRefreshed;
+    }
+  } catch {
+    // Fall through.
+  }
+
+  // ---- Superhuman-backend session refresh (works on Chrome-extension
+  //      deployments, where there is no Electron background_page) ----
+  // Mints fresh tokens via accounts.superhuman.com/~backend/v3/sessions.getTokens
+  // using the browser's long-lived Superhuman session cookies — the same call
+  // the app's own Credential.refreshSession() makes. Silent (cookie read +
+  // HTTPS; no navigation, no focus steal) and provider-agnostic: the backend
+  // returns the account's Google *or* Microsoft OAuth token.
+  //
+  // Without this, on a Chrome-extension deployment every refresh failed (the
+  // extension's service-worker/offscreen targets don't answer CDP at all), so
+  // callers used a stale token and live-API paths like `attachment download`
+  // 401'd until a manual `superhuman account auth`.
+  try {
+    const sessionRefreshed = await refreshViaSessionCookies(
+      email,
+      tokenCache.get(email),
+      port
+    );
+    if (sessionRefreshed) {
+      tokenCache.set(sessionRefreshed.email, sessionRefreshed);
+      await saveTokensToDisk();
+      return sessionRefreshed;
     }
   } catch {
     // Fall through.
