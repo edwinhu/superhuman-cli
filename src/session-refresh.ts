@@ -49,6 +49,8 @@ import { getCDPHost, getCDPPort } from "./superhuman-api";
 import type { TokenInfo } from "./token-api";
 
 const ACCOUNTS_HOST = "https://accounts.superhuman.com";
+/** URLs whose cookies the page-target fallback asks for. */
+const COOKIE_URLS = [ACCOUNTS_HOST, "https://mail.superhuman.com"];
 
 /** Backend response shape for sessions.getTokens (fields we consume). */
 interface GetTokensResponse {
@@ -87,45 +89,41 @@ function cookieAppliesToHost(domain: string, host: string): boolean {
   return d === h;
 }
 
-/**
- * Read Superhuman's session cookies out of the live browser via CDP and
- * format them as a `Cookie` request header.
- *
- * Uses the BROWSER-level target (`Storage.getCookies`), not a page target.
- *
- * The extension's own targets refuse CDP attachment (see the module header),
- * which is why this path reads cookies at all. But page targets are not a safe
- * fallback either: a CDP command routed through a page goes through its
- * renderer, and a busy renderer simply never answers. Measured against a live
- * browser with six page targets, `Network.getCookies` hung indefinitely on one
- * of them while the other five answered in milliseconds — and *which* target
- * hangs drifts over time (a tab that hung on one probe answered three hours
- * later, while a different tab had started hanging). It is not a property of a
- * particular site, so no page target can be assumed responsive.
- *
- * That made the old `?? pages[0]` fallback a coin flip: with no Superhuman tab
- * open it attached to an arbitrary tab, and if that tab's renderer was wedged
- * the read never returned. A hang is not a rejection, so the surrounding
- * try/catch could not convert it into the documented `null` — the caller just
- * stopped, and on-demand refresh silently failed exactly as it did before this
- * module existed.
- *
- * The browser target has no renderer, so nothing can wedge it, and it needs no
- * Superhuman tab (or any tab) to be open. The read is still bounded, so a
- * future stall degrades to `null` rather than hanging.
- *
- * Returns null when no browser is reachable or no Superhuman cookies exist.
- */
-export async function readSessionCookieHeader(
-  port = getCDPPort()
-): Promise<string | null> {
-  const host = getCDPHost();
+/** Shape both cookie reads return; only name/value/domain are used. */
+interface RawCookie {
+  name: string;
+  value: string;
+  domain: string;
+}
 
-  // Attach to the browser endpoint by its websocket URL. Passing target:"browser"
-  // does not work: chrome-remote-interface treats a target string as a target id
-  // and looks it up in CDP.List(), which never contains the browser itself.
-  // CDP.Version() (not fetch) keeps discovery on the library's own transport,
-  // so callers that assert "no network call without a browser" still hold.
+/** Build the Cookie header from a raw cookie list, or null if none apply. */
+function toCookieHeader(cookies: RawCookie[] | undefined): string | null {
+  if (!cookies?.length) return null;
+  const relevant = cookies.filter((c) =>
+    COOKIE_HOSTS.some((h) => cookieAppliesToHost(c.domain, h))
+  );
+  if (!relevant.length) return null;
+  return relevant.map((c) => `${c.name}=${c.value}`).join("; ");
+}
+
+/**
+ * Read cookies from the BROWSER-level target via Storage.getCookies.
+ *
+ * The browser endpoint has no renderer, so nothing can wedge it, and it needs
+ * no Superhuman tab — or any tab — to be open. This is the preferred route.
+ *
+ * Returns null (never throws) if the endpoint is unreachable or the browser
+ * does not serve Storage there, so the caller can fall back.
+ */
+async function readCookiesFromBrowserTarget(
+  host: string,
+  port: number
+): Promise<RawCookie[] | null> {
+  // Attach by websocket URL. target:"browser" does NOT work — chrome-remote-
+  // interface treats a target string as a target id and looks it up in
+  // CDP.List(), which never contains the browser itself. CDP.Version() (not
+  // fetch) keeps discovery on the library's transport, so callers asserting
+  // "no network call without a browser" still hold.
   let browserWsUrl: string;
   try {
     const ver = (await CDP.Version({ host, port })) as { webSocketDebuggerUrl?: string };
@@ -138,16 +136,12 @@ export async function readSessionCookieHeader(
   let client: CDP.Client | null = null;
   try {
     client = await CDP({ target: browserWsUrl, host, port });
+    if (!client.Storage?.getCookies) return null;
     const { cookies } = await withTimeout(
       client.Storage.getCookies({}),
       "Storage.getCookies"
     );
-    if (!cookies?.length) return null;
-    const relevant = cookies.filter((c) =>
-      COOKIE_HOSTS.some((h) => cookieAppliesToHost(c.domain, h))
-    );
-    if (!relevant.length) return null;
-    return relevant.map((c) => `${c.name}=${c.value}`).join("; ");
+    return cookies ?? null;
   } catch {
     return null;
   } finally {
@@ -159,6 +153,98 @@ export async function readSessionCookieHeader(
       }
     }
   }
+}
+
+/**
+ * Fallback: read cookies via a page target's Network.getCookies.
+ *
+ * Only reached when the browser target is unavailable. Tries Superhuman tabs
+ * first, then other pages, and — crucially — moves on to the next candidate
+ * when one does not answer within the timeout, rather than betting everything
+ * on a single tab.
+ */
+async function readCookiesFromPageTargets(
+  host: string,
+  port: number
+): Promise<RawCookie[] | null> {
+  let targets: any[];
+  try {
+    targets = await CDP.List({ host, port });
+  } catch {
+    return null;
+  }
+
+  const pages = targets.filter((t: any) => t.type === "page");
+  // Superhuman tabs first: most likely to be responsive and on the right profile.
+  const ordered = [
+    ...pages.filter((t: any) => t.url?.includes("superhuman.com")),
+    ...pages.filter((t: any) => !t.url?.includes("superhuman.com")),
+  ];
+
+  for (const target of ordered) {
+    let client: CDP.Client | null = null;
+    try {
+      client = await CDP({ target: target.id, host, port });
+      await withTimeout(client.Network.enable(), "Network.enable");
+      const { cookies } = await withTimeout(
+        client.Network.getCookies({ urls: COOKIE_URLS }),
+        "Network.getCookies"
+      );
+      if (cookies?.length) return cookies;
+    } catch {
+      // This target wedged or errored — try the next one.
+    } finally {
+      if (client) {
+        try {
+          await client.close();
+        } catch {
+          // ignore
+        }
+      }
+    }
+  }
+  return null;
+}
+
+/**
+ * Read Superhuman's session cookies out of the live browser via CDP and
+ * format them as a `Cookie` request header.
+ *
+ * Prefers the BROWSER-level target (`Storage.getCookies`), falling back to page
+ * targets (`Network.getCookies`).
+ *
+ * Why not page targets first: the extension's own targets refuse CDP attachment
+ * (see the module header), which is why this path reads cookies at all — but
+ * page targets are not dependable either. A CDP command routed through a page
+ * goes through its renderer, and a busy renderer simply never answers. Measured
+ * against a live browser with six page targets, `Network.getCookies` hung
+ * indefinitely on one while the other five answered in milliseconds, and *which*
+ * one hangs drifts (a tab that hung on one probe answered three hours later,
+ * while a different tab had started hanging). It tracks renderer busyness, not
+ * the site, so no page target can be assumed responsive. The browser endpoint
+ * has no renderer and cannot wedge.
+ *
+ * Why keep page targets at all: the browser-level read is verified against
+ * Chromium, but the desktop deployment is Electron (port 9252) and has not been
+ * verified to serve `Storage` on its browser endpoint. Falling back means the
+ * worst case there is the previous behaviour, not a regression.
+ *
+ * Both routes are bounded, and the fallback advances past a target that does
+ * not answer instead of betting on one tab — so a wedged renderer costs a
+ * timeout, not the refresh.
+ *
+ * Returns null when no browser is reachable or no Superhuman cookies exist.
+ */
+export async function readSessionCookieHeader(
+  port = getCDPPort()
+): Promise<string | null> {
+  const host = getCDPHost();
+
+  const fromBrowser = await readCookiesFromBrowserTarget(host, port);
+  const header = toCookieHeader(fromBrowser ?? undefined);
+  if (header) return header;
+
+  return toCookieHeader((await readCookiesFromPageTargets(host, port)) ?? undefined);
 }
 
 /** Reject rather than wait forever — an unbounded CDP wait is the bug above. */

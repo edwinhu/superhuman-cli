@@ -18,23 +18,30 @@ test("refreshViaSessionCookies returns null (never throws) with no browser", asy
     .toBeNull();
 });
 
-test("readSessionCookieHeader never attaches to a page target", async () => {
-  // The point of the browser-level read: a page target routes through a
-  // renderer, and a busy renderer never answers — measured live, one of six
-  // page targets hung indefinitely on Network.getCookies while five answered
-  // in milliseconds, and which one hangs drifts over time. Attaching to any
-  // page at all reintroduces that gamble, so assert we never enumerate them.
+test("readSessionCookieHeader prefers the browser target over page targets", async () => {
+  // Page targets route through a renderer, and a busy renderer never answers —
+  // measured live, one of six page targets hung indefinitely on
+  // Network.getCookies while five answered in milliseconds, and which one hangs
+  // drifts over time. So the browser target must be tried FIRST; page targets
+  // exist only as a fallback for deployments that may not serve Storage there.
   const CDP = (await import("chrome-remote-interface")).default as any;
+  const realVersion = CDP.Version;
   const realList = CDP.List;
-  let listed = false;
+  const order: string[] = [];
+  CDP.Version = async (...args: unknown[]) => {
+    order.push("browser");
+    return realVersion(...args);
+  };
   CDP.List = async (...args: unknown[]) => {
-    listed = true;
+    order.push("pages");
     return realList(...args);
   };
   try {
     await readSessionCookieHeader(DEAD_PORT);
-    expect(listed).toBe(false);
+    // Both may be attempted against a dead port; what matters is the order.
+    expect(order[0]).toBe("browser");
   } finally {
+    CDP.Version = realVersion;
     CDP.List = realList;
   }
 });
