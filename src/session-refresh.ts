@@ -63,23 +63,35 @@ interface GetTokensResponse {
   };
 }
 
-/** Upper bound on the cookie read. Override with CDP_TIMEOUT_MS. */
-const CDP_TIMEOUT_MS = parseInt(process.env.CDP_TIMEOUT_MS || "10000", 10);
+const DEFAULT_CDP_TIMEOUT_MS = 10_000;
+
+/**
+ * Upper bound on a single CDP round-trip, and on the whole cookie read.
+ *
+ * Validated rather than trusted: an unparseable or non-positive value would
+ * make setTimeout fire immediately (setTimeout(fn, NaN) is setTimeout(fn, 0)),
+ * so every call would "time out", the read would return null, and the caller
+ * would silently keep a stale token — a config typo turning into an invisible
+ * auth failure.
+ */
+function cdpTimeoutMs(): number {
+  const raw = process.env.CDP_TIMEOUT_MS;
+  if (!raw) return DEFAULT_CDP_TIMEOUT_MS;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n <= 0) return DEFAULT_CDP_TIMEOUT_MS;
+  return n;
+}
 
 /** Hosts whose cookies authenticate the backend calls below. */
 const COOKIE_HOSTS = ["accounts.superhuman.com", "mail.superhuman.com"];
 
 /**
- * Does a cookie apply to `host`, per RFC 6265 domain-matching?
+ * Does a cookie apply to `host`, per RFC 6265 §5.1.3 domain-matching?
  *
  * A leading dot means the cookie covers the domain and its subdomains;
- * otherwise it is host-only and must match exactly. Storage.getCookies returns
- * the entire store with no `urls` filter, so this reproduces the scoping that
- * Network.getCookies({ urls }) used to do for us — without it we would also
- * pick up same-named cookies from other superhuman.com subdomains (media.*
- * carries its own device-id) and send duplicates with the wrong values.
+ * otherwise it is host-only and must match exactly.
  */
-function cookieAppliesToHost(domain: string, host: string): boolean {
+export function cookieDomainMatches(domain: string, host: string): boolean {
   const d = domain.toLowerCase();
   const h = host.toLowerCase();
   if (d.startsWith(".")) {
@@ -89,21 +101,68 @@ function cookieAppliesToHost(domain: string, host: string): boolean {
   return d === h;
 }
 
-/** Shape both cookie reads return; only name/value/domain are used. */
+/**
+ * Does a cookie's path apply to `requestPath`, per RFC 6265 §5.1.4?
+ *
+ * Cookie-path "/" matches everything; "/foo" matches "/foo" and "/foo/bar" but
+ * NOT "/". Storage.getCookies takes no `urls` filter and returns the entire
+ * store, so without this we would admit cookies the browser would never send —
+ * Network.getCookies({ urls }) applied path scoping for us. A store holding
+ * `csrf=current; Path=/` alongside `csrf=old; Path=/legacy` would otherwise
+ * yield `csrf=current; csrf=old` and let the backend pick.
+ */
+export function cookiePathMatches(cookiePath: string, requestPath: string): boolean {
+  const p = cookiePath || "/";
+  if (p === requestPath) return true;
+  if (!requestPath.startsWith(p)) return false;
+  return p.endsWith("/") || requestPath[p.length] === "/";
+}
+
+/**
+ * Does a cookie apply to a request for `host` at `path` over HTTPS?
+ *
+ * Reproduces the scoping Network.getCookies({ urls: COOKIE_URLS }) did for us.
+ * Without it we would pick up same-named cookies from other superhuman.com
+ * subdomains (media.* carries its own device-id) and path-scoped duplicates.
+ */
+function cookieApplies(c: RawCookie, host: string, path: string): boolean {
+  if (!cookieDomainMatches(c.domain, host)) return false;
+  return cookiePathMatches(c.path ?? "/", path);
+}
+
+/** Shape both cookie reads return. */
 interface RawCookie {
   name: string;
   value: string;
   domain: string;
+  path?: string;
 }
 
+/** Path the backend calls actually hit — cookies must be in scope for it. */
+const BACKEND_PATH = "/~backend/v3/";
+
 /** Build the Cookie header from a raw cookie list, or null if none apply. */
-function toCookieHeader(cookies: RawCookie[] | undefined): string | null {
+export function toCookieHeader(cookies: RawCookie[] | undefined): string | null {
   if (!cookies?.length) return null;
   const relevant = cookies.filter((c) =>
-    COOKIE_HOSTS.some((h) => cookieAppliesToHost(c.domain, h))
+    COOKIE_HOSTS.some((h) => cookieApplies(c, h, BACKEND_PATH))
   );
   if (!relevant.length) return null;
   return relevant.map((c) => `${c.name}=${c.value}`).join("; ");
+}
+
+/** A deadline shared across every step of one cookie read. */
+interface Deadline {
+  remaining(): number;
+  expired(): boolean;
+}
+
+function deadlineIn(ms: number): Deadline {
+  const end = Date.now() + ms;
+  return {
+    remaining: () => Math.max(0, end - Date.now()),
+    expired: () => Date.now() >= end,
+  };
 }
 
 /**
@@ -117,7 +176,8 @@ function toCookieHeader(cookies: RawCookie[] | undefined): string | null {
  */
 async function readCookiesFromBrowserTarget(
   host: string,
-  port: number
+  port: number,
+  deadline: Deadline
 ): Promise<RawCookie[] | null> {
   // Attach by websocket URL. target:"browser" does NOT work — chrome-remote-
   // interface treats a target string as a target id and looks it up in
@@ -126,7 +186,11 @@ async function readCookiesFromBrowserTarget(
   // "no network call without a browser" still hold.
   let browserWsUrl: string;
   try {
-    const ver = (await CDP.Version({ host, port })) as { webSocketDebuggerUrl?: string };
+    const ver = (await withTimeout(
+      CDP.Version({ host, port }),
+      "CDP.Version",
+      deadline.remaining()
+    )) as { webSocketDebuggerUrl?: string };
     if (!ver.webSocketDebuggerUrl) return null;
     browserWsUrl = ver.webSocketDebuggerUrl;
   } catch {
@@ -135,14 +199,23 @@ async function readCookiesFromBrowserTarget(
 
   let client: CDP.Client | null = null;
   try {
-    client = await CDP({ target: browserWsUrl, host, port });
-    if (!client.Storage?.getCookies) return null;
+    // The attach itself must be bounded: a target can advertise a websocket
+    // endpoint and then never complete the handshake, which would hang here
+    // before any bounded command ran.
+    client = await withTimeout(
+      CDP({ target: browserWsUrl, host, port }),
+      "CDP attach (browser)",
+      deadline.remaining()
+    );
     const { cookies } = await withTimeout(
       client.Storage.getCookies({}),
-      "Storage.getCookies"
+      "Storage.getCookies",
+      deadline.remaining()
     );
     return cookies ?? null;
   } catch {
+    // Includes an Electron/browser that does not serve Storage on its browser
+    // endpoint — the command rejects and we fall back to page targets.
     return null;
   } finally {
     if (client) {
@@ -163,34 +236,44 @@ async function readCookiesFromBrowserTarget(
  * when one does not answer within the timeout, rather than betting everything
  * on a single tab.
  */
-async function readCookiesFromPageTargets(
+async function* readCookiesFromPageTargets(
   host: string,
-  port: number
-): Promise<RawCookie[] | null> {
+  port: number,
+  deadline: Deadline
+): AsyncGenerator<RawCookie[]> {
   let targets: any[];
   try {
-    targets = await CDP.List({ host, port });
+    targets = await withTimeout(CDP.List({ host, port }), "CDP.List", deadline.remaining());
   } catch {
-    return null;
+    return;
   }
 
   const pages = targets.filter((t: any) => t.type === "page");
-  // Superhuman tabs first: most likely to be responsive and on the right profile.
+  // Superhuman tabs first: most likely responsive and on the right profile.
   const ordered = [
     ...pages.filter((t: any) => t.url?.includes("superhuman.com")),
     ...pages.filter((t: any) => !t.url?.includes("superhuman.com")),
   ];
 
   for (const target of ordered) {
+    // One shared deadline across the whole sweep — otherwise N wedged tabs cost
+    // N x timeout (measured: a single wedged tab burns the full 10s), and a
+    // browser with dozens of tabs could stall the CLI for minutes.
+    if (deadline.expired()) return;
     let client: CDP.Client | null = null;
     try {
-      client = await CDP({ target: target.id, host, port });
-      await withTimeout(client.Network.enable(), "Network.enable");
+      client = await withTimeout(
+        CDP({ target: target.id, host, port }),
+        "CDP attach (page)",
+        deadline.remaining()
+      );
+      await withTimeout(client.Network.enable(), "Network.enable", deadline.remaining());
       const { cookies } = await withTimeout(
         client.Network.getCookies({ urls: COOKIE_URLS }),
-        "Network.getCookies"
+        "Network.getCookies",
+        deadline.remaining()
       );
-      if (cookies?.length) return cookies;
+      if (cookies?.length) yield cookies;
     } catch {
       // This target wedged or errored — try the next one.
     } finally {
@@ -203,7 +286,6 @@ async function readCookiesFromPageTargets(
       }
     }
   }
-  return null;
 }
 
 /**
@@ -238,17 +320,77 @@ async function readCookiesFromPageTargets(
 export async function readSessionCookieHeader(
   port = getCDPPort()
 ): Promise<string | null> {
-  const host = getCDPHost();
-
-  const fromBrowser = await readCookiesFromBrowserTarget(host, port);
-  const header = toCookieHeader(fromBrowser ?? undefined);
-  if (header) return header;
-
-  return toCookieHeader((await readCookiesFromPageTargets(host, port)) ?? undefined);
+  for await (const header of cookieHeaderCandidates(port)) return header;
+  return null;
 }
 
+/**
+ * Yield candidate Cookie headers, best first, lazily.
+ *
+ * Browser-level first, then each page target. Lazy on purpose: when the first
+ * candidate authenticates, the page sweep never runs.
+ *
+ * Why more than one candidate — and why the caller must gate on AUTHENTICATION
+ * rather than on cookies merely existing:
+ *
+ * `Storage.getCookies` reads the DEFAULT browser context. A page can live in a
+ * different context (incognito, Target.createBrowserContext) or, on Electron, a
+ * `webPreferences.partition: "persist:..."` session — each with its own cookie
+ * jar. So the browser-level read can return cookies that are present but belong
+ * to the wrong jar: a stale, signed-out login in the default context while the
+ * live Superhuman session sits in a partition. Presence proves nothing —
+ * cookies survive sign-out (see isSessionRefreshHealthy). Returning the first
+ * non-empty header would hand back stale cookies and never fall back, which is
+ * exactly the silent stale-token failure this module exists to prevent.
+ */
+async function* cookieHeaderCandidates(
+  port: number,
+  deadline: Deadline = deadlineIn(cdpTimeoutMs())
+): AsyncGenerator<string> {
+  const host = getCDPHost();
+  const seen = new Set<string>();
+
+  const fromBrowser = toCookieHeader(
+    (await readCookiesFromBrowserTarget(host, port, deadline)) ?? undefined
+  );
+  if (fromBrowser) {
+    seen.add(fromBrowser);
+    yield fromBrowser;
+  }
+
+  for await (const cookies of readCookiesFromPageTargets(host, port, deadline)) {
+    const header = toCookieHeader(cookies);
+    // Skip a page whose jar is the same as one already tried (the common case
+    // on Chromium, where every page shares the default context).
+    if (header && !seen.has(header)) {
+      seen.add(header);
+      yield header;
+    }
+  }
+}
+
+/**
+ * KNOWN LIMITATION — the first usable cookie jar wins.
+ *
+ * Storage.getCookies reads the DEFAULT browser context, and a page can live in
+ * another (incognito, or an Electron `webPreferences.partition`). So a populated
+ * but stale default-context jar is returned without trying the page fallback.
+ *
+ * Gating on real authentication instead was tried and reverted: sessions.
+ * getCsrfToken is NOT an auth check (measured: it returns 200 and a csrfToken
+ * with bogus cookies, and with no Cookie header at all), so the only real proof
+ * is sessions.getTokens — and looping that over every candidate turns a fast
+ * "no session" failure into a full page sweep per account, which the read-hang
+ * regression tests reject outright.
+ *
+ * Doing this properly means enumerating browserContextId from CDP.List and
+ * reading each context via Storage.getCookies({ browserContextId }) — no page
+ * attach, no sweep, no cost when there is only the default context. Left for a
+ * follow-up rather than shipped half-done.
+ */
+
 /** Reject rather than wait forever — an unbounded CDP wait is the bug above. */
-function withTimeout<T>(p: Promise<T>, what: string, ms = CDP_TIMEOUT_MS): Promise<T> {
+function withTimeout<T>(p: Promise<T>, what: string, ms = cdpTimeoutMs()): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error(`${what} timed out after ${ms}ms`)), ms);
     p.then(
@@ -259,18 +401,22 @@ function withTimeout<T>(p: Promise<T>, what: string, ms = CDP_TIMEOUT_MS): Promi
 }
 
 /**
- * Health probe: is the browser's Superhuman session usable for refresh?
+ * Health probe: are Superhuman session cookies reachable in the browser?
  *
- * Reads the cookies and exchanges them for a CSRF token — cheap, read-only,
- * and a real proof the session is live (cookie presence alone isn't: they
- * survive sign-out). Used by `superhuman doctor`.
+ * NOT a proof that the session is live. sessions.getCsrfToken returns 200 and a
+ * token even with bogus cookies, or none at all (measured against the live
+ * backend), so it cannot distinguish a signed-in session from a signed-out one
+ * — and cookies survive sign-out. Proving liveness needs sessions.getTokens,
+ * which requires an account and mints real credentials; too heavy for a probe.
+ *
+ * So this answers only "is there a browser with Superhuman cookies we could
+ * try", which is what `superhuman doctor` needs to decide whether to tell the
+ * user to relaunch an app. False positives are possible when signed out.
  */
 export async function isSessionRefreshHealthy(
   port = getCDPPort()
 ): Promise<boolean> {
-  const cookieHeader = await readSessionCookieHeader(port);
-  if (!cookieHeader) return false;
-  return (await getCsrfToken(cookieHeader)) !== null;
+  return (await readSessionCookieHeader(port)) !== null;
 }
 
 /** Fetch a CSRF token for the session (required by sessions.getTokens). */
