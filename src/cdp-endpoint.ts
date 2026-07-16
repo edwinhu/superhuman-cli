@@ -22,7 +22,7 @@
  * ECONNREFUSED unless the user knew to set CDP_PORT by hand.
  *
  * Ports (all overridable, see cdpPortCandidates):
- *   CDP_PORT           explicit single port; wins outright, skips probing
+ *   CDP_PORT           pin to one port (still listed; no other candidate tried)
  *   ELECTRON_CDP_PORT  the desktop app's port      (default below)
  *   CHROME_CDP_PORT    Chrome/Chromium's port      (default below)
  */
@@ -168,8 +168,11 @@ function envPort(name: string): number | undefined {
 /**
  * CDP endpoints to probe, in preference order: the desktop app, then the browser.
  *
- * An explicit CDP_PORT wins outright — if the user names a port, probing past it
- * would be second-guessing them.
+ * An explicit CDP_PORT pins the list to that one port: if the user names a port,
+ * probing past it would be second-guessing them. It does NOT skip discovery —
+ * that port is still listed to find targets on it, so a firewalled host costs
+ * one cdpTimeoutMs before failing. Naming a port is not the same as promising
+ * something is there.
  */
 export function cdpPortCandidates(): number[] {
   const explicit = envPort("CDP_PORT");

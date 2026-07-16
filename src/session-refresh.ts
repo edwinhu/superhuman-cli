@@ -46,7 +46,7 @@
  */
 import CDP from "chrome-remote-interface";
 import { getCDPHost } from "./superhuman-api";
-import { discoverEndpoint } from "./cdp-endpoint";
+import { classifyTarget, discoverEndpoint } from "./cdp-endpoint";
 import type { TokenInfo } from "./token-api";
 
 const ACCOUNTS_HOST = "https://accounts.superhuman.com";
@@ -273,9 +273,11 @@ async function* readCookiesFromPageTargets(
 
   const pages = targets.filter((t: any) => t.type === "page");
   // Superhuman tabs first: most likely responsive and on the right profile.
+  // classifyTarget rather than a substring — an impostor host must not be
+  // promoted ahead of the genuine tab.
   const ordered = [
-    ...pages.filter((t: any) => t.url?.includes("superhuman.com")),
-    ...pages.filter((t: any) => !t.url?.includes("superhuman.com")),
+    ...pages.filter((t: any) => classifyTarget(t) !== null),
+    ...pages.filter((t: any) => classifyTarget(t) === null),
   ];
 
   for (const target of ordered) {
