@@ -6,6 +6,7 @@
  */
 
 import CDP from "chrome-remote-interface";
+import { cdpPortCandidates, discoverEndpoint, noTargetHint } from "./cdp-endpoint";
 
 export interface SuperhumanConnection {
   client: CDP.Client;
@@ -36,17 +37,6 @@ export function getCDPPort(): number {
 }
 
 /**
- * Candidate CDP ports to probe when CDP_PORT isn't explicitly set.
- * 9252 = the Superhuman desktop (Electron) app — the one exposing
- * `background_page.html`, so it's tried first; 9250 = legacy Chrome-tab mode
- * (extension service worker); 9222 = generic Chromium default.
- */
-const CDP_PORT_CANDIDATES = [9252, 9250, 9222];
-
-// Cache the discovered port for the process lifetime to avoid re-probing.
-let discoveredPort: number | null = null;
-
-/**
  * Resolve the CDP port that actually hosts a Superhuman target.
  *
  * An explicit `CDP_PORT` env var always wins. Otherwise probe the candidate
@@ -59,42 +49,28 @@ let discoveredPort: number | null = null;
  * non-default port (e.g. the desktop app on 9252).
  */
 export async function discoverSuperhumanPort(): Promise<number> {
-  if (process.env.CDP_PORT) return parseInt(process.env.CDP_PORT, 10);
-  if (discoveredPort !== null) return discoveredPort;
-
-  const host = getCDPHost();
-  let pageFallback: number | null = null;
-
-  for (const port of CDP_PORT_CANDIDATES) {
-    let targets: any[];
-    try {
-      targets = await CDP.List({ host, port });
-    } catch {
-      continue; // port not listening
-    }
-    const hasBgPage = targets.some(
-      (t: any) =>
-        t.type === "page" &&
-        t.url.includes("background_page.html") &&
-        t.url.includes("superhuman")
-    );
-    if (hasBgPage) {
-      discoveredPort = port;
-      return port;
-    }
-    if (
-      pageFallback === null &&
-      targets.some(
-        (t: any) => t.type === "page" && t.url.includes("mail.superhuman.com")
-      )
-    ) {
-      pageFallback = port;
-    }
+  // Delegates to the shared discovery so there is exactly ONE implementation of
+  // "find the endpoint": same candidates, same ELECTRON_CDP_PORT/CHROME_CDP_PORT
+  // overrides, same skip-a-port-serving-something-else rule.
+  //
+  // There used to be two. This one probed a fixed [9252, 9250, 9222] and ignored
+  // the env overrides entirely, and because token-api's refresh paths call it
+  // FIRST and thread the result into readSessionCookieHeader — which treats a
+  // supplied port as authoritative — the legacy answer always won. With
+  // CHROME_CDP_PORT=9333 and nothing on the fixed candidates, refresh passed
+  // 9252, read no cookies, kept the stale token, and the 401 it exists to fix
+  // came back.
+  //
+  // Falls back to getCDPPort() rather than throwing: callers rely on this
+  // returning a port, and a bad port fails later with a better message than a
+  // discovery exception here would give.
+  try {
+    return (await discoverEndpoint()).port;
+  } catch {
+    return getCDPPort();
   }
-
-  discoveredPort = pageFallback ?? getCDPPort();
-  return discoveredPort;
 }
+
 
 /**
  * Check if Superhuman is running with CDP enabled
@@ -118,13 +94,7 @@ export async function ensureSuperhuman(port = getCDPPort()): Promise<boolean> {
     return true;
   }
   const host = getCDPHost();
-  console.error(
-    `Superhuman not reachable at ${host}:${port}.\n` +
-    `Probed ports ${CDP_PORT_CANDIDATES.join(", ")} for a Superhuman target and found none.\n` +
-    `Launch the desktop app with remote debugging, e.g.:\n` +
-    `  /Applications/Superhuman.app/Contents/MacOS/Superhuman --remote-debugging-port=9252\n` +
-    `If it is running on a different port, pass --port <n> or set CDP_PORT.`
-  );
+  console.error(`Superhuman not reachable at ${host}:${port}.\n` + noTargetHint(cdpPortCandidates()));
   return false;
 }
 

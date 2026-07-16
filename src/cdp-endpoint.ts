@@ -59,7 +59,7 @@ function isElectronTarget(url: string): boolean {
 
 /** Is this target the product's web app in a browser? */
 function isWebTarget(url: string): boolean {
-  return url.includes("superhuman.com");
+  return hostMatches(url, "superhuman.com");
 }
 
 /** Command that starts the desktop app with CDP, per platform. */
@@ -82,7 +82,7 @@ export type ConnectionSource = "electron" | "chrome";
 
 const DEFAULT_CDP_TIMEOUT_MS = 10_000;
 /** setTimeout's 32-bit ceiling; beyond this it silently clamps to 1ms. */
-const MAX_CDP_TIMEOUT_MS = 2_147_483_647;
+export const MAX_CDP_TIMEOUT_MS = 2_147_483_647;
 
 /**
  * Upper bound on a single CDP round-trip.
@@ -121,6 +121,27 @@ export function withTimeout<T>(p: Promise<T>, what: string, ms = cdpTimeoutMs())
       }
     );
   });
+}
+
+/**
+ * Does `url`'s HOSTNAME equal `domain`, or is it a subdomain of it?
+ *
+ * Never a substring test. `includes("morgen.so")` also matches
+ * https://morgen.so.evil.example/ and https://evil.example/?next=morgen.so — and
+ * discovery hands the winning target to code that runs credential-reading
+ * JavaScript in it, so a forged identity is not cosmetic.
+ */
+export function hostMatches(url: string, domain: string): boolean {
+  let u: URL;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  if (u.protocol !== "https:" && u.protocol !== "http:") return false;
+  const h = u.hostname.toLowerCase();
+  const d = domain.toLowerCase();
+  return h === d || h.endsWith(`.${d}`);
 }
 
 /** Read a positive integer port from the environment, or undefined. */
@@ -224,17 +245,30 @@ export function resetEndpointCache(): void {
 export async function discoverEndpoint(): Promise<Endpoint> {
   const host = getCDPHost();
 
+  // A cached port is a hint, not a verdict. The app can move between
+  // deployments inside one process — quit Electron on its port, open the web
+  // app in Chrome — and a long-lived caller (the MCP server) would otherwise
+  // fail forever against a port that is now dead, or worse, one some other
+  // service has since bound.
+  let skip: number | null = null;
   if (discoveredPort !== null) {
     const port = discoveredPort;
-    const targets = await withTimeout(
-      CDP.List({ host, port }) as Promise<any[]>,
-      `listing targets on port ${port}`
-    );
-    return { port, targets };
+    try {
+      const targets = await withTimeout(
+        CDP.List({ host, port }) as Promise<any[]>,
+        `listing targets on port ${port}`
+      );
+      if (rankTargets(targets).length > 0) return { port, targets };
+    } catch {
+      // fall through to rediscovery
+    }
+    discoveredPort = null;
+    skip = port; // already tried; do not probe it twice
   }
 
   const candidates = cdpPortCandidates();
   for (const port of candidates) {
+    if (port === skip) continue;
     let targets: any[];
     try {
       targets = await withTimeout(
