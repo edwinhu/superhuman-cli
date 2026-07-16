@@ -153,14 +153,24 @@ interface RawCookie {
 /** Path the backend calls actually hit — cookies must be in scope for it. */
 const BACKEND_PATH = "/~backend/v3/";
 
-/** Build the Cookie header from a raw cookie list, or null if none apply. */
+/**
+ * Build the Cookie header from a raw cookie list, or null if none apply.
+ *
+ * Ordered per RFC 6265 §5.4: longer paths first. Storage.getCookies returns the
+ * store in unspecified order, and a server that takes the FIRST occurrence of a
+ * duplicated name would otherwise see the wrong value — e.g. `session` at both
+ * `/` and `/~backend` must send the `/~backend` one first, as a browser would.
+ */
 export function toCookieHeader(cookies: RawCookie[] | undefined): string | null {
   if (!cookies?.length) return null;
   const relevant = cookies.filter((c) =>
     COOKIE_HOSTS.some((h) => cookieApplies(c, h, BACKEND_PATH))
   );
   if (!relevant.length) return null;
-  return relevant.map((c) => `${c.name}=${c.value}`).join("; ");
+  const ordered = [...relevant].sort(
+    (a, b) => (b.path ?? "/").length - (a.path ?? "/").length
+  );
+  return ordered.map((c) => `${c.name}=${c.value}`).join("; ");
 }
 
 /** A deadline shared across every step of one cookie read. */
@@ -214,7 +224,7 @@ async function readCookiesFromBrowserTarget(
     // The attach itself must be bounded: a target can advertise a websocket
     // endpoint and then never complete the handshake, which would hang here
     // before any bounded command ran.
-    client = await withTimeout(
+    client = await attachWithTimeout(
       CDP({ target: browserWsUrl, host, port }),
       "CDP attach (browser)",
       deadline.remaining()
@@ -275,7 +285,7 @@ async function* readCookiesFromPageTargets(
     let client: CDP.Client | null = null;
     try {
       const budget = () => Math.min(deadline.remaining(), PER_TARGET_CAP_MS);
-      client = await withTimeout(
+      client = await attachWithTimeout(
         CDP({ target: target.id, host, port }),
         "CDP attach (page)",
         budget()
@@ -368,6 +378,37 @@ export async function readSessionCookieHeader(
  * reading each context via Storage.getCookies({ browserContextId }) — no page
  * attach, no sweep, and no cost when only the default context exists. Follow-up.
  */
+
+/**
+ * Bound an attach whose result must be closed if it lands after the timeout.
+ *
+ * withTimeout only stops waiting — it cannot abort the underlying connect. A
+ * slow handshake that completes after we gave up would otherwise leave a live
+ * websocket with no reference, leaking one per attempt.
+ */
+function attachWithTimeout(
+  p: Promise<CDP.Client>,
+  what: string,
+  ms: number
+): Promise<CDP.Client> {
+  const bounded = withTimeout(p, what, ms);
+  bounded.catch(() => {
+    // We are no longer waiting; close it if it ever arrives.
+    p.then(
+      (client) => {
+        try {
+          void client.close();
+        } catch {
+          // ignore
+        }
+      },
+      () => {
+        // already rejected; nothing to close
+      }
+    );
+  });
+  return bounded;
+}
 
 /** Reject rather than wait forever — an unbounded CDP wait is the bug above. */
 function withTimeout<T>(p: Promise<T>, what: string, ms = cdpTimeoutMs()): Promise<T> {

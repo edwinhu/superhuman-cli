@@ -80,6 +80,17 @@ describe("toCookieHeader", () => {
     expect(header).toBe("csrf=v_csrf");
   });
 
+  test("orders longer paths first, per RFC 6265 §5.4", () => {
+    // Storage.getCookies' array order is unspecified. A backend taking the
+    // FIRST occurrence of a duplicated name must see the more specific cookie,
+    // exactly as a browser would send it.
+    const header = toCookieHeader([
+      { name: "session", value: "root", domain: "accounts.superhuman.com", path: "/" },
+      { name: "session", value: "backend", domain: "accounts.superhuman.com", path: "/~backend" },
+    ]);
+    expect(header).toBe("session=backend; session=root");
+  });
+
   test("null when nothing applies or the list is empty", () => {
     expect(toCookieHeader([c("x", "example.com")])).toBeNull();
     expect(toCookieHeader([])).toBeNull();
