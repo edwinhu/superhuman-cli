@@ -274,11 +274,15 @@ export async function discoverEndpoint(): Promise<Endpoint> {
         `listing targets on port ${port}`
       );
       if (rankTargets(targets).length > 0) return { port, targets };
+      // Listed fine, but nothing of ours is there any more — re-listing it
+      // below would just repeat that answer, so skip it.
+      skip = port;
     } catch {
-      // fall through to rediscovery
+      // A transient error (EPIPE, a blip) is NOT evidence the port is wrong, so
+      // it stays a candidate: skipping it here failed the whole call while the
+      // port was healthy a moment later.
     }
     discoveredPort = null;
-    skip = port; // already tried; do not probe it twice
   }
 
   const candidates = cdpPortCandidates();
