@@ -105,6 +105,21 @@ export async function readSessionCookieHeader(
   }
 }
 
+/**
+ * Health probe: is the browser's Superhuman session usable for refresh?
+ *
+ * Reads the cookies and exchanges them for a CSRF token — cheap, read-only,
+ * and a real proof the session is live (cookie presence alone isn't: they
+ * survive sign-out). Used by `superhuman doctor`.
+ */
+export async function isSessionRefreshHealthy(
+  port = getCDPPort()
+): Promise<boolean> {
+  const cookieHeader = await readSessionCookieHeader(port);
+  if (!cookieHeader) return false;
+  return (await getCsrfToken(cookieHeader)) !== null;
+}
+
 /** Fetch a CSRF token for the session (required by sessions.getTokens). */
 async function getCsrfToken(cookieHeader: string): Promise<string | null> {
   try {
@@ -153,6 +168,43 @@ export async function refreshViaSessionCookies(
   const csrfToken = await getCsrfToken(cookieHeader);
   if (!csrfToken) return null;
 
+  return getTokensForEmail(email, cookieHeader, csrfToken, existing);
+}
+
+/**
+ * Bulk variant: refresh several accounts against one cookie read and one CSRF
+ * token. Used by `account auth` / `refreshAllTokens`, where re-reading cookies
+ * per account would mean a CDP round-trip each time.
+ *
+ * @returns The accounts that refreshed successfully (may be empty).
+ */
+export async function refreshManyViaSessionCookies(
+  entries: Array<{ email: string; existing?: TokenInfo }>,
+  port = getCDPPort()
+): Promise<TokenInfo[]> {
+  if (entries.length === 0) return [];
+
+  const cookieHeader = await readSessionCookieHeader(port);
+  if (!cookieHeader) return [];
+
+  const csrfToken = await getCsrfToken(cookieHeader);
+  if (!csrfToken) return [];
+
+  const results: TokenInfo[] = [];
+  for (const { email, existing } of entries) {
+    const token = await getTokensForEmail(email, cookieHeader, csrfToken, existing);
+    if (token) results.push(token);
+  }
+  return results;
+}
+
+/** POST sessions.getTokens for one account and map the response to TokenInfo. */
+async function getTokensForEmail(
+  email: string,
+  cookieHeader: string,
+  csrfToken: string,
+  existing?: TokenInfo
+): Promise<TokenInfo | null> {
   let data: GetTokensResponse;
   try {
     const resp = await fetch(`${ACCOUNTS_HOST}/~backend/v3/sessions.getTokens`, {

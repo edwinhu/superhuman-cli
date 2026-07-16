@@ -13,7 +13,10 @@ import {
   refreshAllViaBackgroundPage,
   refreshOneViaBackgroundPage,
 } from "./background-page-refresh";
-import { refreshViaSessionCookies } from "./session-refresh";
+import {
+  refreshViaSessionCookies,
+  refreshManyViaSessionCookies,
+} from "./session-refresh";
 
 /**
  * Full token info stored in the token cache.
@@ -203,11 +206,46 @@ export function selectBestToken(
 }
 
 /**
+ * Bound a service-worker Runtime.evaluate.
+ *
+ * MV3 service workers idle-stop after ~30s. A stopped worker still appears in
+ * `CDP.List()` and still accepts a websocket connection, but never answers —
+ * `Runtime.evaluate` hangs forever, not even `1+1` returns (verified
+ * 2026-07-16; see docs/investigations/2026-07-16_attachment_download_401.md).
+ * Without a timeout that hang propagates all the way up: `superhuman account
+ * auth` would sit forever instead of falling through to a path that works.
+ */
+async function swEvaluateWithTimeout(
+  swClient: ChromeExtConnection["swClient"],
+  params: Parameters<ChromeExtConnection["swClient"]["Runtime"]["evaluate"]>[0],
+  timeoutMs = SW_EVALUATE_TIMEOUT_MS
+): Promise<Awaited<ReturnType<ChromeExtConnection["swClient"]["Runtime"]["evaluate"]>>> {
+  const result = await Promise.race([
+    swClient.Runtime.evaluate(params),
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs)),
+  ]);
+  if (result === null) {
+    throw new Error(
+      "Superhuman extension service worker did not respond " +
+        `within ${timeoutMs}ms (likely idle-stopped)`
+    );
+  }
+  return result;
+}
+
+const SW_EVALUATE_TIMEOUT_MS = 5000;
+
+/**
  * Extract tokens for an account via Chrome extension CDP interception.
  *
  * Intercepts network requests from the service worker to capture:
  * 1. Superhuman backend token (Firebase JWT used for /~backend/ calls)
  * 2. Provider access token (Google/Microsoft OAuth token)
+ *
+ * NOTE: this depends on evaluating JS inside the extension's service worker,
+ * which is unavailable whenever the worker is idle-stopped. Prefer
+ * `refreshViaSessionCookies()` (session-refresh.ts), which needs no extension
+ * context at all; this path remains as a fallback and now fails fast.
  */
 export async function extractTokenChrome(
   conn: ChromeExtConnection,
@@ -216,7 +254,7 @@ export async function extractTokenChrome(
   const { swClient, mainClient } = conn;
 
   // 1. Read account metadata from service worker
-  const meta = await swClient.Runtime.evaluate({
+  const meta = await swEvaluateWithTimeout(swClient, {
     expression: `(() => {
       const bg = backgrounds[${JSON.stringify(email)}]?._accountBackground;
       if (!bg) return null;
@@ -268,7 +306,7 @@ export async function extractTokenChrome(
   //    tokens off the resulting network requests — which reloaded the user's
   //    window on every refresh and left Fetch handlers attached (the source of
   //    the post-refresh hang). Reading the Credential directly avoids both.
-  const authEval = await swClient.Runtime.evaluate({
+  const authEval = await swEvaluateWithTimeout(swClient, {
     expression: `(async () => {
       const bg = backgrounds[${JSON.stringify(email)}]?._accountBackground;
       if (!bg?.di?.isInitialized?.("credential"))
@@ -722,20 +760,39 @@ export async function refreshTokenViaCDP(email: string): Promise<TokenInfo | und
 }
 
 /**
- * Bulk-refresh every cached account via the background_page iframe path
- * in a single CDP connection. Faster than calling refreshTokenViaCDP per
- * account (one connect/disconnect instead of N), and silent.
+ * Bulk-refresh every cached account, silently, in one pass.
  *
- * Returns the number of accounts successfully refreshed, or null if the
- * background_page wasn't reachable at all.
+ * Deployment-agnostic — tries both valid refresh sources:
+ *   1. Electron: the background_page iframes (one CDP connection for all
+ *      accounts).
+ *   2. Web/Chrome-extension: the Superhuman backend's sessions.getTokens,
+ *      authenticated by the browser's session cookies (one cookie read + one
+ *      CSRF token for all accounts).
+ *
+ * Returns the number of accounts refreshed, or null if neither source was
+ * reachable at all (no app, no browser session).
  */
 export async function refreshAllTokens(): Promise<number | null> {
   const cachedEmails = Array.from(tokenCache.keys());
   if (cachedEmails.length === 0) return 0;
-  const refreshed = await refreshAllViaBackgroundPage(cachedEmails, await discoverSuperhumanPort());
-  if (!refreshed) return null;
-  await persistRefreshedTokens(refreshed);
-  return refreshed.length;
+  const port = await discoverSuperhumanPort();
+
+  const viaIframe = await refreshAllViaBackgroundPage(cachedEmails, port);
+  if (viaIframe && viaIframe.length > 0) {
+    await persistRefreshedTokens(viaIframe);
+    return viaIframe.length;
+  }
+
+  const viaSession = await refreshManyViaSessionCookies(
+    cachedEmails.map((email) => ({ email, existing: tokenCache.get(email) })),
+    port
+  );
+  if (viaSession.length > 0) {
+    await persistRefreshedTokens(viaSession);
+    return viaSession.length;
+  }
+
+  return null;
 }
 
 /**

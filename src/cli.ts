@@ -64,9 +64,15 @@ import {
   refreshAllTokens,
   loadTokensFromDisk,
   persistRefreshedTokens,
+  getCachedAccounts,
+  getCachedTokenRaw,
   type TokenInfo,
 } from "./token-api";
 import { refreshAllViaBackgroundPage } from "./background-page-refresh";
+import {
+  refreshManyViaSessionCookies,
+  isSessionRefreshHealthy,
+} from "./session-refresh";
 import { ensureAccountSynced, listSyncableAccounts, getAccountFreshness, type EnsureSyncResult, type AccountFreshness } from "./account-sync";
 import { isBackgroundPageReachable, relaunchSuperhumanForCDP } from "./app-health";
 import type { ConnectionProvider } from "./connection-provider";
@@ -1410,25 +1416,55 @@ async function cmdSync(options: CliOptions) {
  */
 async function cmdDoctor(options: CliOptions) {
   const port = options.port;
-  const reachable = await isBackgroundPageReachable(port);
 
-  if (reachable) {
+  // There are two valid refresh sources; either one keeps tokens fresh.
+  //   - Electron desktop app: the background_page iframes.
+  //   - Any deployment with a live browser session (incl. the Chrome
+  //     extension, which has no background_page at all): the Superhuman
+  //     backend's sessions.getTokens, via the browser's session cookies.
+  // Only report UNHEALTHY when BOTH are unavailable — otherwise a perfectly
+  // healthy Chrome-extension setup gets told to relaunch an app it doesn't have.
+  const [reachable, sessionHealthy] = await Promise.all([
+    isBackgroundPageReachable(port),
+    isSessionRefreshHealthy(port),
+  ]);
+
+  if (reachable || sessionHealthy) {
+    const paths = [
+      reachable ? "background_page (Electron)" : null,
+      sessionHealthy ? "Superhuman session cookies (backend)" : null,
+    ].filter(Boolean) as string[];
     if (options.json) {
-      printJson({ healthy: true, port, action: "none" });
+      printJson({
+        healthy: true,
+        port,
+        action: "none",
+        refreshPaths: { backgroundPage: reachable, sessionCookies: sessionHealthy },
+      });
     } else {
-      success(`CDP debug port ${port}: healthy — background_page reachable, silent refresh works.`);
+      success(`Token refresh: healthy — silent refresh works via ${paths.join(" + ")}.`);
+      if (!reachable) {
+        log(`  ${colors.dim}(No Electron background_page on port ${port} — expected on Chrome-extension deployments.)${colors.reset}`);
+      }
     }
     return;
   }
 
-  // Unhealthy.
+  // Unhealthy: neither path available.
   if (!options.fix) {
     if (options.json) {
-      printJson({ healthy: false, port, action: "none", hint: "run with --fix to relaunch" });
+      printJson({
+        healthy: false,
+        port,
+        action: "none",
+        refreshPaths: { backgroundPage: false, sessionCookies: false },
+        hint: "open Superhuman in the browser, or run with --fix to relaunch the desktop app",
+      });
     } else {
-      error(`CDP debug port ${port}: UNHEALTHY — no Superhuman background_page target.`);
+      error(`Token refresh: UNHEALTHY — no background_page target on port ${port} and no usable browser session.`);
       log(`  Token refresh will fall back and (unless SH_ALLOW_NAV_REFRESH=1) fail silently.`);
-      log(`  Run ${colors.cyan}superhuman doctor --fix${colors.reset} to relaunch the app and rebind the port.`);
+      log(`  ${colors.cyan}Chrome-extension setups:${colors.reset} open Superhuman in the browser and make sure it is signed in.`);
+      log(`  ${colors.cyan}Desktop app:${colors.reset} run ${colors.cyan}superhuman doctor --fix${colors.reset} to relaunch the app and rebind the port.`);
       log(`  ${colors.dim}(--fix closes and reopens the Superhuman window; the relaunch stays in the background.)${colors.reset}`);
     }
     process.exit(1);
@@ -3938,12 +3974,35 @@ async function cmdAuth(options: CliOptions) {
   }
 
   // Preferred non-disruptive path on Chrome-extension deployments (e.g. Linux,
-  // where there is no Superhuman Electron app): read + refresh tokens directly
-  // from the extension's in-memory Credential via the service worker. No
-  // navigation, no reload, no focus steal, no hang. This MUST be tried before
-  // the legacy navigation path below — on a Chrome-extension deployment the
-  // Electron `listAccounts` probe also succeeds, so if the navigation path ran
-  // first it would shadow this one and reload the user's live tab every time.
+  // where there is no Superhuman Electron app): mint fresh tokens from the
+  // Superhuman backend using the browser's session cookies — the same call the
+  // app's own Credential.refreshSession() makes. Silent (cookie read + HTTPS),
+  // provider-agnostic, and — unlike the service-worker path below — it never
+  // evaluates JS in an extension context, so an idle-stopped service worker
+  // can't hang it.
+  const sessionEmails =
+    getCachedAccounts().length > 0 ? getCachedAccounts() : listLocalAccounts();
+  if (sessionEmails.length > 0) {
+    const sessionTokens = await refreshManyViaSessionCookies(
+      sessionEmails.map((email) => ({ email, existing: getCachedTokenRaw(email) })),
+      options.port
+    );
+    if (sessionTokens.length > 0) {
+      log(`Refreshed ${sessionTokens.length} account(s) via Superhuman session (backend)`);
+      for (const t of sessionTokens) success(`  ${t.email} OK`);
+      await persistRefreshedTokens(sessionTokens);
+      success(`Tokens saved to ${getTokensFilePath()}`);
+      log("");
+      info("You can now use superhuman-cli without Superhuman running.");
+      info("Tokens are valid for ~1 hour and refresh automatically while a Superhuman session is open.");
+      return;
+    }
+    log("Session-cookie path yielded no tokens — falling back.");
+  }
+
+  // Fallback for Chrome-extension deployments: read + refresh tokens from the
+  // extension's in-memory Credential via the service worker. Bounded by a
+  // timeout (the worker is unreachable whenever it is idle-stopped).
   const chromeConn = await connectToSuperhumanChrome(options.port);
   if (chromeConn) {
     let refreshed = 0;

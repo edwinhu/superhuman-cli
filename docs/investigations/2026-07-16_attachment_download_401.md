@@ -109,6 +109,40 @@ achieve is the substance of the directive: **the credential now comes from the S
 flow and no re-auth. The provider call is only the byte transport, using a Superhuman-minted token
 — exactly what the app does.
 
+## Follow-up sweep: every refresh entry point, both deployments
+
+`refreshTokenViaCDP` was only one of four. Swept the rest; all now try Electron first, then the
+session-cookie path:
+
+| Entry point | Was | Now |
+| --- | --- | --- |
+| `refreshTokenViaCDP()` (via `getCachedToken`/`resolveToken`) | Electron-only → stale token | Electron → session cookies |
+| `refreshAllTokens()` (bulk) | Electron-only → `null` on web | Electron → session cookies (one cookie read + one CSRF for all accounts) |
+| `account auth` (`cmdAuth`) | Electron → **SW path (hung forever)** → nav | session cookies first (0.44s) → SW (now bounded) → nav |
+| `doctor` | Electron-only signal → "UNHEALTHY", advised relaunching an app Linux doesn't have | healthy if **either** path works; names the working one |
+
+Two live bugs surfaced by the sweep, both fixed:
+
+1. **`superhuman account auth` hung forever** — the manual workaround the user had been relying on.
+   `extractTokenChrome()` evaluates JS in the extension's service worker with **no timeout**; an
+   idle-stopped MV3 worker still lists in `CDP.List()` and still accepts a websocket, but never
+   answers. All SW evaluates are now bounded (`swEvaluateWithTimeout`, 5s) so failure falls through
+   instead of hanging. Verified: hang → **0.44s**, both accounts refreshed.
+2. **`doctor` misreported a healthy machine as UNHEALTHY** (exit 1) and told the user to run
+   `--fix`, which relaunches `Superhuman.app` — meaningless on Linux. Now: `✓ Token refresh:
+   healthy — silent refresh works via Superhuman session cookies (backend)`, exit 0.
+
+Note this contradicts commit 76ebd73 ("sync works on Chrome-extension deployments (service worker
+path)"), which reported the SW path verified live. It works only while the worker happens to be
+awake; right now `sync --check` silently falls back to on-disk enumeration ("app not reachable over
+CDP"). Anything depending on evaluating JS in an extension context is inherently flaky for this
+reason — `sync`'s `extensionSession` still has this weakness (it is at least bounded by its own
+connect timeout, and degrades to a correct on-disk answer rather than a wrong one, so it is left
+as-is here).
+
+Electron benefits too: when its debug port tears down mid-session (the known 9252 teardown), the
+session-cookie path is now a silent recovery *before* the focus-stealing nav fallback.
+
 ## Verification
 
 - `bunx tsc --noEmit` clean; `bun test` → 435 pass / 0 fail (+3 new `session-refresh` tests).
