@@ -45,7 +45,8 @@
  * Discovered 2026-07-16 — see docs/investigations/2026-07-16_attachment_download_401.md
  */
 import CDP from "chrome-remote-interface";
-import { getCDPHost, getCDPPort } from "./superhuman-api";
+import { getCDPHost } from "./superhuman-api";
+import { discoverEndpoint } from "./cdp-endpoint";
 import type { TokenInfo } from "./token-api";
 
 const ACCOUNTS_HOST = "https://accounts.superhuman.com";
@@ -341,17 +342,32 @@ async function* readCookiesFromPageTargets(
  * Returns null when no browser is reachable or no Superhuman cookies exist.
  */
 export async function readSessionCookieHeader(
-  port = getCDPPort()
+  port?: number
 ): Promise<string | null> {
   const host = getCDPHost();
   const deadline = deadlineIn(cdpTimeoutMs());
 
+  // An explicit port is honoured; otherwise probe the desktop app, then Chrome.
+  // This module exists FOR the Chrome-extension deployment, yet used to default
+  // to the Electron port (9252) and only worked because callers happened to
+  // thread a resolved port down.
+  let resolved: number;
+  if (port !== undefined) {
+    resolved = port;
+  } else {
+    try {
+      resolved = (await discoverEndpoint()).port;
+    } catch {
+      return null; // no endpoint at all — caller keeps the stale token
+    }
+  }
+
   const fromBrowser = toCookieHeader(
-    (await readCookiesFromBrowserTarget(host, port, deadline)) ?? undefined
+    (await readCookiesFromBrowserTarget(host, resolved, deadline)) ?? undefined
   );
   if (fromBrowser) return fromBrowser;
 
-  for await (const cookies of readCookiesFromPageTargets(host, port, deadline)) {
+  for await (const cookies of readCookiesFromPageTargets(host, resolved, deadline)) {
     const header = toCookieHeader(cookies);
     if (header) return header;
   }
@@ -441,7 +457,7 @@ function withTimeout<T>(p: Promise<T>, what: string, ms = cdpTimeoutMs()): Promi
  * user to relaunch an app. False positives are possible when signed out.
  */
 export async function isSessionRefreshHealthy(
-  port = getCDPPort()
+  port?: number
 ): Promise<boolean> {
   return (await readSessionCookieHeader(port)) !== null;
 }
@@ -486,7 +502,7 @@ function jwtExpiryMs(token: string | undefined): number | undefined {
 export async function refreshViaSessionCookies(
   email: string,
   existing?: TokenInfo,
-  port = getCDPPort()
+  port?: number
 ): Promise<TokenInfo | null> {
   const cookieHeader = await readSessionCookieHeader(port);
   if (!cookieHeader) return null;
@@ -506,7 +522,7 @@ export async function refreshViaSessionCookies(
  */
 export async function refreshManyViaSessionCookies(
   entries: Array<{ email: string; existing?: TokenInfo }>,
-  port = getCDPPort()
+  port?: number
 ): Promise<TokenInfo[]> {
   if (entries.length === 0) return [];
 
