@@ -157,8 +157,15 @@ export G2_CASES='[
 export G2_CASES=$(echo "$G2_CASES" | sed 's/"null"/null/g')
 if run_g2 "$MG" morgen; then note PASS "morgen classifier"; else note FAIL "morgen classifier"; fails=$((fails+1)); fi
 
-# superhuman: the REAL desktop scheme + the app page; role must stay mail.* only.
+# superhuman: the app's MEASURED targets (2026-07-17, port 9252) + impostors.
+# The real background page is the https one; superhuman-app://production/* are
+# the main window and tab strip and must NOT win a role. The
+# superhuman-app://superhuman.com case is a legacy shape never observed on the
+# shipping app — kept only as defensive cover (see isElectronTarget).
 export G2_CASES='[
+  ["superhuman-app://production/browserWindow.html",null],
+  ["superhuman-app://production/tabs.html",null],
+  ["superhuman-app://production/background_page.html",null],
   ["superhuman-app://superhuman.com/background_page.html","electron"],
   ["https://mail.superhuman.com/~backend/build/background_page.html","electron"],
   ["https://mail.superhuman.com/e@x.com/inbox","chrome"],
