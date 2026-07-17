@@ -9,39 +9,98 @@
 #              across both repos. Six drift incidents, every one from editing one
 #              file and asserting identity without running diff.
 #
-#   G2 ROLE    no target that MAIN's selectors accept may be rejected by the
-#              branch's, and no target main REJECTS may be accepted. Catches both
-#              "I broke Mac auth" (false negative) and "I widened role so account
-#              auth picks the login page" (false positive) — the two HIGHs I
-#              introduced while hardening.
+#   G2 ROLE    a hand-written regression-case table of real + impostor targets,
+#              checked against EACH branch's OWN classifier. This is NOT a diff
+#              against main's classifier — `src/cdp-endpoint.ts` has never
+#              existed on main (`git show main:src/cdp-endpoint.ts` fails with
+#              "exists on disk, but not in 'main'"); the file is new on this
+#              branch, so there is no main baseline to differential against.
+#              The case table is my own judgment call, written to catch the two
+#              HIGHs I introduced while hardening ("I broke Mac auth" / false
+#              negative, and "I widened role so account auth picks the login
+#              page" / false positive) — treat it as a regression list, not a
+#              mechanical proof of correctness against main.
 #
 #   G3 TESTS   both suites at baseline.
 #   G4 TSC     no new type errors.
 #
 # Exit 0 = substrate clean.
+#
+# G1's and G2's inputs are two sibling repos. Resolve them robustly instead of
+# hardcoding worktree paths that vanish once a branch merges or a worktree is
+# removed: SH defaults to this script's own repo (git rev-parse), MG must be
+# supplied via env or falls back to a documented default that is verified to
+# exist below — if either resolved path, or either cdp-endpoint.ts inside it,
+# is missing/unreadable, the whole run aborts loudly instead of silently
+# comparing empty files.
 set -uo pipefail
 
-MG=/home/eh/projects/morgen-cli/.claude/worktrees/endpoint-discovery
-SH=/home/eh/projects/superhuman-cli/.claude/worktrees/endpoint-discovery
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SH="${SUPERHUMAN_REPO:-$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)}"
+MG="${MORGEN_REPO:-/home/eh/projects/morgen-cli/.claude/worktrees/endpoint-discovery}"
 fails=0
 note() { printf '  %-6s %s\n' "$1" "$2"; }
 
-echo "── G1 drift: shared section byte-identical ──"
-sed -n '/END PRODUCT BLOCK/,$p' "$MG/src/cdp-endpoint.ts" > /tmp/g1a.ts
-sed -n '/END PRODUCT BLOCK/,$p' "$SH/src/cdp-endpoint.ts" > /tmp/g1b.ts
-if diff -q /tmp/g1a.ts /tmp/g1b.ts >/dev/null 2>&1; then
-  note PASS "identical ($(wc -l < /tmp/g1a.ts) lines)"
-else
-  note FAIL "DRIFTED — $(diff /tmp/g1a.ts /tmp/g1b.ts | grep -c '^[<>]') differing lines"
-  fails=$((fails+1))
+# ── Precheck: both repos and both source files must exist and be readable. ──
+# G1-G4 are meaningless (or, worse, vacuously green) if any of these are absent.
+precheck_fail=0
+for pair in "MG:$MG" "SH:$SH"; do
+  label="${pair%%:*}"; dir="${pair#*:}"
+  if [ -z "$dir" ]; then
+    echo "FATAL: \$$label did not resolve to a path (set ${label}_REPO / SUPERHUMAN_REPO / MORGEN_REPO)" >&2
+    precheck_fail=1
+    continue
+  fi
+  if [ ! -d "$dir" ]; then
+    echo "FATAL: \$$label repo dir does not exist: $dir" >&2
+    precheck_fail=1
+    continue
+  fi
+  if [ ! -r "$dir/src/cdp-endpoint.ts" ]; then
+    echo "FATAL: \$$label/src/cdp-endpoint.ts is missing or unreadable: $dir/src/cdp-endpoint.ts" >&2
+    precheck_fail=1
+  fi
+done
+if [ "$precheck_fail" -ne 0 ]; then
+  echo "" >&2
+  echo "SUBSTRATE: ABORTED — cannot evaluate gates without both real repos present." >&2
+  exit 1
 fi
 
-echo "── G2 role: branch selectors vs main's, on real + impostor targets ──"
+echo "── G1 drift: shared section byte-identical ──"
+MARKER='END PRODUCT BLOCK'
+marker_fail=0
+if ! grep -q "$MARKER" "$MG/src/cdp-endpoint.ts"; then
+  note FAIL "marker '$MARKER' not found in $MG/src/cdp-endpoint.ts"
+  marker_fail=1
+fi
+if ! grep -q "$MARKER" "$SH/src/cdp-endpoint.ts"; then
+  note FAIL "marker '$MARKER' not found in $SH/src/cdp-endpoint.ts"
+  marker_fail=1
+fi
+if [ "$marker_fail" -ne 0 ]; then
+  fails=$((fails+1))
+else
+  sed -n "/${MARKER}/,\$p" "$MG/src/cdp-endpoint.ts" > /tmp/g1a.ts
+  sed -n "/${MARKER}/,\$p" "$SH/src/cdp-endpoint.ts" > /tmp/g1b.ts
+  if [ ! -s /tmp/g1a.ts ] || [ ! -s /tmp/g1b.ts ]; then
+    note FAIL "extracted block is empty despite marker being present — refusing to diff empty files"
+    fails=$((fails+1))
+  elif diff -q /tmp/g1a.ts /tmp/g1b.ts >/dev/null 2>&1; then
+    note PASS "identical ($(wc -l < /tmp/g1a.ts) lines)"
+  else
+    note FAIL "DRIFTED — $(diff /tmp/g1a.ts /tmp/g1b.ts | grep -c '^[<>]') differing lines"
+    fails=$((fails+1))
+  fi
+fi
+
+echo "── G2 regression cases: each branch's own classifier vs a hand-written table (NOT a diff against main — see header) ──"
 run_g2() {
   local repo="$1" name="$2"
   ( cd "$repo" && timeout 60 bun -e '
     import { classifyTarget } from "./src/cdp-endpoint";
-    // [url, mustBe] — derived from what MAIN accepted, plus impostors main also rejected.
+    // [url, mustBe] — hand-written expected-classification table (NOT a diff against
+    // main; main has never had this file — see the G2 header comment above).
     const cases: [string, string|null][] = JSON.parse(process.env.G2_CASES!);
     let bad = 0;
     for (const [url, want] of cases) {
@@ -52,7 +111,8 @@ run_g2() {
   ' ) 2>&1
 }
 
-# morgen: main accepted morgen:// and *morgen.so*; impostors main also rejected.
+# morgen: expected-good hosts/schemes plus impostor hosts that must be rejected.
+# (hand-written regression table, not a diff against main — see G2 header comment.)
 export G2_CASES='[
   ["morgen://./app.html","electron"],
   ["file:///opt/Morgen/resources/app.html","electron"],

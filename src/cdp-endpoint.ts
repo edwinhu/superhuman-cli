@@ -88,9 +88,12 @@ function isElectronTarget(url: string): boolean {
   // local filesystem access, by which point the credential store is readable.
   if (u.protocol === "file:") return /superhuman/i.test(url);
 
-  // Otherwise the host must genuinely be ours. Electron ranks FIRST, so an
-  // impostor here beats the real tab and gets the credential read pointed at it.
-  return hostMatches(url, "superhuman.com");
+  // Otherwise the host must genuinely be the web app's, not merely the apex
+  // domain: hostMatches(url, "superhuman.com") also accepted
+  // accounts.superhuman.com/background_page.html. Electron ranks FIRST, so an
+  // impostor here beats the real mail tab and gets the credential read
+  // pointed at it — the same app-vs-domain distinction isWebTarget makes.
+  return hostMatches(url, "mail.superhuman.com");
 }
 
 /**
