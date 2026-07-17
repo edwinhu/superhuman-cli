@@ -175,6 +175,24 @@ export async function disconnect(conn: SuperhumanConnection): Promise<void> {
 
 const SUPERHUMAN_EXTENSION_ID = "dcgcnpooblobhncpnddnhoendgbnglpn";
 
+/**
+ * Is this target the Superhuman extension's service worker?
+ *
+ * The ID must be the exact HOST of a chrome-extension: URL. A substring test
+ * accepts any site serving a worker whose URL merely contains the ID — e.g.
+ * https://evil.example/dcgcnpooblobhncpnddnhoendgbnglpn/sw.js — and both
+ * extension paths then attach and run token/account extraction inside it.
+ */
+function isSuperhumanExtensionWorker(t: any): boolean {
+  if (t?.type !== "service_worker" || !t.url) return false;
+  try {
+    const u = new URL(t.url);
+    return u.protocol === "chrome-extension:" && u.hostname === SUPERHUMAN_EXTENSION_ID;
+  } catch {
+    return false;
+  }
+}
+
 export interface ChromeExtConnection {
   swClient: CDP.Client;
   mainClient: CDP.Client;
@@ -187,13 +205,7 @@ export async function findChromeExtension(port: number): Promise<any | null> {
   try {
     const host = getCDPHost();
     const targets = await CDP.List({ host, port });
-    return (
-      targets.find(
-        (t: any) =>
-          t.url.includes(SUPERHUMAN_EXTENSION_ID) &&
-          t.type === "service_worker"
-      ) ?? null
-    );
+    return targets.find(isSuperhumanExtensionWorker) ?? null;
   } catch {
     return null;
   }
@@ -210,11 +222,7 @@ export async function connectToSuperhumanChrome(
     const host = getCDPHost();
     const targets = await CDP.List({ host, port });
 
-    const sw = targets.find(
-      (t: any) =>
-        t.url.includes(SUPERHUMAN_EXTENSION_ID) &&
-        t.type === "service_worker"
-    );
+    const sw = targets.find(isSuperhumanExtensionWorker);
     // The page we attach to and run credential-reading code in — the one place
     // a forged host would do real damage. classifyTarget verifies the hostname.
     const mainPage = targets.find((t: any) => classifyTarget(t) === "chrome");

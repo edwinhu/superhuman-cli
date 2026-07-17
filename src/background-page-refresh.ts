@@ -17,6 +17,7 @@
  * Credential Refresh".
  */
 import CDP from "chrome-remote-interface";
+import { classifyTarget } from "./cdp-endpoint";
 import { getCDPHost, getCDPPort } from "./superhuman-api";
 import type { TokenInfo } from "./token-api";
 
@@ -46,12 +47,11 @@ export async function connectToBackgroundPage(
     return null;
   }
 
-  const bgPage = targets.find(
-    (t: any) =>
-      t.type === "page" &&
-      t.url.includes("background_page.html") &&
-      t.url.includes("superhuman"),
-  );
+  // classifyTarget, not substrings: this function ATTACHES to the target and
+  // runs credential-refresh JavaScript in its contexts, so
+  // https://evil.example/superhuman/background_page.html satisfying the old
+  // check was the forged-target class the classifier exists to prevent.
+  const bgPage = targets.find((t: any) => classifyTarget(t) === "electron");
   if (!bgPage) return null;
 
   let client: CDP.Client;

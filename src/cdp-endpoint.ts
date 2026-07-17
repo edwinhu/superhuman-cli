@@ -65,7 +65,31 @@ const DEFAULT_CHROME_PORT = 9222;
  */
 function isElectronTarget(url: string): boolean {
   if (!url.includes("background_page.html")) return false;
-  if (url.startsWith("file://")) return /superhuman/i.test(url);
+
+  // The desktop app serves its background page over its OWN scheme:
+  //   superhuman-app://superhuman.com/background_page.html
+  // Requiring http(s) rejected it outright — discovery skipped a healthy
+  // Electron endpoint and desktop token refresh broke. Nothing but the app can
+  // register this scheme, so an exact host+path check is the identity.
+  let u: URL | null = null;
+  try {
+    u = new URL(url);
+  } catch {
+    return false;
+  }
+  if (u.protocol === `${ELECTRON_SCHEME}:`) {
+    return (
+      u.hostname.toLowerCase() === "superhuman.com" &&
+      u.pathname === "/background_page.html"
+    );
+  }
+
+  // A packaged build may serve it from its install dir; forging file:// needs
+  // local filesystem access, by which point the credential store is readable.
+  if (u.protocol === "file:") return /superhuman/i.test(url);
+
+  // Otherwise the host must genuinely be ours. Electron ranks FIRST, so an
+  // impostor here beats the real tab and gets the credential read pointed at it.
   return hostMatches(url, "superhuman.com");
 }
 
@@ -84,6 +108,9 @@ function electronLaunchHint(port: number, platform: string = process.platform): 
         : "superhuman"; // Linux: no desktop app ships today; the extension is the route
   return `${bin} --remote-debugging-port=${port}`;
 }
+
+/** The desktop app's own URL scheme — nothing else can register it. */
+const ELECTRON_SCHEME = "superhuman-app";
 
 /** Where the web app lives, for error text. */
 const WEB_APP_URL = "https://mail.superhuman.com";
