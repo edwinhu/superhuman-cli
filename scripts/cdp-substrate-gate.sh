@@ -37,7 +37,33 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SH="${SUPERHUMAN_REPO:-$(git -C "$SCRIPT_DIR" rev-parse --show-toplevel 2>/dev/null)}"
-MG="${MORGEN_REPO:-/home/eh/projects/morgen-cli/.claude/worktrees/endpoint-discovery}"
+# MG gets the same git-rev-parse-based treatment SH has, not a bare hardcoded
+# worktree literal. MORGEN_REPO always wins. Absent that, try candidates in
+# order and take the first that actually contains the branch's source file:
+#   1. the sibling morgen-cli checkout next to superhuman-cli's MAIN repo
+#      (resolved via --git-common-dir, which survives running from inside a
+#      worktree) — this is what will be correct once the feature branch
+#      merges to morgen-cli's main and the worktree below is removed.
+#   2. the feature worktree — last-resort default for local pre-merge dev;
+#      documented to stop resolving once that worktree is removed, at which
+#      point (1) should already be correct and callers should also just set
+#      MORGEN_REPO explicitly (see cdp-substrate-gate.test.sh test3).
+SH_COMMON_DIR="$(git -C "$SCRIPT_DIR" rev-parse --git-common-dir 2>/dev/null)"
+SH_MAIN_REPO="$(cd "$(dirname "$SH_COMMON_DIR")" 2>/dev/null && pwd)"
+MG_CANDIDATES=()
+if [ -n "$SH_MAIN_REPO" ]; then
+  sibling_top="$(git -C "$(dirname "$SH_MAIN_REPO")/morgen-cli" rev-parse --show-toplevel 2>/dev/null)"
+  [ -n "$sibling_top" ] && MG_CANDIDATES+=("$sibling_top")
+fi
+MG_CANDIDATES+=("/home/eh/projects/morgen-cli/.claude/worktrees/endpoint-discovery")
+MG_DEFAULT=""
+for c in "${MG_CANDIDATES[@]}"; do
+  if [ -f "$c/src/cdp-endpoint.ts" ]; then
+    MG_DEFAULT="$c"
+    break
+  fi
+done
+MG="${MORGEN_REPO:-$MG_DEFAULT}"
 fails=0
 note() { printf '  %-6s %s\n' "$1" "$2"; }
 
@@ -56,8 +82,12 @@ for pair in "MG:$MG" "SH:$SH"; do
     precheck_fail=1
     continue
   fi
-  if [ ! -r "$dir/src/cdp-endpoint.ts" ]; then
-    echo "FATAL: \$$label/src/cdp-endpoint.ts is missing or unreadable: $dir/src/cdp-endpoint.ts" >&2
+  if [ ! -f "$dir/src/cdp-endpoint.ts" ] || [ ! -r "$dir/src/cdp-endpoint.ts" ]; then
+    echo "FATAL: \$$label/src/cdp-endpoint.ts is missing, not a regular file, or unreadable: $dir/src/cdp-endpoint.ts" >&2
+    precheck_fail=1
+  fi
+  if [ ! -x "$dir" ]; then
+    echo "FATAL: \$$label repo dir is not traversable (missing execute bit): $dir" >&2
     precheck_fail=1
   fi
 done
@@ -149,10 +179,30 @@ s=$(cd "$SH" && bun test 2>&1 | grep -oE '[0-9]+ fail' | head -1)
 [ "$s" = "0 fail" ] && note PASS "superhuman $s" || { note FAIL "superhuman $s (run: account auth — E2E needs fresh tokens)"; fails=$((fails+1)); }
 
 echo "── G4 tsc vs baseline (morgen 75, superhuman 0) ──"
-mt=$(cd "$MG" && bunx tsc --noEmit --pretty false 2>&1 | grep -c 'error TS')
-st=$(cd "$SH" && bunx tsc --noEmit --pretty false 2>&1 | grep -c 'error TS')
-[ "$mt" -le 75 ] && note PASS "morgen $mt" || { note FAIL "morgen $mt > 75"; fails=$((fails+1)); }
-[ "$st" -eq 0 ] && note PASS "superhuman $st" || { note FAIL "superhuman $st > 0"; fails=$((fails+1)); }
+# `grep -c 'error TS'` alone is vacuous: a missing/broken bunx or tsc install
+# produces no matching lines, and 0 -le 75 / 0 -eq 0 both pass without tsc
+# ever having run. Require a POSITIVE signal first — `tsc --version` prints
+# a recognizable "Version X.Y.Z" line iff tsc actually executed — before
+# trusting the error count from the real run.
+tsc_ran() {
+  local repo="$1" ver
+  ver=$(cd "$repo" && bunx tsc --version 2>&1)
+  [[ "$ver" =~ Version[[:space:]][0-9]+\.[0-9]+\.[0-9]+ ]]
+}
+if tsc_ran "$MG"; then
+  mt=$(cd "$MG" && bunx tsc --noEmit --pretty false 2>&1 | grep -c 'error TS')
+  [ "$mt" -le 75 ] && note PASS "morgen $mt" || { note FAIL "morgen $mt > 75"; fails=$((fails+1)); }
+else
+  note FAIL "morgen tsc did not run (bunx/tsc unavailable — 'tsc --version' produced no recognizable output)"
+  fails=$((fails+1))
+fi
+if tsc_ran "$SH"; then
+  st=$(cd "$SH" && bunx tsc --noEmit --pretty false 2>&1 | grep -c 'error TS')
+  [ "$st" -eq 0 ] && note PASS "superhuman $st" || { note FAIL "superhuman $st > 0"; fails=$((fails+1)); }
+else
+  note FAIL "superhuman tsc did not run (bunx/tsc unavailable — 'tsc --version' produced no recognizable output)"
+  fails=$((fails+1))
+fi
 
 echo ""
 echo "SUBSTRATE: $([ $fails -eq 0 ] && echo CLEAN || echo "DIRTY ($fails gate(s) failing)")"

@@ -52,13 +52,64 @@ else
 fi
 
 # --- Test 3: gate must PASS on the real, current, correct repos ---
-out3=$(bash "$GATE" 2>&1)
+# Hermetic: pass MORGEN_REPO/SUPERHUMAN_REPO explicitly so this does not
+# depend on the hardcoded worktree default (which vanishes once the branch
+# merges and the worktree is removed).
+: "${MORGEN_REPO:=/home/eh/projects/morgen-cli/.claude/worktrees/endpoint-discovery}"
+: "${SUPERHUMAN_REPO:=$HERE/..}"
+SUPERHUMAN_REPO="$(cd "$SUPERHUMAN_REPO" && pwd)"
+out3=$(MORGEN_REPO="$MORGEN_REPO" SUPERHUMAN_REPO="$SUPERHUMAN_REPO" bash "$GATE" 2>&1)
 rc3=$?
 if [ "$rc3" -eq 0 ]; then
-  pass "test3: gate exits 0 on real repos"
+  pass "test3: gate exits 0 on real repos with explicit MORGEN_REPO/SUPERHUMAN_REPO"
 else
   fail "test3: expected exit 0 on real repos, got rc=$rc3"
   echo "$out3"
+fi
+
+# --- Test 4: gate must FAIL (not vacuously PASS) when tsc cannot run (G4) ---
+stubdir=$(mktemp -d)
+cat > "$stubdir/bunx" <<'STUB'
+#!/usr/bin/env bash
+# Simulate a broken/missing tsc install: bunx itself fails, no tsc output at all.
+echo "bunx: command not found (stub)" >&2
+exit 127
+STUB
+chmod +x "$stubdir/bunx"
+out4=$(PATH="$stubdir:$PATH" MORGEN_REPO="$MORGEN_REPO" SUPERHUMAN_REPO="$SUPERHUMAN_REPO" bash "$GATE" 2>&1)
+rc4=$?
+rm -rf "$stubdir"
+if [ "$rc4" -ne 0 ]; then
+  pass "test4: nonzero exit when bunx/tsc cannot run (rc=$rc4)"
+else
+  fail "test4: expected nonzero exit when bunx/tsc cannot run, got rc=0"
+fi
+if echo "$out4" | grep -qE 'PASS[[:space:]]+(morgen|superhuman) 0$'; then
+  fail "test4: vacuous 'PASS ... 0' still present when tsc never ran"
+else
+  pass "test4: no vacuous tsc-never-ran PASS output"
+fi
+
+# --- Test 5: gate must FAIL (not vacuously PASS) when the test runner cannot run (G3) ---
+stubdir=$(mktemp -d)
+cat > "$stubdir/bun" <<'STUB'
+#!/usr/bin/env bash
+echo "bun: command not found (stub)" >&2
+exit 127
+STUB
+chmod +x "$stubdir/bun"
+out5=$(PATH="$stubdir:$PATH" MORGEN_REPO="$MORGEN_REPO" SUPERHUMAN_REPO="$SUPERHUMAN_REPO" bash "$GATE" 2>&1)
+rc5=$?
+rm -rf "$stubdir"
+if [ "$rc5" -ne 0 ]; then
+  pass "test5: nonzero exit when bun/test runner cannot run (rc=$rc5)"
+else
+  fail "test5: expected nonzero exit when bun cannot run, got rc=0"
+fi
+if echo "$out5" | grep -qE 'PASS[[:space:]]+(morgen|superhuman) 0 fail$'; then
+  fail "test5: vacuous 'PASS ... 0 fail' still present when bun never ran"
+else
+  pass "test5: no vacuous test-never-ran PASS output"
 fi
 
 echo ""
