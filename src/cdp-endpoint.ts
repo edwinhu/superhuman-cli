@@ -93,9 +93,19 @@ function isElectronTarget(url: string): boolean {
   return hostMatches(url, "superhuman.com");
 }
 
-/** Is this target the product's web app in a browser? */
+/**
+ * Is this target the product's web app in a browser?
+ *
+ * The APP, not the domain. hostMatches("superhuman.com") is the right IDENTITY
+ * check and the wrong ROLE check: it also accepts accounts.superhuman.com/login
+ * and superhuman.com/blog. The code this replaced required mail.superhuman.com,
+ * so widening it regressed the auth path — connectToSuperhumanChrome picks the
+ * FIRST match, and the sign-in flow is exactly what leaves accounts.* open;
+ * connectToSuperhuman sorts by URL length, and a marketing slug outruns an inbox.
+ * Both then attach and run app-globals code in a page that has none.
+ */
 function isWebTarget(url: string): boolean {
-  return hostMatches(url, "superhuman.com");
+  return hostMatches(url, "mail.superhuman.com");
 }
 
 /** Command that starts the desktop app with CDP, per platform. */
@@ -178,8 +188,21 @@ export function hostMatches(url: string, domain: string): boolean {
     return false;
   }
   if (u.protocol !== "https:" && u.protocol !== "http:") return false;
-  const h = u.hostname.toLowerCase();
-  const d = domain.toLowerCase();
+
+  // Canonicalize before comparing. A fully qualified name carries a root dot —
+  // "web.morgen.so." is the SAME DNS name as "web.morgen.so", and the WHATWG
+  // parser preserves it. Rejecting it would exclude a genuine logged-in tab and
+  // report "no target": a false negative here breaks auth outright, which is
+  // worse than the substring hole this function replaced.
+  const canon = (h: string) => h.toLowerCase().replace(/\.$/, "");
+  const h = canon(u.hostname);
+  const d = canon(domain);
+
+  // An empty host, or a leading empty label (".morgen.so"), is not a real name.
+  if (!h || !d || h.startsWith(".")) return false;
+
+  // Note: userinfo cannot fool this — new URL("https://morgen.so@evil.example/")
+  // has hostname "evil.example", and a port lives outside hostname.
   return h === d || h.endsWith(`.${d}`);
 }
 
@@ -284,8 +307,14 @@ export function resetEndpointCache(): void {
  *
  * Targets are always listed fresh, even on the cached-port path.
  */
-export async function discoverEndpoint(): Promise<Endpoint> {
+export async function discoverEndpoint(remaining?: () => number): Promise<Endpoint> {
   const host = getCDPHost();
+  // Every List is bounded by the SMALLER of one round-trip and whatever the
+  // caller has left. Without the caller's budget, discovery hands each probe a
+  // fresh full timeout and can outlast the very deadline the caller started
+  // before calling us — leaving zero time to attach to the target it just found.
+  const budget = () =>
+    remaining ? Math.min(remaining(), cdpTimeoutMs()) : cdpTimeoutMs();
 
   // A cached port is a hint, not a verdict. The app can move between
   // deployments inside one process — quit Electron on its port, open the web
@@ -298,7 +327,8 @@ export async function discoverEndpoint(): Promise<Endpoint> {
     try {
       const targets = await withTimeout(
         CDP.List({ host, port }) as Promise<any[]>,
-        `listing targets on port ${port}`
+        `listing targets on port ${port}`,
+        budget()
       );
       if (rankTargets(targets).length > 0) return { port, targets };
       // Listed fine, but nothing of ours is there any more — re-listing it
@@ -315,11 +345,13 @@ export async function discoverEndpoint(): Promise<Endpoint> {
   const candidates = cdpPortCandidates();
   for (const port of candidates) {
     if (port === skip) continue;
+    if (remaining && remaining() <= 0) break;
     let targets: any[];
     try {
       targets = await withTimeout(
         CDP.List({ host, port }) as Promise<any[]>,
-        `listing targets on port ${port}`
+        `listing targets on port ${port}`,
+        budget()
       );
     } catch {
       continue; // not listening, or not answering — try the next candidate

@@ -138,9 +138,11 @@ export async function connectToSuperhuman(
   // Returns null if no matching tab is open — caller should fall back to token-only path.
   let mainPage: any;
   if (accountEmail) {
-    mainPage = superhumanPages.find((t: any) =>
-      t.url.toLowerCase().includes(accountEmail.toLowerCase())
-    ) ?? null;
+    // Match the account's PATH SEGMENT, not any occurrence of the address.
+    // includes() let a different genuine Superhuman tab win whenever the email
+    // appeared in its query or fragment — and the caller then runs credential and
+    // account extraction in the wrong account's page.
+    mainPage = superhumanPages.find((t: any) => urlHasAccountSegment(t.url, accountEmail)) ?? null;
     if (!mainPage) return null;
   } else {
     mainPage = superhumanPages[0];
@@ -160,6 +162,20 @@ export async function connectToSuperhuman(
     Network: client.Network,
     Page: client.Page,
   };
+}
+
+/** Does this URL address `email` as a path segment (not merely mention it)? */
+function urlHasAccountSegment(url: string, email: string): boolean {
+  try {
+    const u = new URL(url);
+    const want = email.toLowerCase();
+    // Path only — never search/hash, which the caller does not control.
+    return u.pathname
+      .split("/")
+      .some((seg) => decodeURIComponent(seg).toLowerCase() === want);
+  } catch {
+    return false;
+  }
 }
 
 /**
