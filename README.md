@@ -18,8 +18,13 @@ bun install
 ```
 
 > On macOS this is best done via a LaunchAgent so the app always starts with CDP
-> enabled at login — see `com.user.superhuman-cdp.plist`. The CLI also auto-probes
-> 9252 → 9250 → 9222 when neither `--port` nor `CDP_PORT` is set.
+> enabled at login — see `com.user.superhuman-cdp.plist`. When neither `--port`
+> nor `CDP_PORT` is set, the CLI probes the desktop app first, then the browser:
+> `ELECTRON_CDP_PORT` (default 9252) → `CHROME_CDP_PORT` (default 9222). They are
+> different CDP endpoints, not different tabs on one.
+>
+> `CDP_PORT` pins a single port and skips probing. 9250 (the old Chrome-tab-mode
+> default) is no longer probed — set `CHROME_CDP_PORT=9250` if you still run it.
 
 ## Building & Installing
 

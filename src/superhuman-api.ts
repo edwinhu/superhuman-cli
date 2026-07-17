@@ -6,6 +6,7 @@
  */
 
 import CDP from "chrome-remote-interface";
+import { cdpPortCandidates, classifyTarget, discoverEndpoint, noTargetHint } from "./cdp-endpoint";
 
 export interface SuperhumanConnection {
   client: CDP.Client;
@@ -23,12 +24,12 @@ export function getCDPHost(): string {
 }
 
 /**
- * Get CDP port from environment or default to 9252.
- * Note: 9252 is the port the Superhuman desktop (Electron) app listens on —
- * it's what the `com.user.superhuman-cdp` LaunchAgent passes via
- * `--remote-debugging-port=9252`, and the only target exposing
- * `background_page.html` for token refresh. (9250 was the old Chrome-tab-mode
- * default and is often occupied by an unrelated Chrome instance.)
+ * Get CDP port from CDP_PORT, or the static 9252 default.
+ *
+ * Prefer discoverSuperhumanPort() — this is the last-resort fallback, not a
+ * probe. 9252 is the desktop app's port (what the `com.user.superhuman-cdp`
+ * LaunchAgent passes), so on a Chrome-extension deployment this default is
+ * simply wrong; only discovery finds the browser.
  */
 export function getCDPPort(): number {
   const envPort = process.env.CDP_PORT;
@@ -36,65 +37,39 @@ export function getCDPPort(): number {
 }
 
 /**
- * Candidate CDP ports to probe when CDP_PORT isn't explicitly set.
- * 9252 = the Superhuman desktop (Electron) app — the one exposing
- * `background_page.html`, so it's tried first; 9250 = legacy Chrome-tab mode
- * (extension service worker); 9222 = generic Chromium default.
- */
-const CDP_PORT_CANDIDATES = [9252, 9250, 9222];
-
-// Cache the discovered port for the process lifetime to avoid re-probing.
-let discoveredPort: number | null = null;
-
-/**
  * Resolve the CDP port that actually hosts a Superhuman target.
  *
- * An explicit `CDP_PORT` env var always wins. Otherwise probe the candidate
- * ports and prefer one exposing the Electron `background_page.html` (required
- * for silent token refresh); fall back to any port with a `mail.superhuman.com`
- * page, then to the static default. Result is cached.
+ * An explicit `CDP_PORT` wins. Otherwise probe the desktop app's port, then the
+ * browser's — see cdp-endpoint.ts, which owns the candidates, the overrides and
+ * the caching.
  *
  * Reads use local SQLite and don't need this; it matters for CDP paths —
- * chiefly token refresh — which previously failed when the app ran on a
- * non-default port (e.g. the desktop app on 9252).
+ * chiefly token refresh — which failed when the app ran on a port the caller
+ * did not name.
  */
 export async function discoverSuperhumanPort(): Promise<number> {
-  if (process.env.CDP_PORT) return parseInt(process.env.CDP_PORT, 10);
-  if (discoveredPort !== null) return discoveredPort;
-
-  const host = getCDPHost();
-  let pageFallback: number | null = null;
-
-  for (const port of CDP_PORT_CANDIDATES) {
-    let targets: any[];
-    try {
-      targets = await CDP.List({ host, port });
-    } catch {
-      continue; // port not listening
-    }
-    const hasBgPage = targets.some(
-      (t: any) =>
-        t.type === "page" &&
-        t.url.includes("background_page.html") &&
-        t.url.includes("superhuman")
-    );
-    if (hasBgPage) {
-      discoveredPort = port;
-      return port;
-    }
-    if (
-      pageFallback === null &&
-      targets.some(
-        (t: any) => t.type === "page" && t.url.includes("mail.superhuman.com")
-      )
-    ) {
-      pageFallback = port;
-    }
+  // Delegates to the shared discovery so there is exactly ONE implementation of
+  // "find the endpoint": same candidates, same ELECTRON_CDP_PORT/CHROME_CDP_PORT
+  // overrides, same skip-a-port-serving-something-else rule.
+  //
+  // There used to be two. This one probed a fixed [9252, 9250, 9222] and ignored
+  // the env overrides entirely, and because token-api's refresh paths call it
+  // FIRST and thread the result into readSessionCookieHeader — which treats a
+  // supplied port as authoritative — the legacy answer always won. With
+  // CHROME_CDP_PORT=9333 and nothing on the fixed candidates, refresh passed
+  // 9252, read no cookies, kept the stale token, and the 401 it exists to fix
+  // came back.
+  //
+  // Falls back to getCDPPort() rather than throwing: callers rely on this
+  // returning a port, and a bad port fails later with a better message than a
+  // discovery exception here would give.
+  try {
+    return (await discoverEndpoint()).port;
+  } catch {
+    return getCDPPort();
   }
-
-  discoveredPort = pageFallback ?? getCDPPort();
-  return discoveredPort;
 }
+
 
 /**
  * Check if Superhuman is running with CDP enabled
@@ -103,7 +78,9 @@ export async function isSuperhumanRunning(port = getCDPPort()): Promise<boolean>
   try {
     const host = getCDPHost();
     const targets = await CDP.List({ host, port });
-    return targets.some(t => t.url.includes("mail.superhuman.com"));
+    // classifyTarget, not a substring: mail.superhuman.com.evil.example must
+    // not make us report Superhuman as running.
+    return targets.some((t: any) => classifyTarget(t) !== null);
   } catch {
     return false;
   }
@@ -118,13 +95,7 @@ export async function ensureSuperhuman(port = getCDPPort()): Promise<boolean> {
     return true;
   }
   const host = getCDPHost();
-  console.error(
-    `Superhuman not reachable at ${host}:${port}.\n` +
-    `Probed ports ${CDP_PORT_CANDIDATES.join(", ")} for a Superhuman target and found none.\n` +
-    `Launch the desktop app with remote debugging, e.g.:\n` +
-    `  /Applications/Superhuman.app/Contents/MacOS/Superhuman --remote-debugging-port=9252\n` +
-    `If it is running on a different port, pass --port <n> or set CDP_PORT.`
-  );
+  console.error(`Superhuman not reachable at ${host}:${port}.\n` + noTargetHint(cdpPortCandidates()));
   return false;
 }
 
@@ -155,10 +126,9 @@ export async function connectToSuperhuman(
   // Prefer the page with an account path (e.g., /user@example.com) over the root page
   const superhumanPages = targets.filter(
     (t: any) =>
-      t.url.includes("mail.superhuman.com") &&
+      classifyTarget(t) === "chrome" &&
       !t.url.includes("background") &&
-      !t.url.includes("serviceworker") &&
-      t.type === "page"
+      !t.url.includes("serviceworker")
   );
 
   // Sort by URL length descending — pages with account paths are longer
@@ -168,9 +138,11 @@ export async function connectToSuperhuman(
   // Returns null if no matching tab is open — caller should fall back to token-only path.
   let mainPage: any;
   if (accountEmail) {
-    mainPage = superhumanPages.find((t: any) =>
-      t.url.toLowerCase().includes(accountEmail.toLowerCase())
-    ) ?? null;
+    // Match the account's PATH SEGMENT, not any occurrence of the address.
+    // includes() let a different genuine Superhuman tab win whenever the email
+    // appeared in its query or fragment — and the caller then runs credential and
+    // account extraction in the wrong account's page.
+    mainPage = superhumanPages.find((t: any) => urlHasAccountSegment(t.url, accountEmail)) ?? null;
     if (!mainPage) return null;
   } else {
     mainPage = superhumanPages[0];
@@ -192,6 +164,20 @@ export async function connectToSuperhuman(
   };
 }
 
+/** Does this URL address `email` as a path segment (not merely mention it)? */
+function urlHasAccountSegment(url: string, email: string): boolean {
+  try {
+    const u = new URL(url);
+    const want = email.toLowerCase();
+    // Path only — never search/hash, which the caller does not control.
+    return u.pathname
+      .split("/")
+      .some((seg) => decodeURIComponent(seg).toLowerCase() === want);
+  } catch {
+    return false;
+  }
+}
+
 /**
  * Disconnect from Superhuman
  */
@@ -205,6 +191,24 @@ export async function disconnect(conn: SuperhumanConnection): Promise<void> {
 
 const SUPERHUMAN_EXTENSION_ID = "dcgcnpooblobhncpnddnhoendgbnglpn";
 
+/**
+ * Is this target the Superhuman extension's service worker?
+ *
+ * The ID must be the exact HOST of a chrome-extension: URL. A substring test
+ * accepts any site serving a worker whose URL merely contains the ID — e.g.
+ * https://evil.example/dcgcnpooblobhncpnddnhoendgbnglpn/sw.js — and both
+ * extension paths then attach and run token/account extraction inside it.
+ */
+function isSuperhumanExtensionWorker(t: any): boolean {
+  if (t?.type !== "service_worker" || !t.url) return false;
+  try {
+    const u = new URL(t.url);
+    return u.protocol === "chrome-extension:" && u.hostname === SUPERHUMAN_EXTENSION_ID;
+  } catch {
+    return false;
+  }
+}
+
 export interface ChromeExtConnection {
   swClient: CDP.Client;
   mainClient: CDP.Client;
@@ -217,13 +221,7 @@ export async function findChromeExtension(port: number): Promise<any | null> {
   try {
     const host = getCDPHost();
     const targets = await CDP.List({ host, port });
-    return (
-      targets.find(
-        (t: any) =>
-          t.url.includes(SUPERHUMAN_EXTENSION_ID) &&
-          t.type === "service_worker"
-      ) ?? null
-    );
+    return targets.find(isSuperhumanExtensionWorker) ?? null;
   } catch {
     return null;
   }
@@ -240,15 +238,10 @@ export async function connectToSuperhumanChrome(
     const host = getCDPHost();
     const targets = await CDP.List({ host, port });
 
-    const sw = targets.find(
-      (t: any) =>
-        t.url.includes(SUPERHUMAN_EXTENSION_ID) &&
-        t.type === "service_worker"
-    );
-    const mainPage = targets.find(
-      (t: any) =>
-        t.url.includes("mail.superhuman.com") && t.type === "page"
-    );
+    const sw = targets.find(isSuperhumanExtensionWorker);
+    // The page we attach to and run credential-reading code in — the one place
+    // a forged host would do real damage. classifyTarget verifies the hostname.
+    const mainPage = targets.find((t: any) => classifyTarget(t) === "chrome");
 
     if (!sw || !mainPage) return null;
 

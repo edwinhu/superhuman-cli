@@ -51,10 +51,30 @@ describe("getCDPPort", () => {
 });
 
 describe("discoverSuperhumanPort", () => {
-  test("honors explicit CDP_PORT without probing", async () => {
+  test("explicit CDP_PORT is the only candidate probed", async () => {
+    // The previous version of this test asserted only the return value, which
+    // 9400 satisfies via the ERROR path too (probe fails -> catch ->
+    // getCDPPort() -> 9400). It could not tell "honored" from "discovery
+    // completely broken". Assert what is actually load-bearing: no OTHER port
+    // is touched.
     process.env.CDP_PORT = "9400";
-    // Explicit override must win and short-circuit any CDP probing.
-    expect(await discoverSuperhumanPort()).toBe(9400);
+    const CDP = (await import("chrome-remote-interface")).default as any;
+    const realList = CDP.List;
+    const listed: number[] = [];
+    CDP.List = async (opts: any) => {
+      listed.push(opts.port);
+      return [{ type: "page", url: "https://mail.superhuman.com/inbox" }];
+    };
+    try {
+      const { resetEndpointCache } = await import("../cdp-endpoint");
+      resetEndpointCache();
+      expect(await discoverSuperhumanPort()).toBe(9400);
+      expect(listed).toEqual([9400]); // never 9252, never 9222
+    } finally {
+      CDP.List = realList;
+      const { resetEndpointCache } = await import("../cdp-endpoint");
+      resetEndpointCache();
+    }
   });
 });
 

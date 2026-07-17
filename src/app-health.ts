@@ -19,6 +19,7 @@
  * investigation of recurring focus stealing.
  */
 import CDP from "chrome-remote-interface";
+import { classifyTarget } from "./cdp-endpoint";
 import { getCDPHost, getCDPPort } from "./superhuman-api";
 
 const APP_PATH = "/Applications/Superhuman.app";
@@ -37,12 +38,10 @@ export async function isBackgroundPageReachable(
 ): Promise<boolean> {
   try {
     const targets = await CDP.List({ host: getCDPHost(), port });
-    return targets.some(
-      (t: any) =>
-        t.type === "page" &&
-        t.url.includes("background_page.html") &&
-        t.url.includes("superhuman"),
-    );
+    // classifyTarget, not substrings. This module having its own matcher is how
+    // the classifier's superhuman-app:// blind spot stayed hidden: app-health
+    // kept reporting the desktop app healthy while discovery could not see it.
+    return targets.some((t: any) => classifyTarget(t) === "electron");
   } catch {
     return false;
   }
