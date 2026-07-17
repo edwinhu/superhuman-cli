@@ -26,18 +26,58 @@ function mockCDPList(targets: any[] | (() => never)) {
   });
 }
 
+/**
+ * The MEASURED target set of the shipping Superhuman.app.
+ *
+ * Captured live 2026-07-17 from /Applications/Superhuman.app relaunched with
+ * --remote-debugging-port=9252. These are every `type: "page"` target it
+ * exposed, verbatim. Do not "tidy" these URLs — they are a recording, not a
+ * design. The background page is served over HTTPS on mail.superhuman.com;
+ * the superhuman-app:// targets that DO exist are the main window and the tab
+ * strip, on hostname "production", and are NOT the background page.
+ *
+ * The previous fixture here asserted a background page at
+ * superhuman-app://superhuman.com/background_page.html. No such target exists,
+ * and none ever did (see cdp-endpoint.ts's superhuman-app:// branch comment).
+ */
+const REAL_APP_TARGETS = [
+  { type: "page", url: "superhuman-app://production/browserWindow.html", id: "win1" },
+  {
+    type: "page",
+    url: "https://mail.superhuman.com/eddyhu@gmail.com/inbox/other/thread/abc123",
+    id: "mail1",
+  },
+  { type: "page", url: "superhuman-app://production/tabs.html", id: "tabs1" },
+  {
+    type: "page",
+    url: "https://mail.superhuman.com/~backend/build/background_page.html",
+    id: "bg1",
+  },
+];
+
 describe("isBackgroundPageReachable", () => {
-  test("true when a Superhuman background_page target is present", async () => {
-    mockCDPList([
-      { type: "page", url: "https://mail.superhuman.com/eddyhu@gmail.com", id: "p1" },
-      {
-        type: "page",
-        url: "superhuman-app://superhuman.com/background_page.html",
-        id: "bg1",
-      },
-    ]);
+  test("true against the real app's measured target set", async () => {
+    mockCDPList(REAL_APP_TARGETS);
     const { isBackgroundPageReachable } = await import("../app-health");
     expect(await isBackgroundPageReachable(9999)).toBe(true);
+  });
+
+  test("the real background page ALONE is sufficient (it is the target that carries this)", async () => {
+    // Pinning which target actually satisfies the gate. If someone breaks the
+    // https/mail.superhuman.com branch, this fails — the test above would not,
+    // because it would still have three other targets to hide behind.
+    mockCDPList([REAL_APP_TARGETS[3]]);
+    const { isBackgroundPageReachable } = await import("../app-health");
+    expect(await isBackgroundPageReachable(9999)).toBe(true);
+  });
+
+  test("false when only the app's non-background-page targets are present", async () => {
+    // superhuman-app://production/{browserWindow,tabs}.html are the real app,
+    // but they are NOT the background page — silent refresh cannot run on them,
+    // so the gate must stay shut rather than promise a path that does not work.
+    mockCDPList([REAL_APP_TARGETS[0], REAL_APP_TARGETS[2]]);
+    const { isBackgroundPageReachable } = await import("../app-health");
+    expect(await isBackgroundPageReachable(9999)).toBe(false);
   });
 
   test("false when only a non-Superhuman Chromium answers (Dia/Obsidian)", async () => {

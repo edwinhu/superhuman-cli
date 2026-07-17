@@ -66,17 +66,41 @@ const DEFAULT_CHROME_PORT = 9222;
 function isElectronTarget(url: string): boolean {
   if (!url.includes("background_page.html")) return false;
 
-  // The desktop app serves its background page over its OWN scheme:
-  //   superhuman-app://superhuman.com/background_page.html
-  // Requiring http(s) rejected it outright — discovery skipped a healthy
-  // Electron endpoint and desktop token refresh broke. Nothing but the app can
-  // register this scheme, so an exact host+path check is the identity.
   let u: URL | null = null;
   try {
     u = new URL(url);
   } catch {
     return false;
   }
+
+  // MEASURED 2026-07-17, /Applications/Superhuman.app --remote-debugging-port=9252.
+  // The four `type: "page"` targets the shipping app exposed, verbatim:
+  //
+  //   superhuman-app://production/browserWindow.html                  -> null
+  //   https://mail.superhuman.com/…/inbox/other/thread/…              -> chrome
+  //   superhuman-app://production/tabs.html                           -> null
+  //   https://mail.superhuman.com/~backend/build/background_page.html -> electron
+  //
+  // So the REAL background page arrives over https on mail.superhuman.com and is
+  // caught by the hostMatches branch at the bottom of this function — NOT here.
+  // The superhuman-app:// scheme is real, but the targets using it are the main
+  // window and the tab strip, on hostname "production", and neither is a
+  // background page. No superhuman-app:// background page was observed.
+  //
+  // This branch has therefore never fired on the shipping app. It was added in
+  // 609dfb7 on the strength of this repo's own app-health fixture — a fixture
+  // that asserted superhuman-app://superhuman.com/background_page.html and was
+  // itself written from assumption, never from a measurement (a571d32). The
+  // fixture invented the shape; this branch was then built to satisfy the
+  // fixture. Nothing outside that loop has ever attested to it.
+  //
+  // It is KEPT, not deleted: one measurement of one build on one machine is thin
+  // evidence for "no build ever serves this", and a false negative here breaks
+  // desktop token refresh outright (the failure mode 609dfb7 was fixing). It
+  // costs one URL parse and, being an exact host+path equality, cannot widen
+  // into an impostor hole while it sits unused. If you ever see a real
+  // superhuman-app:// background page, MEASURE it and correct the host/path
+  // here — do not guess "production" because the window targets use it.
   if (u.protocol === `${ELECTRON_SCHEME}:`) {
     return (
       u.hostname.toLowerCase() === "superhuman.com" &&
