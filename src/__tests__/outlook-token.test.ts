@@ -85,3 +85,59 @@ describe("getOwaToken (disk-cache hit)", () => {
     expect(tok.email).toBe("ehu@law.virginia.edu");
   });
 });
+
+describe("getOwaToken (single-session fallback: UPN cache key vs SMTP --account)", () => {
+  test("a non-matching SMTP address reuses the single fresh token (no CDP scrape)", async () => {
+    // The token is keyed by its UPN, but the caller asks by SMTP address —
+    // the two identify the same one signed-in mailbox. Must NOT re-scrape.
+    const expiresOn = Date.now() + 3600_000;
+    await seed({
+      "vwh7mb@lawschool.virginia.edu": {
+        accessToken: "the-token",
+        email: "vwh7mb@lawschool.virginia.edu",
+        expiresOn,
+      },
+    });
+    const tok = await getOwaToken("ehu@law.virginia.edu");
+    expect(tok.accessToken).toBe("the-token");
+    expect(tok.email).toBe("vwh7mb@lawschool.virginia.edu");
+  });
+
+  test("aliases the requested SMTP address to the token so the next lookup hits directly", async () => {
+    const expiresOn = Date.now() + 3600_000;
+    await seed({
+      "vwh7mb@lawschool.virginia.edu": {
+        accessToken: "the-token",
+        email: "vwh7mb@lawschool.virginia.edu",
+        expiresOn,
+      },
+    });
+    await getOwaToken("ehu@law.virginia.edu");
+    // The disk cache should now also be keyed by the SMTP address.
+    expect(await listOwaAccounts()).toContain("vwh7mb@lawschool.virginia.edu");
+    const raw = JSON.parse(
+      await Bun.file(join(dir, "owa-tokens.json")).text()
+    );
+    expect(raw["ehu@law.virginia.edu"]?.accessToken).toBe("the-token");
+  });
+
+  test("with several fresh tokens it does NOT guess — falls through to the (absent) CDP scrape", async () => {
+    // Ambiguous: two mailboxes, neither matches the requested key. We must not
+    // silently return the wrong one; with no browser this surfaces as an error.
+    const expiresOn = Date.now() + 3600_000;
+    await seed({
+      "a@x.com": { accessToken: "a", email: "a@x.com", expiresOn },
+      "b@y.com": { accessToken: "b", email: "b@y.com", expiresOn },
+    });
+    // Pin CDP to a dead port so the scrape fails fast and never touches a real
+    // browser that may be running on the default port.
+    const priorPort = process.env.CDP_PORT;
+    process.env.CDP_PORT = "59999";
+    try {
+      await expect(getOwaToken("c@z.com")).rejects.toThrow();
+    } finally {
+      if (priorPort === undefined) delete process.env.CDP_PORT;
+      else process.env.CDP_PORT = priorPort;
+    }
+  });
+});
