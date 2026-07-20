@@ -41,6 +41,14 @@ export interface TokenInfo {
   expires: number;
   /** @deprecated SuperhumanProvider is provider-agnostic; retained for CachedTokenProvider compat */
   isMicrosoft: boolean;
+  /**
+   * True when `accessToken` is an Outlook Web (OWA) first-party session token
+   * (aud=outlook.office.com), brokered from the live OWA tab rather than issued
+   * by Superhuman. Verbs branch on this to route to the Outlook REST backend
+   * instead of MS Graph / the Superhuman backend. Always accompanies
+   * `isMicrosoft: true`.
+   */
+  isOutlookWeb?: boolean;
   /** @deprecated OAuth refresh token — not needed for Superhuman JWT flow */
   refreshToken?: string;
   // Superhuman backend API fields

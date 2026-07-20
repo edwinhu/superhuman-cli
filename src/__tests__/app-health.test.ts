@@ -9,10 +9,25 @@
  * wrong is exactly what caused the recurring focus-steal: a false
  * "reachable" would let the caller assume the silent path works.
  */
-import { test, expect, describe, mock, afterEach } from "bun:test";
+import { test, expect, describe, mock, afterEach, afterAll } from "bun:test";
+import RealCDPDefault from "chrome-remote-interface";
+
+// Snapshot the REAL chrome-remote-interface export before any mock.module runs.
+// bun's mock.restore() does NOT revert mock.module — it mutates the module's
+// global bindings (see read-backend.test.ts / labels-list.test.ts) — so a
+// module mock left here leaks into later test files: attachment-e2e's
+// CDP({ port }) would resolve to the stub `{}` instead of throwing, so that
+// E2E suite stops skipping (its Superhuman port is down) and runs against a
+// mailbox that now routes to Outlook Web. Restore the real module when this
+// file's tests finish so downstream files see the unmocked import.
+const REAL_CRI = { default: RealCDPDefault };
 
 afterEach(() => {
   mock.restore();
+});
+
+afterAll(() => {
+  mock.module("chrome-remote-interface", () => REAL_CRI);
 });
 
 function mockCDPList(targets: any[] | (() => never)) {

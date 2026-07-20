@@ -78,8 +78,20 @@ import { isBackgroundPageReachable, relaunchSuperhumanForCDP } from "./app-healt
 import type { ConnectionProvider } from "./connection-provider";
 import { CachedTokenProvider, CDPConnectionProvider, resolveProvider } from "./connection-provider";
 import { SuperhumanProvider } from "./superhuman-provider";
+import { OutlookWebProvider } from "./outlook-web-provider";
+import {
+  makeOwaFetcher,
+  owaCreateDraft,
+  owaReply,
+  owaForward,
+  owaSendDraft,
+  owaSendNew,
+  owaContacts,
+  owaListDrafts,
+} from "./outlook-rest-api";
 import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
+import { OutlookDraftProvider } from "./providers/outlook-draft-provider";
 
 const VERSION = "0.38.5";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9252", 10);
@@ -1162,6 +1174,227 @@ async function getProvider(options: CliOptions): Promise<ConnectionProvider> {
 }
 
 /**
+ * Resolve an OutlookWebProvider for `email` when that account is a Microsoft
+ * mailbox routed to the Outlook Web backend (either a `microsoft` entry in
+ * tokens.json or an account the OWA broker knows about). Returns null for
+ * Google/Superhuman accounts so the normal path runs unchanged.
+ */
+async function owaProviderFor(email?: string): Promise<OutlookWebProvider | null> {
+  try {
+    const provider = await resolveProvider({ account: email });
+    return provider instanceof OutlookWebProvider ? provider : null;
+  } catch {
+    return null;
+  }
+}
+
+/** A TokenInfo shim (accessToken + isOutlookWeb) for an OWA account, or null. */
+async function resolveOwaTokenInfo(email?: string): Promise<TokenInfo | null> {
+  const provider = await owaProviderFor(email);
+  if (!provider) return null;
+  try {
+    return await provider.getToken();
+  } catch (e) {
+    error(`Outlook Web: ${(e as Error).message}`);
+    process.exit(1);
+  }
+}
+
+/**
+ * Resolve the attachment/raw-message auth ({accessToken, isMicrosoft,
+ * isOutlookWeb}) for an account, preferring the Outlook Web token for Microsoft
+ * mailboxes and falling back to the cached Superhuman/OAuth token otherwise.
+ */
+async function attachmentAuthFor(
+  email?: string
+): Promise<{ accessToken: string; isMicrosoft: boolean; isOutlookWeb?: boolean } | undefined> {
+  const owa = await resolveOwaTokenInfo(email);
+  if (owa) {
+    return { accessToken: owa.accessToken, isMicrosoft: true, isOutlookWeb: true };
+  }
+  const token = await resolveToken(email);
+  return token
+    ? { accessToken: token.accessToken, isMicrosoft: token.isMicrosoft }
+    : undefined;
+}
+
+/** Print the reason a verb can't run on outlook-web and exit non-zero. */
+function owaUnsupported(verb: string): never {
+  error(`${verb} is not available on outlook-web accounts.`);
+  process.exit(1);
+}
+
+/** Parse recipient strings into Outlook-friendly "Name <email>" / bare list. */
+function owaRecipients(list: string[]): string[] {
+  return list.filter(Boolean);
+}
+
+// --- Outlook Web command handlers -----------------------------------------
+
+/** `send` on an OWA account: compose + send via Outlook REST (/sendmail). */
+async function cmdSendOwa(provider: OutlookWebProvider, options: CliOptions): Promise<void> {
+  if (options.attachFiles && options.attachFiles.length > 0) {
+    owaUnsupported("Sending with attachments");
+  }
+  const html = options.html || textToHtml(options.body);
+  try {
+    await owaSendNew(provider.fetcher(), {
+      to: owaRecipients(options.to),
+      cc: owaRecipients(options.cc),
+      bcc: owaRecipients(options.bcc),
+      subject: options.subject || "",
+      body: html,
+      html: true,
+    });
+  } catch (e) {
+    error(`Failed to send: ${(e as Error).message}`);
+    process.exit(1);
+  }
+  success("Email sent");
+  log(`  ${colors.dim}Account: ${await provider.getCurrentEmail()}${colors.reset}`);
+}
+
+/** Apply --to/--cc overrides to a freshly created reply/forward draft. */
+async function owaPatchRecipients(provider: OutlookWebProvider, draftId: string, options: CliOptions) {
+  const patch: any = {};
+  if (options.to.length > 0) {
+    patch.ToRecipients = owaRecipients(options.to).map((s) => {
+      const m = s.match(/^(.*?)\s*<([^<>]+)>\s*$/);
+      return m
+        ? { EmailAddress: { Name: m[1]!.trim() || undefined, Address: m[2]!.trim() } }
+        : { EmailAddress: { Address: s.trim() } };
+    });
+  }
+  if (options.cc.length > 0) {
+    patch.CcRecipients = owaRecipients(options.cc).map((s) => {
+      const m = s.match(/^(.*?)\s*<([^<>]+)>\s*$/);
+      return m
+        ? { EmailAddress: { Name: m[1]!.trim() || undefined, Address: m[2]!.trim() } }
+        : { EmailAddress: { Address: s.trim() } };
+    });
+  }
+  if (Object.keys(patch).length > 0) {
+    await provider.owaFetch("PATCH", `/messages/${encodeURIComponent(draftId)}`, patch);
+  }
+}
+
+/** `reply` / `reply-all` on an OWA account. */
+async function cmdReplyOwa(
+  provider: OutlookWebProvider,
+  options: CliOptions,
+  all: boolean
+): Promise<void> {
+  if (options.attachFiles && options.attachFiles.length > 0) {
+    owaUnsupported("Replying with attachments");
+  }
+  const html = options.html || textToHtml(options.body || "");
+  const fetcher = provider.fetcher();
+  try {
+    const draft = await owaReply(fetcher, options.threadId!, { body: html, html: true, all });
+    if (!draft.id) {
+      error("Failed to create reply draft");
+      process.exit(1);
+    }
+    await owaPatchRecipients(provider, draft.id, options);
+    if (options.send) {
+      await owaSendDraft(fetcher, draft.id);
+      success("Reply sent");
+    } else {
+      success("Reply draft created in Outlook");
+      log(`  ${colors.dim}Draft ID: ${draft.id}${colors.reset}`);
+    }
+    log(`  ${colors.dim}Account: ${await provider.getCurrentEmail()}${colors.reset}`);
+  } catch (e) {
+    error(`Failed to ${options.send ? "send reply" : "create reply draft"}: ${(e as Error).message}`);
+    process.exit(1);
+  }
+}
+
+/** `forward` on an OWA account. */
+async function cmdForwardOwa(provider: OutlookWebProvider, options: CliOptions): Promise<void> {
+  if (options.attachFiles && options.attachFiles.length > 0) {
+    owaUnsupported("Forwarding with attachments");
+  }
+  if (options.to.length === 0) {
+    error("Forward requires at least one recipient (--to)");
+    process.exit(1);
+  }
+  const html = options.html || textToHtml(options.body || "");
+  const fetcher = provider.fetcher();
+  try {
+    const draft = await owaForward(fetcher, options.threadId!, {
+      to: owaRecipients(options.to),
+      body: html,
+      html: true,
+    });
+    if (!draft.id) {
+      error("Failed to create forward draft");
+      process.exit(1);
+    }
+    if (options.send) {
+      await owaSendDraft(fetcher, draft.id);
+      success("Forward sent");
+    } else {
+      success("Forward draft created in Outlook");
+      log(`  ${colors.dim}Draft ID: ${draft.id}${colors.reset}`);
+    }
+    log(`  ${colors.dim}Account: ${await provider.getCurrentEmail()}${colors.reset}`);
+  } catch (e) {
+    error(`Failed to ${options.send ? "send forward" : "create forward draft"}: ${(e as Error).message}`);
+    process.exit(1);
+  }
+}
+
+/** `draft` create/update on an OWA account (create only; update falls back). */
+async function cmdDraftOwa(provider: OutlookWebProvider, options: CliOptions): Promise<void> {
+  const fetcher = provider.fetcher();
+  if (options.updateDraftId) {
+    // Merge-update a draft: PATCH the fields the user passed.
+    const patch: any = {};
+    if (options.subject) patch.Subject = options.subject;
+    if (options.html || options.body) {
+      patch.Body = { ContentType: "HTML", Content: options.html || textToHtml(options.body) };
+    }
+    if (options.to.length > 0 || options.cc.length > 0) {
+      await owaPatchRecipients(provider, options.updateDraftId, options);
+    }
+    try {
+      if (Object.keys(patch).length > 0) {
+        await provider.owaFetch("PATCH", `/messages/${encodeURIComponent(options.updateDraftId)}`, patch);
+      }
+      success("Draft updated in Outlook");
+      log(`  ${colors.dim}Draft ID: ${options.updateDraftId}${colors.reset}`);
+    } catch (e) {
+      error(`Failed to update draft: ${(e as Error).message}`);
+      process.exit(1);
+    }
+    return;
+  }
+
+  requireAnyRecipient(options);
+  if (options.attachFiles && options.attachFiles.length > 0) {
+    owaUnsupported("Draft attachments");
+  }
+  const html = options.html || textToHtml(options.body);
+  try {
+    const draft = await owaCreateDraft(fetcher, {
+      to: owaRecipients(options.to),
+      cc: owaRecipients(options.cc),
+      bcc: owaRecipients(options.bcc),
+      subject: options.subject || "",
+      body: html,
+      html: true,
+    });
+    success("Draft created in Outlook");
+    log(`  ${colors.dim}Draft ID: ${draft.id}${colors.reset}`);
+    log(`  ${colors.dim}Account: ${await provider.getCurrentEmail()}${colors.reset}`);
+  } catch (e) {
+    error(`Failed to create draft: ${(e as Error).message}`);
+    process.exit(1);
+  }
+}
+
+/**
  * Resolve all recipients via the local Superhuman contacts DB.
  * Names without @ are looked up in contacts; emails are passed through unchanged.
  * The provider argument is unused (kept for call-site compatibility) — contact
@@ -1507,6 +1740,7 @@ async function resolveBackendUserInfo(
 
 
 async function cmdSnippets(options: CliOptions) {
+  if (await owaProviderFor(options.account)) owaUnsupported("Snippets");
   const { userInfo } = await resolveBackendUserInfo(options);
   const snippets = await listSnippets(userInfo);
 
@@ -1644,6 +1878,9 @@ async function cmdSnippet(options: CliOptions) {
 
 
 async function cmdDraft(options: CliOptions) {
+  const owaProvider = await owaProviderFor(options.account);
+  if (owaProvider) return cmdDraftOwa(owaProvider, options);
+
   // If updating an existing draft
   if (options.updateDraftId) {
     const draftId = options.updateDraftId;
@@ -1922,6 +2159,21 @@ async function cmdDeleteDraft(options: CliOptions) {
     process.exit(1);
   }
 
+  const owaProvider = await owaProviderFor(options.account);
+  if (owaProvider) {
+    const draftProvider = new OutlookDraftProvider(owaProvider);
+    for (const draftId of draftIds) {
+      info(`Deleting Outlook draft ${draftId.slice(-15)}...`);
+      try {
+        await draftProvider.deleteDraft(draftId);
+        success(`Deleted Outlook draft ${draftId.slice(-15)}`);
+      } catch (e) {
+        error(`Failed to delete draft: ${(e as Error).message}`);
+      }
+    }
+    return;
+  }
+
   // Separate native drafts from provider drafts
   const nativeDraftIds = draftIds.filter(id => id.startsWith("draft00"));
   const providerDraftIds = draftIds.filter(id => !id.startsWith("draft00"));
@@ -1987,6 +2239,18 @@ async function cmdSendDraft(options: CliOptions) {
     error("Draft ID is required");
     error("Usage: superhuman draft send <draft-id> --account=<email> --to=<recipient> --subject=<subject> --body=<body>");
     process.exit(1);
+  }
+
+  const owaProvider = await owaProviderFor(options.account);
+  if (owaProvider) {
+    try {
+      await owaSendDraft(owaProvider.fetcher(), draftId);
+      success(`Draft ${draftId.slice(-15)} sent`);
+    } catch (e) {
+      error(`Failed to send draft: ${(e as Error).message}`);
+      process.exit(1);
+    }
+    return;
   }
 
   // Validate draft ID format
@@ -2172,20 +2436,28 @@ async function cmdListDrafts(options: CliOptions) {
   const filterTo = options.to.length > 0 ? options.to[0]!.toLowerCase() : "";
   const filterSubject = options.subject ? options.subject.toLowerCase() : "";
 
-  const token = await resolveToken(options.account);
-  if (!token) {
+  // Outlook Web accounts list drafts from the Outlook Drafts folder.
+  const owaProvider = await owaProviderFor(options.account);
+  const draftProvider = owaProvider
+    ? new OutlookDraftProvider(owaProvider)
+    : null;
+
+  const token = draftProvider ? null : await resolveToken(options.account);
+  if (!draftProvider && !token) {
     error("Could not resolve Superhuman credentials");
     process.exit(1);
   }
 
-  info(`Fetching drafts from ${token.email}...`);
+  const accountLabel = draftProvider
+    ? await owaProvider!.getCurrentEmail()
+    : token!.email;
+  info(`Fetching drafts from ${accountLabel}...`);
 
   try {
-    // Use Superhuman native draft provider only
-    const nativeProvider = new SuperhumanDraftProvider(token);
-
-    // Use DraftService to fetch drafts
-    const service = new DraftService([nativeProvider]);
+    // Native draft provider: Outlook (OWA) or Superhuman.
+    const service = new DraftService([
+      draftProvider ?? new SuperhumanDraftProvider(token!),
+    ]);
     let drafts = await service.listDrafts(limit, offset);
 
     // Apply --to filter
@@ -2208,7 +2480,7 @@ async function cmdListDrafts(options: CliOptions) {
     }
 
     if (drafts.length === 0) {
-      log(`${colors.dim}No drafts found in ${token.email}.${colors.reset}`);
+      log(`${colors.dim}No drafts found in ${accountLabel}.${colors.reset}`);
       return;
     }
 
@@ -2247,6 +2519,9 @@ async function cmdSend(options: CliOptions) {
   // `send` composes and sends a new email. To send an existing saved draft,
   // use `draft send <id>` (cmdSendDraft) — the single code path for that.
   requireAnyRecipient(options);
+
+  const owaProvider = await owaProviderFor(options.account);
+  if (owaProvider) return cmdSendOwa(owaProvider, options);
 
   // Native path: create a Superhuman draft, then send it via messages/send —
   // the same two-step flow as `draft create` + `draft send`, which is the
@@ -2874,6 +3149,9 @@ async function cmdReply(options: CliOptions) {
     process.exit(1);
   }
 
+  const owaProvider = await owaProviderFor(options.account);
+  if (owaProvider) return cmdReplyOwa(owaProvider, options, false);
+
   // Fast path: use cached Superhuman credentials (no CDP needed)
   {
     const token = await resolveToken(options.account);
@@ -3041,6 +3319,9 @@ async function cmdReplyAll(options: CliOptions) {
     process.exit(1);
   }
 
+  const owaProvider = await owaProviderFor(options.account);
+  if (owaProvider) return cmdReplyOwa(owaProvider, options, true);
+
   // Fast path: use cached Superhuman credentials (no CDP needed)
   {
     const token = await resolveToken(options.account);
@@ -3200,6 +3481,9 @@ async function cmdForward(options: CliOptions) {
     process.exit(1);
   }
 
+  const owaProvider = await owaProviderFor(options.account);
+  if (owaProvider) return cmdForwardOwa(owaProvider, options);
+
   // Fast path: use cached Superhuman credentials (no CDP needed)
   {
     const token = await resolveToken(options.account);
@@ -3356,6 +3640,12 @@ async function cmdForward(options: CliOptions) {
  * command, or exit. These ops are token-direct (no running app required).
  */
 async function requireToken(options: CliOptions) {
+  // Microsoft accounts route to the Outlook Web token (Outlook REST), which the
+  // mutation verbs (archive/delete/mark/label/star) understand via
+  // token.isOutlookWeb — no Superhuman credentials needed.
+  const owa = await resolveOwaTokenInfo(options.account);
+  if (owa) return owa;
+
   const token = await resolveToken(options.account);
   if (!token?.email || !(token.superhumanToken?.token || token.idToken || token.accessToken)) {
     error("Could not resolve Superhuman credentials. Run 'superhuman account auth'.");
@@ -3688,6 +3978,8 @@ async function cmdSnooze(options: CliOptions) {
     process.exit(1);
   }
 
+  if (await owaProviderFor(options.account)) owaUnsupported("Snooze");
+
   if (!options.snoozeUntil) {
     error("Snooze time is required (--until)");
     console.log(`Usage: superhuman snooze set <thread-id> --until <time>`);
@@ -3734,6 +4026,8 @@ async function cmdUnsnooze(options: CliOptions) {
     process.exit(1);
   }
 
+  if (await owaProviderFor(options.account)) owaUnsupported("Snooze");
+
   const token = await requireToken(options);
 
   let successCount = 0;
@@ -3758,6 +4052,8 @@ async function cmdUnsnooze(options: CliOptions) {
 }
 
 async function cmdSnoozed(options: CliOptions) {
+  if (await owaProviderFor(options.account)) owaUnsupported("Snooze");
+
   const token = await requireToken(options);
 
   const threads = await listSnoozed(token, options.limit);
@@ -3826,10 +4122,7 @@ async function cmdDownload(options: CliOptions) {
     }
 
     const provider = await getProvider(options);
-    const token = await resolveToken(options.account);
-    const auth = token
-      ? { accessToken: token.accessToken, isMicrosoft: token.isMicrosoft }
-      : undefined;
+    const auth = await attachmentAuthFor(options.account);
 
     try {
       info(`Downloading attachment ${options.attachmentId}...`);
@@ -3855,10 +4148,7 @@ async function cmdDownload(options: CliOptions) {
 
   const provider = await getProvider(options);
   const accountEmail = await provider.getCurrentEmail();
-  const token = await resolveToken(options.account);
-  const auth = token
-    ? { accessToken: token.accessToken, isMicrosoft: token.isMicrosoft }
-    : undefined;
+  const auth = await attachmentAuthFor(options.account);
 
   const attachments = await listAttachments(provider, options.threadId, accountEmail);
 
@@ -3913,6 +4203,33 @@ async function cmdExportEml(options: CliOptions) {
     error("Thread ID is required (or use --message <provider-message-id>)");
     console.log(`Usage: superhuman export eml <thread-id> [--message <id>] [--output <file.eml>] [--account <email>]`);
     process.exit(1);
+  }
+
+  // Outlook Web: inbox ids ARE message ids, and the raw MIME comes from the
+  // Outlook REST `$value` endpoint (not MS Graph). Route directly.
+  const owaProvider = await owaProviderFor(options.account);
+  if (owaProvider) {
+    const messageId = options.messageId || options.threadId;
+    if (!messageId) {
+      error("Message id or thread id required.");
+      process.exit(1);
+    }
+    try {
+      info(`Exporting message ${messageId} as .eml...`);
+      const owaTok = await owaProvider.getToken();
+      const raw = await downloadRawMessage(messageId, {
+        accessToken: owaTok.accessToken,
+        isMicrosoft: true,
+        isOutlookWeb: true,
+      });
+      const outputPath = options.outputPath || `${messageId}.eml`;
+      await Bun.write(outputPath, raw);
+      success(`Exported: ${outputPath} (${formatFileSize(raw.length)})`);
+    } catch (e) {
+      error(`Failed to export: ${(e as Error).message}`);
+      process.exit(1);
+    }
+    return;
   }
 
   const token = await requireToken(options);
@@ -4652,15 +4969,32 @@ async function cmdContacts(options: CliOptions) {
     process.exit(1);
   }
 
-  // Local-first: query Superhuman's own contacts table in the per-account
-  // SQLite blob. No CDP connection or provider API needed.
-  if (options.account) {
-    info(`Searching contacts in account: ${options.account}`);
+  // Outlook Web accounts have no local Superhuman contacts blob — query the
+  // Outlook REST contacts endpoint instead.
+  const owaProvider = await owaProviderFor(options.account);
+  let contacts: Contact[];
+  if (owaProvider) {
+    try {
+      contacts = await owaContacts(
+        owaProvider.fetcher(),
+        options.contactsQuery,
+        options.limit
+      );
+    } catch (e) {
+      error(`Contact search failed: ${(e as Error).message}`);
+      process.exit(1);
+    }
+  } else {
+    // Local-first: query Superhuman's own contacts table in the per-account
+    // SQLite blob. No CDP connection or provider API needed.
+    if (options.account) {
+      info(`Searching contacts in account: ${options.account}`);
+    }
+    contacts = searchContactsLocal(options.contactsQuery, {
+      limit: options.limit,
+      account: options.account || undefined,
+    });
   }
-  const contacts: Contact[] = searchContactsLocal(options.contactsQuery, {
-    limit: options.limit,
-    account: options.account || undefined,
-  });
 
   if (options.json) {
     printJson(contacts);
@@ -4676,6 +5010,7 @@ async function cmdContacts(options: CliOptions) {
 }
 
 async function cmdAi(options: CliOptions) {
+  if (await owaProviderFor(options.account)) owaUnsupported("AI search");
   if (!options.aiQuery) {
     error("Prompt is required");
     console.log(`Usage: superhuman ai "prompt"                    (ask AI / search emails)`);

@@ -10,6 +10,19 @@
  */
 
 import type { ConnectionProvider } from "./connection-provider";
+// NOTE: OutlookWebProvider is imported LAZILY (dynamic import) inside
+// listAttachments — importing it statically pulls owa-token ->
+// chrome-remote-interface into this module's eager graph, which this file
+// shares with the live attachment-e2e suite. That extra binding interferes
+// with app-health.test.ts's chrome-remote-interface mock/restore and flips
+// attachment-e2e from "skip (no CDP)" into a hard failure. outlook-rest-api
+// itself is CDP-free (type-only imports), so its functions import statically.
+import {
+  makeOwaFetcher,
+  owaListAttachments,
+  owaDownloadAttachment,
+  owaFetchRaw,
+} from "./outlook-rest-api";
 import { readThreadFromDB, listLocalAccounts } from "./sqlite-search";
 import { getCachedToken, loadTokensFromDisk } from "./token-api";
 
@@ -45,6 +58,8 @@ export interface AttachmentAuthOptions {
   accessToken: string;
   /** True for Microsoft/Outlook accounts, false for Gmail */
   isMicrosoft: boolean;
+  /** True when accessToken is an Outlook Web REST token (route to Outlook REST). */
+  isOutlookWeb?: boolean;
 }
 
 const MIME_TYPES: Record<string, string> = {
@@ -126,6 +141,15 @@ export async function listAttachments(
   threadId: string,
   accountEmail?: string
 ): Promise<Attachment[]> {
+  // Outlook Web: no local SQLite blob and the token is an Outlook REST token —
+  // list attachments straight from the message via Outlook REST. Lazy import
+  // keeps owa-token/chrome-remote-interface out of this module's eager graph
+  // (see the import note at the top of this file).
+  const { OutlookWebProvider } = await import("./outlook-web-provider");
+  if (_provider instanceof OutlookWebProvider) {
+    return owaListAttachments(_provider.fetcher(), threadId);
+  }
+
   // If no account email provided, fall back to empty list (can't query SQLite)
   if (!accountEmail) {
     return [];
@@ -346,7 +370,9 @@ export async function downloadAttachment(
     );
   }
 
-  if (auth.isMicrosoft) {
+  if (auth.isOutlookWeb) {
+    return owaDownloadAttachment(makeOwaFetcher(auth.accessToken), messageId, attachmentId);
+  } else if (auth.isMicrosoft) {
     return downloadAttachmentMsGraph(messageId, attachmentId, auth.accessToken);
   } else {
     return downloadAttachmentGmail(messageId, attachmentId, auth.accessToken);
@@ -443,6 +469,13 @@ export async function downloadRawMessage(
     throw new Error(
       "downloadRawMessage requires an OAuth access token. " +
       "Pass auth.accessToken from the cached token (token.accessToken)."
+    );
+  }
+
+  if (auth.isOutlookWeb) {
+    return owaFetchRaw(
+      auth.accessToken,
+      `/messages/${encodeURIComponent(messageId)}/$value`
     );
   }
 

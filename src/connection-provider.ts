@@ -15,6 +15,8 @@ import {
 } from "./token-api";
 import { listAccounts } from "./accounts";
 import { SuperhumanProvider, type SuperhumanTokenInfo } from "./superhuman-provider";
+import { OutlookWebProvider } from "./outlook-web-provider";
+import { listOwaAccounts } from "./owa-token";
 
 /**
  * Account type detection result (matches send-api.ts AccountInfo)
@@ -139,6 +141,13 @@ export class CDPConnectionProvider implements ConnectionProvider {
  * otherwise fall back to CachedTokenProvider for backward compat.
  */
 function providerFromToken(token: TokenInfo, email: string): ConnectionProvider {
+  // Microsoft accounts route to the Outlook Web backend (the first-party OWA
+  // token), BEFORE the superhumanToken check — the stale MS entry in tokens.json
+  // still carries a dead superhumanToken that must not win. Google accounts are
+  // untouched and still use Superhuman.
+  if (token.isMicrosoft) {
+    return new OutlookWebProvider(token.email || email);
+  }
   if (token.superhumanToken) {
     const shTokenInfo: SuperhumanTokenInfo = {
       token: token.superhumanToken.token,
@@ -162,6 +171,16 @@ function providerFromToken(token: TokenInfo, email: string): ConnectionProvider 
  * @param options - Object with optional `account` and `port` fields
  * @returns ConnectionProvider or null if no tokens and no CDP
  */
+/** Case-insensitive check: does the OWA broker know this account? */
+async function isOwaAccount(email: string): Promise<boolean> {
+  try {
+    const accounts = await listOwaAccounts();
+    return accounts.some((a) => a.toLowerCase() === email.toLowerCase());
+  } catch {
+    return false;
+  }
+}
+
 export async function resolveProvider(
   options: { account?: string; port?: number }
 ): Promise<ConnectionProvider | null> {
@@ -176,6 +195,11 @@ export async function resolveProvider(
     const token = await getCachedToken(options.account);
     if (token) {
       return providerFromToken(token, options.account);
+    }
+    // Not in tokens.json — the account may be a Microsoft mailbox the OWA broker
+    // knows about (logged-in Outlook Web tab) but Superhuman never authed.
+    if (await isOwaAccount(options.account)) {
+      return new OutlookWebProvider(options.account);
     }
     return null;
   }
@@ -192,6 +216,13 @@ export async function resolveProvider(
     return new CachedTokenProvider(accounts[0]);
   }
 
-  // No cached accounts at all — caller must handle
+  // No cached accounts at all — fall back to any Microsoft mailbox the OWA
+  // broker knows about (no Superhuman auth needed for those).
+  const owa = await listOwaAccounts().catch(() => [] as string[]);
+  if (owa.length > 0) {
+    return new OutlookWebProvider(owa[0]!);
+  }
+
+  // Nothing available — caller must handle
   return null;
 }
