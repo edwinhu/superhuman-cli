@@ -7,6 +7,18 @@
 
 import type { ConnectionProvider } from "./connection-provider";
 import { SuperhumanProvider } from "./superhuman-provider";
+import { OutlookWebProvider } from "./outlook-web-provider";
+import {
+  makeOwaFetcher,
+  owaListLabels,
+  owaListStarred,
+  owaArchive,
+  owaDelete,
+  owaMarkRead,
+  owaFlag,
+  owaAddLabel,
+  owaRemoveLabel,
+} from "./outlook-rest-api";
 import { listInboxFromDB, readThreadFromDB } from "./sqlite-search";
 import { refreshTokenViaCDP, type TokenInfo } from "./token-api";
 
@@ -51,6 +63,13 @@ export async function modifyThreadLabels(
 ): Promise<LabelResult> {
   if (addLabelIds.length === 0 && removeLabelIds.length === 0) {
     return { success: true };
+  }
+
+  // Outlook Web accounts: the access token is an Outlook REST token (not MS
+  // Graph), so route label writes to the Outlook REST backend. A "thread" id
+  // here is the message id (inbox listings expose message ids for OWA).
+  if (token.isOutlookWeb) {
+    return modifyThreadLabelsOwa(token.accessToken, threadId, addLabelIds, removeLabelIds);
   }
 
   const attempt = async (tok: TokenInfo): Promise<LabelResult> => {
@@ -234,6 +253,44 @@ function resolveMsMessageIds(email: string, threadId: string): string[] {
   return ids.length > 0 ? ids : [threadId];
 }
 
+/**
+ * Outlook Web: translate a superhuman label change into Outlook REST calls on
+ * the message. Read state → IsRead; STARRED → Flag; INBOX-removal → archive
+ * move; TRASH → deleted-items move; any other label → a Category add/remove.
+ * Never a hard delete. Applies to the single message id (OWA inbox ids are
+ * message ids).
+ */
+async function modifyThreadLabelsOwa(
+  accessToken: string,
+  messageId: string,
+  addLabelIds: string[],
+  removeLabelIds: string[]
+): Promise<LabelResult> {
+  if (!accessToken) {
+    return { success: false, error: "No Outlook Web access token available" };
+  }
+  const fetch = makeOwaFetcher(accessToken);
+  try {
+    if (removeLabelIds.includes("UNREAD")) await owaMarkRead(fetch, messageId, true);
+    else if (addLabelIds.includes("UNREAD")) await owaMarkRead(fetch, messageId, false);
+
+    if (removeLabelIds.includes("STARRED")) await owaFlag(fetch, messageId, false);
+    else if (addLabelIds.includes("STARRED")) await owaFlag(fetch, messageId, true);
+
+    if (addLabelIds.includes("TRASH")) await owaDelete(fetch, [messageId]);
+    else if (removeLabelIds.includes("INBOX")) await owaArchive(fetch, [messageId]);
+
+    // Any remaining (non-system) labels map to Outlook Categories.
+    const system = new Set(["UNREAD", "STARRED", "TRASH", "INBOX", "SH_IMPORTANT", "SH_OTHER"]);
+    for (const l of addLabelIds) if (!system.has(l)) await owaAddLabel(fetch, messageId, l);
+    for (const l of removeLabelIds) if (!system.has(l)) await owaRemoveLabel(fetch, messageId, l);
+
+    return { success: true };
+  } catch (e: any) {
+    return { success: false, error: e.message };
+  }
+}
+
 /** Map label add/remove sets to an MS Graph message PATCH body. */
 export function computeMicrosoftMessageUpdates(
   addLabelIds: string[],
@@ -300,6 +357,9 @@ export interface LabelResult {
  * @returns Array of labels with id and name
  */
 export async function listLabels(provider: ConnectionProvider): Promise<Label[]> {
+  if (provider instanceof OutlookWebProvider) {
+    return owaListLabels(provider.fetcher());
+  }
   if (provider instanceof SuperhumanProvider) {
     if (!provider.hasPortal()) {
       throw new Error(
@@ -412,6 +472,11 @@ export async function listStarred(
   provider: ConnectionProvider,
   limit: number = 50
 ): Promise<StarredThread[]> {
+  if (provider instanceof OutlookWebProvider) {
+    const me = await provider.getCurrentEmail();
+    return owaListStarred(provider.fetcher(), me, { limit });
+  }
+
   if (!(provider instanceof SuperhumanProvider)) {
     throw new Error(
       "SuperhumanProvider required. Run 'superhuman account auth' to authenticate."

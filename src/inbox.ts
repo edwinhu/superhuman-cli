@@ -7,6 +7,8 @@
 
 import type { ConnectionProvider } from "./connection-provider";
 import { SuperhumanProvider } from "./superhuman-provider";
+import { OutlookWebProvider } from "./outlook-web-provider";
+import { owaListInbox, owaSearch } from "./outlook-rest-api";
 import { listInboxFromDB, buildFtsMatchExpr } from "./sqlite-search";
 
 export interface InboxThread {
@@ -601,6 +603,29 @@ export async function listInbox(
   provider: ConnectionProvider,
   options: ListInboxOptions = {}
 ): Promise<InboxThread[]> {
+  if (provider instanceof OutlookWebProvider) {
+    const me = await provider.getCurrentEmail();
+    let threads = await owaListInbox(provider.fetcher(), me, {
+      limit: options.limit,
+      needsReply: options.needsReply,
+      label: options.labels?.[0],
+    });
+    if (options.unreadOnly) {
+      threads = threads.filter((t) => t.labelIds.includes("UNREAD"));
+    }
+    if (options.exclude?.length) {
+      const patterns = options.exclude.map((p) => p.toLowerCase());
+      threads = threads.filter((t) => {
+        const fromEmail = t.from.email.toLowerCase();
+        const fromName = t.from.name.toLowerCase();
+        const subject = t.subject.toLowerCase();
+        return !patterns.some(
+          (p) => fromEmail.includes(p) || fromName.includes(p) || subject.includes(p)
+        );
+      });
+    }
+    return threads;
+  }
   if (provider instanceof SuperhumanProvider) {
     return listInboxSuperhuman(provider, options);
   }
@@ -619,6 +644,10 @@ export async function searchInbox(
   provider: ConnectionProvider,
   options: SearchOptions
 ): Promise<InboxThread[]> {
+  if (provider instanceof OutlookWebProvider) {
+    const me = await provider.getCurrentEmail();
+    return owaSearch(provider.fetcher(), me, options.query, { limit: options.limit });
+  }
   if (provider instanceof SuperhumanProvider) {
     return searchInboxSuperhuman(provider, options);
   }

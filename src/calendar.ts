@@ -6,6 +6,14 @@
 
 import type { ConnectionProvider } from "./connection-provider";
 import { SuperhumanProvider } from "./superhuman-provider";
+import { OutlookWebProvider } from "./outlook-web-provider";
+import {
+  owaListEvents,
+  owaCreateEvent,
+  owaUpdateEvent,
+  owaDeleteEvent,
+  owaFreeBusy,
+} from "./outlook-rest-api";
 import { getCachedTokenRaw } from "./token-api";
 
 /**
@@ -210,6 +218,13 @@ export async function listEvents(
   provider: ConnectionProvider,
   options?: ListEventsOptions
 ): Promise<CalendarEvent[]> {
+  if (provider instanceof OutlookWebProvider) {
+    return owaListEvents(provider.fetcher(), {
+      timeMin: options?.timeMin ? toISOString(options.timeMin) : undefined,
+      timeMax: options?.timeMax ? toISOString(options.timeMax) : undefined,
+      limit: options?.limit,
+    });
+  }
   // --- CDP / SuperhumanProvider path ---
   if (provider instanceof SuperhumanProvider && provider.hasPortal()) {
     try {
@@ -261,6 +276,21 @@ export async function createEvent(
   provider: ConnectionProvider,
   event: CreateEventInput
 ): Promise<CalendarResult> {
+  if (provider instanceof OutlookWebProvider) {
+    try {
+      const eventId = await owaCreateEvent(provider.fetcher(), {
+        summary: event.summary,
+        start: event.start,
+        end: event.end,
+        description: event.description,
+        location: event.location,
+        attendees: event.attendees,
+      });
+      return { success: true, eventId };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  }
   // --- CDP / SuperhumanProvider path ---
   if (provider instanceof SuperhumanProvider && provider.hasPortal()) {
     try {
@@ -322,6 +352,14 @@ export async function deleteEvent(
   eventId: string,
   calendarId?: string
 ): Promise<CalendarResult> {
+  if (provider instanceof OutlookWebProvider) {
+    try {
+      await owaDeleteEvent(provider.fetcher(), eventId);
+      return { success: true };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  }
   // --- CDP / SuperhumanProvider path ---
   if (provider instanceof SuperhumanProvider && provider.hasPortal()) {
     try {
@@ -352,6 +390,21 @@ export async function updateEvent(
   updates: UpdateEventInput,
   calendarId?: string
 ): Promise<CalendarResult> {
+  if (provider instanceof OutlookWebProvider) {
+    try {
+      await owaUpdateEvent(provider.fetcher(), eventId, {
+        summary: updates.summary,
+        start: updates.start,
+        end: updates.end,
+        description: updates.description,
+        location: updates.location,
+        attendees: updates.attendees,
+      });
+      return { success: true, eventId };
+    } catch (e: any) {
+      return { success: false, error: e.message };
+    }
+  }
   // --- CDP / SuperhumanProvider path ---
   if (provider instanceof SuperhumanProvider && provider.hasPortal()) {
     try {
@@ -410,6 +463,13 @@ export async function getFreeBusy(
   provider: ConnectionProvider,
   options: FreeBusyOptions
 ): Promise<FreeBusyResult> {
+  if (provider instanceof OutlookWebProvider) {
+    return owaFreeBusy(
+      provider.fetcher(),
+      toISOString(options.timeMin),
+      toISOString(options.timeMax)
+    );
+  }
   // --- CDP / SuperhumanProvider path ---
   if (provider instanceof SuperhumanProvider && provider.hasPortal()) {
     try {

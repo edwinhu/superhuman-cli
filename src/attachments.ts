@@ -10,6 +10,13 @@
  */
 
 import type { ConnectionProvider } from "./connection-provider";
+import { OutlookWebProvider } from "./outlook-web-provider";
+import {
+  makeOwaFetcher,
+  owaListAttachments,
+  owaDownloadAttachment,
+  owaFetchRaw,
+} from "./outlook-rest-api";
 import { readThreadFromDB, listLocalAccounts } from "./sqlite-search";
 import { getCachedToken, loadTokensFromDisk } from "./token-api";
 
@@ -45,6 +52,8 @@ export interface AttachmentAuthOptions {
   accessToken: string;
   /** True for Microsoft/Outlook accounts, false for Gmail */
   isMicrosoft: boolean;
+  /** True when accessToken is an Outlook Web REST token (route to Outlook REST). */
+  isOutlookWeb?: boolean;
 }
 
 const MIME_TYPES: Record<string, string> = {
@@ -126,6 +135,12 @@ export async function listAttachments(
   threadId: string,
   accountEmail?: string
 ): Promise<Attachment[]> {
+  // Outlook Web: no local SQLite blob and the token is an Outlook REST token —
+  // list attachments straight from the message via Outlook REST.
+  if (_provider instanceof OutlookWebProvider) {
+    return owaListAttachments(_provider.fetcher(), threadId);
+  }
+
   // If no account email provided, fall back to empty list (can't query SQLite)
   if (!accountEmail) {
     return [];
@@ -346,7 +361,9 @@ export async function downloadAttachment(
     );
   }
 
-  if (auth.isMicrosoft) {
+  if (auth.isOutlookWeb) {
+    return owaDownloadAttachment(makeOwaFetcher(auth.accessToken), messageId, attachmentId);
+  } else if (auth.isMicrosoft) {
     return downloadAttachmentMsGraph(messageId, attachmentId, auth.accessToken);
   } else {
     return downloadAttachmentGmail(messageId, attachmentId, auth.accessToken);
@@ -443,6 +460,13 @@ export async function downloadRawMessage(
     throw new Error(
       "downloadRawMessage requires an OAuth access token. " +
       "Pass auth.accessToken from the cached token (token.accessToken)."
+    );
+  }
+
+  if (auth.isOutlookWeb) {
+    return owaFetchRaw(
+      auth.accessToken,
+      `/messages/${encodeURIComponent(messageId)}/$value`
     );
   }
 

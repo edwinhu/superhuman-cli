@@ -120,12 +120,15 @@ describe("CLI fallback path rejects provider API when provider is superhuman", (
   test("errors out instead of using provider API when no idToken/userId", async () => {
     // Create a token cache with accessToken but NO superhumanToken/userId
     // This simulates the bug scenario: user has a cached token from the
-    // provider but hasn't run account auth to get Superhuman native creds
+    // provider but hasn't run account auth to get Superhuman native creds.
+    // NOTE: uses a GOOGLE account — Microsoft accounts now route to the
+    // Outlook Web backend (see outlook-web routing tests), so this
+    // superhuman-path regression is asserted on the Google/Superhuman path.
     const tokensData = {
       version: 1,
       accounts: {
-        "testuser@outlook.com": {
-          type: "microsoft" as const,
+        "testuser@gmail.com": {
+          type: "google" as const,
           accessToken: "fake-access-token",
           expires: Date.now() + 3600000,
           // NOTE: no superhumanToken, no userId — this is the bug trigger
@@ -171,12 +174,14 @@ describe("CLI fallback path rejects provider API when provider is superhuman", (
   });
 
   test("uses native API when idToken and userId are present", async () => {
-    // Create a token cache WITH superhumanToken and userId
+    // Create a token cache WITH superhumanToken and userId.
+    // Uses a GOOGLE account: Microsoft accounts now route to Outlook Web, so
+    // the native-Superhuman-path assertion is exercised via the Google path.
     const tokensData = {
       version: 1,
       accounts: {
-        "testuser@outlook.com": {
-          type: "microsoft" as const,
+        "testuser@gmail.com": {
+          type: "google" as const,
           accessToken: "fake-access-token",
           expires: Date.now() + 3600000,
           userId: "fake-user-id",

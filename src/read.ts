@@ -7,6 +7,8 @@
 
 import type { ConnectionProvider } from "./connection-provider";
 import { SuperhumanProvider } from "./superhuman-provider";
+import { OutlookWebProvider } from "./outlook-web-provider";
+import { owaGetThread } from "./outlook-rest-api";
 import { readThreadFromDB, getThreadBodiesFromDB } from "./sqlite-search";
 import { getCachedToken, loadTokensFromDisk } from "./token-api";
 
@@ -463,6 +465,9 @@ export async function readThread(
   provider: ConnectionProvider,
   threadId: string
 ): Promise<ThreadMessage[]> {
+  if (provider instanceof OutlookWebProvider) {
+    return owaGetThread(provider.fetcher(), threadId);
+  }
   if (provider instanceof SuperhumanProvider) {
     return readThreadSuperhuman(provider, threadId);
   }

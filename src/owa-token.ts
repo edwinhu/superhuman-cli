@@ -38,8 +38,16 @@ export interface OwaToken {
 
 const memCache = new Map<string, OwaToken>();
 
+/** Config dir — honors SUPERHUMAN_CLI_CONFIG_DIR so tests stay isolated. */
+function configDir(): string {
+  return (
+    process.env.SUPERHUMAN_CLI_CONFIG_DIR ||
+    join(homedir(), ".config", "superhuman-cli")
+  );
+}
+
 function cacheFile(): string {
-  return join(homedir(), ".config", "superhuman-cli", "owa-tokens.json");
+  return join(configDir(), "owa-tokens.json");
 }
 
 async function loadDiskCache(): Promise<Record<string, OwaToken>> {
@@ -52,7 +60,7 @@ async function loadDiskCache(): Promise<Record<string, OwaToken>> {
 
 async function saveDiskCache(map: Record<string, OwaToken>): Promise<void> {
   const file = cacheFile();
-  await fs.mkdir(join(homedir(), ".config", "superhuman-cli"), { recursive: true });
+  await fs.mkdir(configDir(), { recursive: true });
   await fs.writeFile(file, JSON.stringify(map, null, 2), { mode: 0o600 });
 }
 
