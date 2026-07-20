@@ -14,6 +14,14 @@ import { getOwaToken, listOwaAccounts, clearOwaMemCacheForTest } from "../owa-to
 
 let dir: string;
 
+// HERMETIC: restore SUPERHUMAN_CLI_CONFIG_DIR to its prior value (not just
+// delete it) so this file never clobbers what a later-loaded test relies on.
+const HAD_CONFIG_DIR = Object.prototype.hasOwnProperty.call(
+  process.env,
+  "SUPERHUMAN_CLI_CONFIG_DIR"
+);
+const PRIOR_CONFIG_DIR = process.env.SUPERHUMAN_CLI_CONFIG_DIR;
+
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "owa-token-test-"));
   process.env.SUPERHUMAN_CLI_CONFIG_DIR = dir;
@@ -21,7 +29,8 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
-  delete process.env.SUPERHUMAN_CLI_CONFIG_DIR;
+  if (HAD_CONFIG_DIR) process.env.SUPERHUMAN_CLI_CONFIG_DIR = PRIOR_CONFIG_DIR;
+  else delete process.env.SUPERHUMAN_CLI_CONFIG_DIR;
   clearOwaMemCacheForTest();
   await rm(dir, { recursive: true, force: true });
 });

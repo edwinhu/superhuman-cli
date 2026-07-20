@@ -1,17 +1,19 @@
 /**
  * Tests for Microsoft -> Outlook Web routing and the OutlookWebProvider shim.
  *
- * SUPERHUMAN_CLI_CONFIG_DIR is set BEFORE importing so both the token cache
- * (token-api) and the OWA broker (owa-token) read an isolated temp dir.
+ * HERMETIC: SUPERHUMAN_CLI_CONFIG_DIR (read lazily by token-api AND owa-token)
+ * is set only for the duration of these tests and RESTORED to its prior value
+ * afterward, and the token-cache singleton is cleared after all tests. Setting
+ * it at module scope leaks into every later-loaded test file — it flipped the
+ * live attachment-e2e suite onto the wrong account. Do not do that.
  */
 
-import { test, expect, describe, beforeEach, afterEach } from "bun:test";
+import { test, expect, describe, beforeEach, afterEach, afterAll } from "bun:test";
 import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const TEST_DIR = mkdtempSync(join(tmpdir(), "owa-provider-test-"));
-process.env.SUPERHUMAN_CLI_CONFIG_DIR = TEST_DIR;
 
 import { resolveProvider } from "../connection-provider";
 import { OutlookWebProvider } from "../outlook-web-provider";
@@ -22,6 +24,17 @@ import {
   type TokenInfo,
 } from "../token-api";
 import { clearOwaMemCacheForTest } from "../owa-token";
+
+const HAD_CONFIG_DIR = Object.prototype.hasOwnProperty.call(
+  process.env,
+  "SUPERHUMAN_CLI_CONFIG_DIR"
+);
+const PRIOR_CONFIG_DIR = process.env.SUPERHUMAN_CLI_CONFIG_DIR;
+
+function restoreConfigDir() {
+  if (HAD_CONFIG_DIR) process.env.SUPERHUMAN_CLI_CONFIG_DIR = PRIOR_CONFIG_DIR;
+  else delete process.env.SUPERHUMAN_CLI_CONFIG_DIR;
+}
 
 function seedOwaCache(map: Record<string, any>) {
   writeFileSync(join(TEST_DIR, "owa-tokens.json"), JSON.stringify(map));
@@ -34,6 +47,7 @@ function clearOwaCache() {
 }
 
 beforeEach(() => {
+  process.env.SUPERHUMAN_CLI_CONFIG_DIR = TEST_DIR;
   clearTokenCache();
   clearOwaMemCacheForTest();
   clearOwaCache();
@@ -43,6 +57,17 @@ afterEach(() => {
   clearTokenCache();
   clearOwaMemCacheForTest();
   clearOwaCache();
+  restoreConfigDir();
+});
+
+afterAll(() => {
+  // Leave the shared singletons + env exactly as later test files expect them.
+  clearTokenCache();
+  clearOwaMemCacheForTest();
+  restoreConfigDir();
+  try {
+    rmSync(TEST_DIR, { recursive: true, force: true });
+  } catch {}
 });
 
 describe("providerFromToken: Microsoft -> OutlookWebProvider", () => {
