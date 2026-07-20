@@ -224,6 +224,11 @@ export async function getOwaToken(email?: string): Promise<OwaToken> {
   return token;
 }
 
+/** Clear the in-memory token cache. Tests only (disk cache is separate). */
+export function clearOwaMemCacheForTest(): void {
+  memCache.clear();
+}
+
 /** List OWA account emails known to the broker (from disk cache). */
 export async function listOwaAccounts(): Promise<string[]> {
   const disk = await loadDiskCache();

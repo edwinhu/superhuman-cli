@@ -281,13 +281,19 @@ export async function owaGetThread(
     return one ? [messageToThreadMessage(one)] : [];
   }
 
+  // NOTE: Exchange rejects $filter=ConversationId combined with $orderby
+  // ("InefficientFilter", 400) — same constraint the MS Graph path documents.
+  // Fetch unsorted, then sort oldest-first client-side.
   const path = `/messages?$filter=${encodeURIComponent(
     `ConversationId eq '${cid}'`
-  )}&$orderby=${encodeURIComponent("ReceivedDateTime asc")}&$select=${encodeURIComponent(
-    select
-  )}&$top=100`;
+  )}&$select=${encodeURIComponent(select)}&$top=100`;
   const data = await fetch("GET", path);
-  return (data?.value || []).map((m: any) => messageToThreadMessage(m));
+  const msgs = (data?.value || []).map((m: any) => messageToThreadMessage(m));
+  msgs.sort(
+    (a: ThreadMessage, b: ThreadMessage) =>
+      new Date(a.date || 0).getTime() - new Date(b.date || 0).getTime()
+  );
+  return msgs;
 }
 
 // ---------------------------------------------------------------------------
@@ -447,13 +453,13 @@ export async function owaListStarred(
   opts: { limit?: number } = {}
 ): Promise<StarredThread[]> {
   const top = opts.limit ?? 50;
+  // Exchange rejects $filter combined with $orderby (InefficientFilter); sort
+  // newest-first client-side instead.
   const path = `/messages?$top=${top}&$select=${encodeURIComponent(
     MSG_SELECT
-  )}&$filter=${encodeURIComponent("Flag/FlagStatus eq 'Flagged'")}&$orderby=${encodeURIComponent(
-    "ReceivedDateTime desc"
-  )}`;
+  )}&$filter=${encodeURIComponent("Flag/FlagStatus eq 'Flagged'")}`;
   const data = await fetch("GET", path);
-  return (data?.value || []).map((m: any): StarredThread => {
+  const rows = (data?.value || []).map((m: any): StarredThread => {
     const t = messageToInboxThread(m, meEmail);
     return {
       id: t.id,
@@ -464,6 +470,11 @@ export async function owaListStarred(
       labelIds: t.labelIds,
     };
   });
+  rows.sort(
+    (a: StarredThread, b: StarredThread) =>
+      new Date(b.date || 0).getTime() - new Date(a.date || 0).getTime()
+  );
+  return rows;
 }
 
 /**
