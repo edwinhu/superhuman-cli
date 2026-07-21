@@ -26,6 +26,8 @@ import {
   owaRemoveLabel,
   owaListEvents,
   owaListAttachments,
+  owaAddAttachment,
+  OWA_MAX_ATTACHMENT_BYTES,
   owaContacts,
   owaListDrafts,
   type OwaFetcher,
@@ -382,6 +384,34 @@ describe("owaListAttachments", () => {
       threadId: "msgX",
       inline: false,
     });
+  });
+});
+
+describe("owaAddAttachment", () => {
+  test("POSTs an inline base64 FileAttachment to the draft", async () => {
+    const { fn, calls } = makeFetcher(() => ({ Id: "att1" }));
+    await owaAddAttachment(fn, "draft1", {
+      name: "note.eml",
+      mimeType: "message/rfc822",
+      base64: "QUJD",
+    });
+    expect(calls[0]!.method).toBe("POST");
+    expect(calls[0]!.path).toBe("/messages/draft1/attachments");
+    expect(calls[0]!.body).toEqual({
+      "@odata.type": "#Microsoft.OutlookServices.FileAttachment",
+      Name: "note.eml",
+      ContentType: "message/rfc822",
+      ContentBytes: "QUJD",
+    });
+  });
+
+  test("rejects files over the inline POST ceiling without calling the API", async () => {
+    const { fn, calls } = makeFetcher(() => ({}));
+    const oversized = "A".repeat(Math.ceil(((OWA_MAX_ATTACHMENT_BYTES + 1024 * 1024) * 4) / 3));
+    await expect(
+      owaAddAttachment(fn, "draft1", { name: "big.bin", mimeType: "application/octet-stream", base64: oversized })
+    ).rejects.toThrow(/big\.bin is .*MB/);
+    expect(calls).toHaveLength(0);
   });
 });
 

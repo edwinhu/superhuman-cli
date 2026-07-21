@@ -210,9 +210,11 @@ superhuman account auth   # refresh the Superhuman token → back on Superhuman
 
 All the usual verbs (`inbox`, `read`, `search`, `send`, `reply`, `archive`,
 `star`, `label`, `calendar`, `attachment`, `contact`, …) work the same via
-`--account`. A few Superhuman-only features (AI search, snippets, snooze,
-sending with attachments) report that they are unavailable on Outlook Web
-accounts.
+`--account`. Outbound attachments (`--attach` on `send`, `reply`, `reply-all`,
+`forward`, `draft`) work too — each file is POSTed to the draft as an inline
+base64 `FileAttachment`, capped at 25MB per file since the Outlook REST v2.0
+endpoint has no upload-session route. A few Superhuman-only features (AI search,
+snippets, snooze) report that they are unavailable on Outlook Web accounts.
 
 ### Composing Email
 
