@@ -28,6 +28,39 @@ const EXPIRY_BUFFER_MS = 5 * 60 * 1000;
 /** How long to wait after a tab reload for OWA to bootstrap + re-mint the token. */
 const RELOAD_SETTLE_MS = 4500;
 
+/** Upper bound on any single CDP round-trip, so a wedged tab fails fast. */
+const CDP_OP_TIMEOUT_MS = 10_000;
+
+/**
+ * Reject rather than wait forever. A wedged Outlook Web tab (renderer busy,
+ * mid-navigation, or crashed) answers /json but never responds to
+ * Runtime.evaluate/Page.reload — an unbounded await there hangs the whole CLI.
+ */
+function withTimeout<T>(p: Promise<T>, what: string, ms = CDP_OP_TIMEOUT_MS): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(
+      () =>
+        reject(
+          new Error(
+            `${what} timed out after ${ms}ms — the Outlook Web tab is unresponsive. ` +
+              "Refresh/reopen Outlook Web in the browser, then retry."
+          )
+        ),
+      ms
+    );
+    p.then(
+      (v) => {
+        clearTimeout(timer);
+        resolve(v);
+      },
+      (e) => {
+        clearTimeout(timer);
+        reject(e);
+      }
+    );
+  });
+}
+
 export interface OwaToken {
   accessToken: string;
   /** Account UPN / email, decoded from the token's `upn` claim. */
@@ -114,7 +147,10 @@ async function findOwaTarget(
 ): Promise<OwaCdpTarget | null> {
   let targets: any[];
   try {
-    targets = (await CDP.List({ host, port })) as any[];
+    targets = (await withTimeout(
+      CDP.List({ host, port }) as Promise<any[]>,
+      `CDP target list on port ${port}`
+    )) as any[];
   } catch {
     return null;
   }
@@ -134,17 +170,23 @@ async function scrapeToken(
   target: OwaCdpTarget,
   reload: boolean
 ): Promise<OwaToken | null> {
-  const client = await CDP({ target: target.id, host, port });
+  const client = await withTimeout(
+    CDP({ target: target.id, host, port }),
+    "CDP attach to Outlook Web tab"
+  );
   try {
     if (reload) {
-      await client.Page.enable();
-      await client.Page.reload({ ignoreCache: false });
+      await withTimeout(client.Page.enable(), "Page.enable");
+      await withTimeout(client.Page.reload({ ignoreCache: false }), "Page.reload");
       await new Promise((r) => setTimeout(r, RELOAD_SETTLE_MS));
     }
-    const { result, exceptionDetails } = await client.Runtime.evaluate({
-      expression: READ_MSAL_EXPR,
-      returnByValue: true,
-    });
+    const { result, exceptionDetails } = await withTimeout(
+      client.Runtime.evaluate({
+        expression: READ_MSAL_EXPR,
+        returnByValue: true,
+      }),
+      "reading the Outlook Web token"
+    );
     if (exceptionDetails || !result?.value) return null;
     const parsed = JSON.parse(result.value as string) as {
       secret: string;
@@ -178,12 +220,24 @@ export async function getOwaToken(email?: string): Promise<OwaToken> {
     memCache.set(key, disk[key]!);
     return disk[key]!;
   }
-  if (!key) {
-    const fresh = Object.values(disk).find(isFresh);
-    if (fresh) {
-      memCache.set(fresh.email.toLowerCase(), fresh);
-      return fresh;
+  // Single-session fallback. The OWA piggyback rides ONE signed-in browser
+  // session, but callers identify the mailbox by its SMTP address
+  // (--account ehu@law.virginia.edu) while the token is keyed by the UPN from
+  // its `upn` claim (vwh7mb@lawschool.virginia.edu). When the requested key
+  // doesn't match, reuse the single fresh cached token rather than needlessly
+  // re-scraping CDP every call (or hanging on a wedged tab). Only when exactly
+  // one fresh token exists — with several we can't safely guess which mailbox.
+  const freshTokens = Object.values(disk).filter(isFresh);
+  if (freshTokens.length === 1) {
+    const only = freshTokens[0]!;
+    memCache.set(only.email.toLowerCase(), only);
+    if (key) {
+      // Alias the requested address to this token so the next call hits directly.
+      disk[key] = only;
+      memCache.set(key, only);
+      await saveDiskCache(disk).catch(() => {});
     }
+    return only;
   }
 
   // 3. scrape the live OWA session
@@ -220,6 +274,12 @@ export async function getOwaToken(email?: string): Promise<OwaToken> {
   const token = tok!;
   memCache.set(token.email.toLowerCase(), token);
   disk[token.email.toLowerCase()] = token;
+  // Also store under the requested address (SMTP) so later lookups by --account
+  // hit the disk cache directly instead of re-scraping (UPN != SMTP).
+  if (key && key !== token.email.toLowerCase()) {
+    memCache.set(key, token);
+    disk[key] = token;
+  }
   await saveDiskCache(disk).catch(() => {});
   return token;
 }
