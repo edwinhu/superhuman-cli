@@ -706,6 +706,39 @@ export async function owaListAttachments(
     }));
 }
 
+/**
+ * Upper bound on a single outbound attachment. Outlook REST v2.0 has no
+ * `createUploadSession` (verified live: 400 ErrorInvalidReferenceItem), so the
+ * inline POST below is the only route and oversized files must be rejected up
+ * front rather than failing mid-transfer.
+ */
+export const OWA_MAX_ATTACHMENT_BYTES = 25 * 1024 * 1024;
+
+/**
+ * Attach a file to a draft: POST /messages/{id}/attachments with an inline
+ * base64 FileAttachment. `.eml` files go up with ContentType message/rfc822,
+ * which Outlook and Gmail both render as an attached message.
+ */
+export async function owaAddAttachment(
+  fetch: OwaFetcher,
+  draftId: string,
+  att: { name: string; mimeType: string; base64: string }
+): Promise<void> {
+  const bytes = Math.ceil((att.base64.length * 3) / 4);
+  if (bytes > OWA_MAX_ATTACHMENT_BYTES) {
+    throw new Error(
+      `${att.name} is ${(bytes / 1024 / 1024).toFixed(1)}MB — the Outlook Web backend can only ` +
+        `attach files up to ${OWA_MAX_ATTACHMENT_BYTES / 1024 / 1024}MB (no upload-session support).`
+    );
+  }
+  await fetch("POST", `/messages/${encodeURIComponent(draftId)}/attachments`, {
+    "@odata.type": "#Microsoft.OutlookServices.FileAttachment",
+    Name: att.name,
+    ContentType: att.mimeType,
+    ContentBytes: att.base64,
+  });
+}
+
 /** Download an attachment's bytes (base64). */
 export async function owaDownloadAttachment(
   fetch: OwaFetcher,

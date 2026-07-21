@@ -86,8 +86,10 @@ import {
   owaForward,
   owaSendDraft,
   owaSendNew,
+  owaAddAttachment,
   owaContacts,
   owaListDrafts,
+  type OwaFetcher,
 } from "./outlook-rest-api";
 import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
@@ -1224,6 +1226,26 @@ function owaUnsupported(verb: string): never {
   process.exit(1);
 }
 
+/**
+ * Attach `--attach` files to an Outlook draft (reply/forward/new). Each file is
+ * read from disk and POSTed to the draft's attachments collection. Errors abort
+ * the command so a draft never silently goes out missing its attachments.
+ */
+async function owaAttachFiles(
+  fetcher: OwaFetcher,
+  draftId: string,
+  files: string[] | undefined
+): Promise<void> {
+  for (const path of files || []) {
+    const file = await readFileAsBase64(path);
+    await owaAddAttachment(fetcher, draftId, {
+      name: file.filename,
+      mimeType: file.mimeType,
+      base64: file.base64Data,
+    });
+  }
+}
+
 /** Parse recipient strings into Outlook-friendly "Name <email>" / bare list. */
 function owaRecipients(list: string[]): string[] {
   return list.filter(Boolean);
@@ -1231,21 +1253,34 @@ function owaRecipients(list: string[]): string[] {
 
 // --- Outlook Web command handlers -----------------------------------------
 
-/** `send` on an OWA account: compose + send via Outlook REST (/sendmail). */
+/**
+ * `send` on an OWA account: compose + send via Outlook REST (/sendmail).
+ * With `--attach`, /sendmail is replaced by draft → attach → /send, since
+ * attachments are POSTed to a message that already exists server-side.
+ */
 async function cmdSendOwa(provider: OutlookWebProvider, options: CliOptions): Promise<void> {
-  if (options.attachFiles && options.attachFiles.length > 0) {
-    owaUnsupported("Sending with attachments");
-  }
   const html = options.html || textToHtml(options.body);
+  const fetcher = provider.fetcher();
+  const input = {
+    to: owaRecipients(options.to),
+    cc: owaRecipients(options.cc),
+    bcc: owaRecipients(options.bcc),
+    subject: options.subject || "",
+    body: html,
+    html: true,
+  };
   try {
-    await owaSendNew(provider.fetcher(), {
-      to: owaRecipients(options.to),
-      cc: owaRecipients(options.cc),
-      bcc: owaRecipients(options.bcc),
-      subject: options.subject || "",
-      body: html,
-      html: true,
-    });
+    if (options.attachFiles && options.attachFiles.length > 0) {
+      const draft = await owaCreateDraft(fetcher, input);
+      if (!draft.id) {
+        error("Failed to create draft for send");
+        process.exit(1);
+      }
+      await owaAttachFiles(fetcher, draft.id, options.attachFiles);
+      await owaSendDraft(fetcher, draft.id);
+    } else {
+      await owaSendNew(fetcher, input);
+    }
   } catch (e) {
     error(`Failed to send: ${(e as Error).message}`);
     process.exit(1);
@@ -1284,9 +1319,6 @@ async function cmdReplyOwa(
   options: CliOptions,
   all: boolean
 ): Promise<void> {
-  if (options.attachFiles && options.attachFiles.length > 0) {
-    owaUnsupported("Replying with attachments");
-  }
   const html = options.html || textToHtml(options.body || "");
   const fetcher = provider.fetcher();
   try {
@@ -1296,6 +1328,7 @@ async function cmdReplyOwa(
       process.exit(1);
     }
     await owaPatchRecipients(provider, draft.id, options);
+    await owaAttachFiles(fetcher, draft.id, options.attachFiles);
     if (options.send) {
       await owaSendDraft(fetcher, draft.id);
       success("Reply sent");
@@ -1312,9 +1345,6 @@ async function cmdReplyOwa(
 
 /** `forward` on an OWA account. */
 async function cmdForwardOwa(provider: OutlookWebProvider, options: CliOptions): Promise<void> {
-  if (options.attachFiles && options.attachFiles.length > 0) {
-    owaUnsupported("Forwarding with attachments");
-  }
   if (options.to.length === 0) {
     error("Forward requires at least one recipient (--to)");
     process.exit(1);
@@ -1331,6 +1361,7 @@ async function cmdForwardOwa(provider: OutlookWebProvider, options: CliOptions):
       error("Failed to create forward draft");
       process.exit(1);
     }
+    await owaAttachFiles(fetcher, draft.id, options.attachFiles);
     if (options.send) {
       await owaSendDraft(fetcher, draft.id);
       success("Forward sent");
@@ -1362,6 +1393,7 @@ async function cmdDraftOwa(provider: OutlookWebProvider, options: CliOptions): P
       if (Object.keys(patch).length > 0) {
         await provider.owaFetch("PATCH", `/messages/${encodeURIComponent(options.updateDraftId)}`, patch);
       }
+      await owaAttachFiles(fetcher, options.updateDraftId, options.attachFiles);
       success("Draft updated in Outlook");
       log(`  ${colors.dim}Draft ID: ${options.updateDraftId}${colors.reset}`);
     } catch (e) {
@@ -1372,9 +1404,6 @@ async function cmdDraftOwa(provider: OutlookWebProvider, options: CliOptions): P
   }
 
   requireAnyRecipient(options);
-  if (options.attachFiles && options.attachFiles.length > 0) {
-    owaUnsupported("Draft attachments");
-  }
   const html = options.html || textToHtml(options.body);
   try {
     const draft = await owaCreateDraft(fetcher, {
@@ -1385,6 +1414,7 @@ async function cmdDraftOwa(provider: OutlookWebProvider, options: CliOptions): P
       body: html,
       html: true,
     });
+    await owaAttachFiles(fetcher, draft.id, options.attachFiles);
     success("Draft created in Outlook");
     log(`  ${colors.dim}Draft ID: ${draft.id}${colors.reset}`);
     log(`  ${colors.dim}Account: ${await provider.getCurrentEmail()}${colors.reset}`);
