@@ -6,6 +6,9 @@ CLI to control [Superhuman](https://superhuman.com) email client via Chrome DevT
 
 - [Bun](https://bun.sh) runtime
 - Superhuman.app running with remote debugging enabled
+- Microsoft accounts only: no Superhuman? A signed-in Outlook Web tab in a
+  CDP browser works as an automatic fallback — see
+  [Microsoft accounts: Superhuman primary, Outlook Web fallback](#microsoft-accounts-superhuman-primary-outlook-web-fallback).
 
 ## Setup
 
@@ -162,6 +165,54 @@ superhuman account auth
 # Tokens are cached to ~/.config/superhuman-cli/tokens.json
 # Re-run 'account auth' if tokens expire
 ```
+
+### Microsoft accounts: Superhuman primary, Outlook Web fallback
+
+Microsoft / Exchange-Online accounts can be driven **without Superhuman** by
+piggybacking an already-signed-in **Outlook Web** session in the CDP browser —
+the same first-party token OWA itself uses, so there is no new OAuth grant and
+no admin consent. This is the automatic fallback for tenants that have revoked
+Superhuman's app.
+
+Backend selection is automatic:
+
+- **Superhuman is primary.** When a Microsoft account has a usable Superhuman
+  token, it uses Superhuman (unchanged behavior).
+- **Outlook Web is the fallback.** When the Superhuman token is missing or
+  expired (e.g. the tenant revoked Superhuman and it can no longer refresh),
+  the CLI transparently uses the Outlook Web backend instead.
+
+When Superhuman is restored, re-auth once and routing switches back — no
+rebuild or reinstall:
+
+```bash
+superhuman account auth   # refresh the Superhuman token → back on Superhuman
+```
+
+**Override** with the `SUPERHUMAN_CLI_MS_BACKEND` environment variable:
+
+| Value | Behavior |
+|-------|----------|
+| `auto` (default) | Superhuman when its token is usable, else Outlook Web |
+| `superhuman` | Force Superhuman (Outlook Web only if no Superhuman token exists) |
+| `outlook-web` | Force Outlook Web |
+
+**Requirements for the Outlook Web backend:**
+
+- A Chromium/Chrome browser running with CDP on port **9222** (`CHROME_CDP_PORT`)
+  with a signed-in Outlook Web tab (`https://outlook.office.com` or
+  `https://outlook.cloud.microsoft`).
+- Stay signed in. The CLI reads the session's token, caches it to
+  `~/.config/superhuman-cli/owa-tokens.json` (~24h), and only re-reads from the
+  browser when the token needs re-minting. If the tab is closed or signed out
+  when a refresh is due, the CLI asks you to reopen Outlook Web rather than
+  hanging.
+
+All the usual verbs (`inbox`, `read`, `search`, `send`, `reply`, `archive`,
+`star`, `label`, `calendar`, `attachment`, `contact`, …) work the same via
+`--account`. A few Superhuman-only features (AI search, snippets, snooze,
+sending with attachments) report that they are unavailable on Outlook Web
+accounts.
 
 ### Composing Email
 
