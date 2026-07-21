@@ -30,10 +30,20 @@ const HAD_CONFIG_DIR = Object.prototype.hasOwnProperty.call(
   "SUPERHUMAN_CLI_CONFIG_DIR"
 );
 const PRIOR_CONFIG_DIR = process.env.SUPERHUMAN_CLI_CONFIG_DIR;
+const HAD_MS_BACKEND = Object.prototype.hasOwnProperty.call(
+  process.env,
+  "SUPERHUMAN_CLI_MS_BACKEND"
+);
+const PRIOR_MS_BACKEND = process.env.SUPERHUMAN_CLI_MS_BACKEND;
 
 function restoreConfigDir() {
   if (HAD_CONFIG_DIR) process.env.SUPERHUMAN_CLI_CONFIG_DIR = PRIOR_CONFIG_DIR;
   else delete process.env.SUPERHUMAN_CLI_CONFIG_DIR;
+}
+
+function restoreMsBackend() {
+  if (HAD_MS_BACKEND) process.env.SUPERHUMAN_CLI_MS_BACKEND = PRIOR_MS_BACKEND;
+  else delete process.env.SUPERHUMAN_CLI_MS_BACKEND;
 }
 
 function seedOwaCache(map: Record<string, any>) {
@@ -48,6 +58,7 @@ function clearOwaCache() {
 
 beforeEach(() => {
   process.env.SUPERHUMAN_CLI_CONFIG_DIR = TEST_DIR;
+  delete process.env.SUPERHUMAN_CLI_MS_BACKEND; // default to "auto" unless a test sets it
   clearTokenCache();
   clearOwaMemCacheForTest();
   clearOwaCache();
@@ -58,6 +69,7 @@ afterEach(() => {
   clearOwaMemCacheForTest();
   clearOwaCache();
   restoreConfigDir();
+  restoreMsBackend();
 });
 
 afterAll(() => {
@@ -65,37 +77,63 @@ afterAll(() => {
   clearTokenCache();
   clearOwaMemCacheForTest();
   restoreConfigDir();
+  restoreMsBackend();
   try {
     rmSync(TEST_DIR, { recursive: true, force: true });
   } catch {}
 });
 
-describe("providerFromToken: Microsoft -> OutlookWebProvider", () => {
-  test("a microsoft cached token routes to OutlookWebProvider", async () => {
-    const token: TokenInfo = {
-      accessToken: "dead-oauth",
-      email: "ehu@law.virginia.edu",
-      expires: Date.now() + 3600_000,
-      isMicrosoft: true,
-    };
-    setTokenCacheForTest(token.email, token);
+describe("providerFromToken: Microsoft primary=Superhuman, fallback=OWA", () => {
+  const msToken = (sh?: { token: string; expires: number }): TokenInfo => ({
+    accessToken: "oauth",
+    email: "ehu@law.virginia.edu",
+    expires: Date.now() + 3600_000,
+    isMicrosoft: true,
+    ...(sh ? { superhumanToken: sh } : {}),
+  });
 
+  test("microsoft with NO superhuman token falls back to OutlookWebProvider", async () => {
+    setTokenCacheForTest("ehu@law.virginia.edu", msToken());
     const provider = await resolveProvider({ account: "ehu@law.virginia.edu" });
     expect(provider).toBeInstanceOf(OutlookWebProvider);
   });
 
-  test("microsoft wins even when a (stale) superhumanToken is present", async () => {
-    const token: TokenInfo = {
-      accessToken: "dead-oauth",
-      email: "ehu@law.virginia.edu",
-      expires: Date.now() + 3600_000,
-      isMicrosoft: true,
-      superhumanToken: { token: "stale-dead-jwt", expires: Date.now() + 3600_000 },
-    };
-    setTokenCacheForTest(token.email, token);
-
+  test("microsoft with an EXPIRED superhuman token (revoked tenant) falls back to OWA", async () => {
+    setTokenCacheForTest(
+      "ehu@law.virginia.edu",
+      msToken({ token: "revoked-jwt", expires: Date.now() - 1000 })
+    );
     const provider = await resolveProvider({ account: "ehu@law.virginia.edu" });
     expect(provider).toBeInstanceOf(OutlookWebProvider);
+  });
+
+  test("microsoft with a VALID superhuman token uses Superhuman (primary)", async () => {
+    setTokenCacheForTest(
+      "ehu@law.virginia.edu",
+      msToken({ token: "good-jwt", expires: Date.now() + 3600_000 })
+    );
+    const provider = await resolveProvider({ account: "ehu@law.virginia.edu" });
+    expect(provider).toBeInstanceOf(SuperhumanProvider);
+  });
+
+  test("SUPERHUMAN_CLI_MS_BACKEND=outlook-web forces OWA even with a valid SH token", async () => {
+    process.env.SUPERHUMAN_CLI_MS_BACKEND = "outlook-web";
+    setTokenCacheForTest(
+      "ehu@law.virginia.edu",
+      msToken({ token: "good-jwt", expires: Date.now() + 3600_000 })
+    );
+    const provider = await resolveProvider({ account: "ehu@law.virginia.edu" });
+    expect(provider).toBeInstanceOf(OutlookWebProvider);
+  });
+
+  test("SUPERHUMAN_CLI_MS_BACKEND=superhuman forces Superhuman even with an expired token", async () => {
+    process.env.SUPERHUMAN_CLI_MS_BACKEND = "superhuman";
+    setTokenCacheForTest(
+      "ehu@law.virginia.edu",
+      msToken({ token: "jwt", expires: Date.now() - 1000 })
+    );
+    const provider = await resolveProvider({ account: "ehu@law.virginia.edu" });
+    expect(provider).toBeInstanceOf(SuperhumanProvider);
   });
 
   test("a google token still routes to SuperhumanProvider (no regression)", async () => {

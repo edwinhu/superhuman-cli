@@ -140,22 +140,60 @@ export class CDPConnectionProvider implements ConnectionProvider {
  * If the token has a superhumanToken, return SuperhumanProvider;
  * otherwise fall back to CachedTokenProvider for backward compat.
  */
+/**
+ * Microsoft-account backend preference. Superhuman is the PRIMARY backend;
+ * Outlook Web (OWA) is the automatic FALLBACK. Override with the env var
+ * SUPERHUMAN_CLI_MS_BACKEND:
+ *   - "auto" (default): use Superhuman when its token is usable, else OWA.
+ *   - "superhuman": force Superhuman (falls back to OWA only if no SH token exists).
+ *   - "outlook-web": force OWA.
+ */
+function msBackendPreference(): "auto" | "superhuman" | "outlook-web" {
+  const v = (process.env.SUPERHUMAN_CLI_MS_BACKEND || "auto").toLowerCase();
+  return v === "superhuman" || v === "outlook-web" ? v : "auto";
+}
+
+/**
+ * Is the cached Superhuman token present and not (near) expired? A revoked
+ * tenant (e.g. UVA pulling Superhuman) leaves an expired superhumanToken that
+ * cannot refresh — that's the signal to fall back to OWA. A missing expiry is
+ * treated as usable (SuperhumanProvider refreshes on 401).
+ */
+function superhumanTokenUsable(token: TokenInfo): boolean {
+  const sh = token.superhumanToken;
+  if (!sh?.token) return false;
+  return sh.expires == null || sh.expires > Date.now() + 60_000;
+}
+
+function makeSuperhumanProvider(token: TokenInfo): SuperhumanProvider {
+  const shTokenInfo: SuperhumanTokenInfo = {
+    token: token.superhumanToken!.token,
+    email: token.email,
+    expires: token.superhumanToken!.expires,
+    userPrefix: token.userPrefix,
+  };
+  return new SuperhumanProvider(shTokenInfo);
+}
+
+/**
+ * Build the best provider from a cached TokenInfo.
+ *
+ * Microsoft accounts: Superhuman is PRIMARY, Outlook Web is the automatic
+ * FALLBACK (used when the Superhuman token is unusable — e.g. the tenant
+ * revoked Superhuman). So when IT re-approves Superhuman and the token
+ * refreshes, routing switches back to Superhuman with no code change.
+ * Google accounts are unchanged (Superhuman when a token exists).
+ */
 function providerFromToken(token: TokenInfo, email: string): ConnectionProvider {
-  // Microsoft accounts route to the Outlook Web backend (the first-party OWA
-  // token), BEFORE the superhumanToken check — the stale MS entry in tokens.json
-  // still carries a dead superhumanToken that must not win. Google accounts are
-  // untouched and still use Superhuman.
   if (token.isMicrosoft) {
+    const pref = msBackendPreference();
+    if (pref === "outlook-web") return new OutlookWebProvider(token.email || email);
+    if (pref === "superhuman" && token.superhumanToken) return makeSuperhumanProvider(token);
+    if (pref === "auto" && superhumanTokenUsable(token)) return makeSuperhumanProvider(token);
     return new OutlookWebProvider(token.email || email);
   }
   if (token.superhumanToken) {
-    const shTokenInfo: SuperhumanTokenInfo = {
-      token: token.superhumanToken.token,
-      email: token.email,
-      expires: token.superhumanToken.expires,
-      userPrefix: token.userPrefix,
-    };
-    return new SuperhumanProvider(shTokenInfo);
+    return makeSuperhumanProvider(token);
   }
   return new CachedTokenProvider(email);
 }
