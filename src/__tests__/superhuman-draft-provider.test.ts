@@ -179,6 +179,92 @@ describe("SuperhumanDraftProvider", () => {
       expect(drafts[0]!.bcc).toEqual([]);
     });
 
+    it("should omit drafts tombstoned with discardedAt (deleted drafts)", async () => {
+      // Regression (2026-07-22): `draft delete` soft-deletes by writing
+      // `users/{u}/threads/{t}/messages/{id}/discardedAt`. userdata.getThreads
+      // keeps returning that message (with the tombstone) for as long as the
+      // thread stays in the draft index — indefinitely when a sibling live draft
+      // holds the thread there. parseThreadList ignored `discardedAt`, so a
+      // deleted draft stayed in `draft list` for 120s+ (observed >13h on a real
+      // draft) while the Outlook path reflected the delete in 0.1s.
+      // Fixture shape captured live from userdata.getThreads.
+      const mockResponse = {
+        threadList: [
+          {
+            id: "19f71415d1ba24e8",
+            thread: {
+              messages: {
+                draft00deleted: {
+                  discardedAt: "2026-07-21T01:29:31.171000000Z",
+                  draft: {
+                    id: "draft00deleted",
+                    subject: "Deleted draft",
+                    to: ["to@example.com"],
+                    from: "user@example.com",
+                    snippet: "gone",
+                    date: "2026-07-21T01:00:00.000Z",
+                  },
+                  mentions: {},
+                  historyId: 1,
+                },
+                draft00live: {
+                  draft: {
+                    id: "draft00live",
+                    subject: "Live draft",
+                    to: ["to@example.com"],
+                    from: "user@example.com",
+                    snippet: "still here",
+                    date: "2026-07-21T02:00:00.000Z",
+                  },
+                  mentions: {},
+                  historyId: 2,
+                },
+              },
+            },
+          },
+        ],
+      };
+
+      globalThis.fetch = mock(async () => new Response(JSON.stringify(mockResponse))) as any;
+
+      const provider = new SuperhumanDraftProvider(mockToken);
+      const drafts = await provider.listDrafts();
+
+      expect(drafts.map((d) => d.id)).toEqual(["draft00live"]);
+    });
+
+    it("should omit drafts whose discardedAt lives on the draft object", async () => {
+      const mockResponse = {
+        threadList: [
+          {
+            id: "draft00thread",
+            thread: {
+              messages: {
+                draft00deleted: {
+                  draft: {
+                    id: "draft00deleted",
+                    subject: "Deleted draft",
+                    to: ["to@example.com"],
+                    from: "user@example.com",
+                    snippet: "gone",
+                    date: "2026-07-21T01:00:00.000Z",
+                    discardedAt: "2026-07-21T01:29:31.171000000Z",
+                  },
+                },
+              },
+            },
+          },
+        ],
+      };
+
+      globalThis.fetch = mock(async () => new Response(JSON.stringify(mockResponse))) as any;
+
+      const provider = new SuperhumanDraftProvider(mockToken);
+      const drafts = await provider.listDrafts();
+
+      expect(drafts).toHaveLength(0);
+    });
+
     it("should return empty array when threadList is empty", async () => {
       globalThis.fetch = mock(async () => {
         return new Response(JSON.stringify({ threadList: [] }));

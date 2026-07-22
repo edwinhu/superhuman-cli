@@ -5,6 +5,7 @@
  */
 
 import type { SuperhumanConnection } from "./superhuman-api";
+import { deleteDraftMeta } from "./draft-cache";
 
 const SUPERHUMAN_BACKEND = "https://mail.superhuman.com/~backend";
 
@@ -691,6 +692,16 @@ export async function deleteDraftWithUserInfo(
       const text = await response.text();
       throw new Error(`API error ${response.status}: ${text}`);
     }
+
+    // Evict the local send-cache entry. `draft create`/reply/forward persist
+    // to/subject/htmlBody/attachments there so a later `draft send <id>` works
+    // without re-passing the flags — and `draft send` performs NO existence or
+    // `discardedAt` check. Leaving the entry behind meant a deleted draft could
+    // still be sent from stale local metadata (the exact "agent sends a deleted
+    // draft" hazard). Only after a confirmed 200, so a failed delete keeps the
+    // metadata for the draft that still exists. The send path already evicts
+    // here (cli.ts, after a successful send); delete now matches.
+    deleteDraftMeta(draftId);
 
     return true;
   } catch (error) {
