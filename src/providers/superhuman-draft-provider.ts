@@ -27,10 +27,14 @@ interface SuperhumanDraft {
   from: string;
   snippet: string;
   date: string;
+  /** Defensive: some payloads carry the tombstone inside the draft object. */
+  discardedAt?: string | null;
 }
 
 interface SuperhumanMessage {
   draft: SuperhumanDraft;
+  /** Tombstone written by `draft delete`; the draft still ships in the payload. */
+  discardedAt?: string | null;
 }
 
 interface SuperhumanThread {
@@ -195,6 +199,14 @@ export class SuperhumanDraftProvider implements IDraftProvider {
       const messages = threadItem.thread?.messages || {};
 
       for (const [messageId, message] of Object.entries(messages)) {
+        // `draft delete` soft-deletes by writing a `discardedAt` timestamp at
+        // `users/{u}/threads/{t}/messages/{id}/discardedAt` (deleteDraftWithUserInfo).
+        // userdata.getThreads keeps returning the tombstoned message for as long
+        // as its thread stays in the `filter:{type:"draft"}` index — which is
+        // indefinite when a sibling live draft holds the thread there. Without
+        // this check a deleted draft lingered in `draft list` (measured >120s,
+        // observed >13h), so delete+recreate showed two near-identical drafts.
+        if (message.discardedAt || message.draft?.discardedAt) continue;
         if (message.draft) {
           const draft = message.draft;
           drafts.push({
