@@ -246,10 +246,21 @@ export async function deleteDraftViaProvider(
   draftId: string
 ): Promise<{ success: boolean; error?: string }> {
   if (provider instanceof SuperhumanProvider) {
-    const { deleteDraftWithUserInfo } = await import("./draft-api");
+    const { deleteDraftWithUserInfo, findDraftMessage } = await import("./draft-api");
     const userInfo = await userInfoFromProvider(provider);
     try {
-      await deleteDraftWithUserInfo(userInfo, draftId, draftId);
+      // Resolve the real owning thread. This used to pass `draftId` as the
+      // threadId, which wrote the tombstone to a nonexistent path — accepted
+      // with a 200, so the caller reported success for a delete that never
+      // happened.
+      const located = await findDraftMessage(userInfo, draftId);
+      if (!located) {
+        return { success: false, error: `draft ${draftId} not found` };
+      }
+      if (located.discardedAt) {
+        return { success: true };
+      }
+      await deleteDraftWithUserInfo(userInfo, located.threadId, draftId);
       return { success: true };
     } catch (e: any) {
       return { success: false, error: e.message };
