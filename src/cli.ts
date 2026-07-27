@@ -46,7 +46,7 @@ import {
   type UpdateEventInput,
 } from "./calendar";
 import { createDraftViaProvider, updateDraftViaProvider, deleteDraftViaProvider } from "./send-api";
-import { createDraftWithUserInfo, getUserInfo, getUserInfoFromCache, sendDraftSuperhuman, buildSendDraftOptions, fetchGmailMessageHtml, buildForwardBody, updateDraftWithUserInfo, deleteDraftWithUserInfo, uploadAttachmentSuperhuman, type Recipient, type UserInfo, type SuperhumanAttachment } from "./draft-api";
+import { createDraftWithUserInfo, getUserInfo, getUserInfoFromCache, sendDraftSuperhuman, buildSendDraftOptions, fetchGmailMessageHtml, buildForwardBody, updateDraftWithUserInfo, deleteDraftWithUserInfo, findDraftMessage, uploadAttachmentSuperhuman, type Recipient, type UserInfo, type SuperhumanAttachment } from "./draft-api";
 import { searchContactsLocal, resolveRecipientLocal, type Contact } from "./contacts";
 import { listSnippets, findSnippet, applyVars, parseVars } from "./snippets";
 import {
@@ -95,7 +95,7 @@ import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 import { OutlookDraftProvider } from "./providers/outlook-draft-provider";
 
-const VERSION = "0.38.5";
+const VERSION = "0.38.6";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9252", 10);
 
 /**
@@ -2189,6 +2189,11 @@ async function cmdDeleteDraft(options: CliOptions) {
     process.exit(1);
   }
 
+  // A ✓ here must mean the draft is gone. Every failure below is counted and
+  // turned into a non-zero exit — silent "success" on a delete that did not
+  // happen is what made this bug invisible in the first place.
+  let failures = 0;
+
   const owaProvider = await owaProviderFor(options.account);
   if (owaProvider) {
     const draftProvider = new OutlookDraftProvider(owaProvider);
@@ -2199,8 +2204,10 @@ async function cmdDeleteDraft(options: CliOptions) {
         success(`Deleted Outlook draft ${draftId.slice(-15)}`);
       } catch (e) {
         error(`Failed to delete draft: ${(e as Error).message}`);
+        failures++;
       }
     }
+    if (failures > 0) process.exit(1);
     return;
   }
 
@@ -2219,25 +2226,34 @@ async function cmdDeleteDraft(options: CliOptions) {
 
     const userInfo = buildUserInfo(token, options?.account);
 
-    // Use DraftService to get draft details for threadId
-    const nativeProvider = new SuperhumanDraftProvider(token);
-    const draftService = new DraftService([nativeProvider]);
-    const drafts = await draftService.listDrafts();
-
     for (const draftId of nativeDraftIds) {
-      const draft = drafts.find(d => d.id === draftId);
+      // Resolve the owning thread straight from the draft index. `listDrafts()`
+      // only covers the first page (50) and hides tombstoned drafts, so a
+      // lookup through it reported "not found" both for drafts further down the
+      // list and for drafts that were already deleted.
+      const located = await findDraftMessage(userInfo, draftId);
 
-      if (!draft) {
-        error(`Native draft ${draftId} not found`);
+      if (!located) {
+        error(
+          `Native draft ${draftId} not found — already deleted, or not in ` +
+          `${token.email}'s drafts (check --account)`
+        );
+        failures++;
+        continue;
+      }
+
+      if (located.discardedAt) {
+        info(`Native draft ${draftId.slice(-15)} was already deleted`);
         continue;
       }
 
       info(`Deleting native draft ${draftId.slice(-15)}...`);
       try {
-        await deleteDraftWithUserInfo(userInfo, draft.threadId!, draftId);
+        await deleteDraftWithUserInfo(userInfo, located.threadId, draftId);
         success(`Deleted native draft ${draftId.slice(-15)}`);
       } catch (err) {
         error(`Failed to delete native draft: ${err instanceof Error ? err.message : String(err)}`);
+        failures++;
       }
     }
   }
@@ -2254,11 +2270,14 @@ async function cmdDeleteDraft(options: CliOptions) {
         success(`Deleted draft ${draftId.slice(-15)}`);
       } else {
         error(`Failed to delete draft: ${result.error}`);
+        failures++;
       }
     }
 
     await provider.disconnect();
   }
+
+  if (failures > 0) process.exit(1);
 }
 
 async function cmdSendDraft(options: CliOptions) {
@@ -2449,7 +2468,7 @@ async function cmdSendDraft(options: CliOptions) {
     // cancellable in the app's Scheduled view.
     if (!scheduledForIso) {
       try {
-        await deleteDraftWithUserInfo(userInfo, resolvedThreadId, draftId);
+        await deleteDraftWithUserInfo(userInfo, resolvedThreadId, draftId, { verify: false });
       } catch {
         // Non-fatal: draft was sent successfully, cleanup failure is just cosmetic
       }
@@ -2603,7 +2622,7 @@ async function cmdSend(options: CliOptions) {
         log(`  ${colors.dim}Delivery confirms after the undo window; a failure would surface in your inbox.${colors.reset}`);
         // Clean up the just-sent draft (matches Superhuman app behavior)
         try {
-          await deleteDraftWithUserInfo(userInfo, result.threadId!, result.draftId!);
+          await deleteDraftWithUserInfo(userInfo, result.threadId!, result.draftId!, { verify: false });
         } catch {
           // Non-fatal: send already queued
         }

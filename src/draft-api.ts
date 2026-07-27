@@ -520,10 +520,30 @@ export interface SendDraftResult {
  * backend rejects limit > 100 with a 400, so we page through in 100s (up to a
  * safety cap) instead of silently missing drafts beyond the first page.
  */
-async function fetchDraftValue(
+export interface DraftMessageLocation {
+  /** Thread the draft message lives under — the id `writeMessage` paths need. */
+  threadId: string;
+  /** Tombstone timestamp, set once the draft has been discarded. */
+  discardedAt: string | null;
+  /** The draft body/value, when the message still carries one. */
+  draft: Record<string, any> | null;
+}
+
+/**
+ * Locate a draft message in the backend's draft index.
+ *
+ * Returns the owning threadId alongside the raw message, so callers never have
+ * to guess it. `deleteDraftViaProvider` used to pass the draft id AS the thread
+ * id, which wrote the tombstone to a path that does not exist — the backend
+ * happily returns 200 for such a write, so the delete silently no-opped.
+ *
+ * Returns null when the draft is not in the index at all (already deleted and
+ * garbage-collected, or the backend was unreachable).
+ */
+export async function findDraftMessage(
   userInfo: UserInfo,
   draftId: string
-): Promise<Record<string, any> | null> {
+): Promise<DraftMessageLocation | null> {
   const PAGE = 100;
   const MAX_DRAFTS = 1000; // safety cap on pagination
   try {
@@ -542,7 +562,15 @@ async function fetchDraftValue(
       const list: any[] = data.threadList || [];
       for (const th of list) {
         const msg = th?.thread?.messages?.[draftId];
-        if (msg?.draft) return msg.draft as Record<string, any>;
+        if (msg) {
+          return {
+            threadId: th.id,
+            // The app writes the tombstone at the message level; tolerate the
+            // draft-level variant too (both shapes appear in live data).
+            discardedAt: msg.discardedAt ?? msg.draft?.discardedAt ?? null,
+            draft: (msg.draft as Record<string, any>) ?? null,
+          };
+        }
       }
       if (list.length < PAGE) break; // last page reached
     }
@@ -550,6 +578,38 @@ async function fetchDraftValue(
   } catch {
     return null;
   }
+}
+
+/**
+ * Confirm a draft is actually gone: either dropped from the draft index
+ * entirely, or still listed but carrying a `discardedAt` tombstone.
+ *
+ * `userdata.writeMessage` returns 200 for a write to a path that does not
+ * exist, so a 200 alone proves nothing about the delete — this read-back is
+ * what makes `draft delete` able to report failure honestly. Read-after-write
+ * was observed to be immediate against the live backend; the retries are only
+ * slack for eventual consistency.
+ */
+export async function verifyDraftDiscarded(
+  userInfo: UserInfo,
+  draftId: string,
+  attempts: number = 3,
+  delayMs: number = 750
+): Promise<boolean> {
+  for (let i = 0; i < attempts; i++) {
+    const found = await findDraftMessage(userInfo, draftId);
+    if (!found || found.discardedAt) return true;
+    if (i < attempts - 1) await new Promise((r) => setTimeout(r, delayMs));
+  }
+  return false;
+}
+
+async function fetchDraftValue(
+  userInfo: UserInfo,
+  draftId: string
+): Promise<Record<string, any> | null> {
+  const found = await findDraftMessage(userInfo, draftId);
+  return found?.draft ?? null;
 }
 
 export async function updateDraftWithUserInfo(
@@ -662,12 +722,20 @@ export async function updateDraftWithUserInfo(
  * Delete a draft by writing to its discardedAt path.
  * Core function to delete a draft with pre-extracted user info.
  * Can be used with cached credentials (no CDP needed).
+ *
+ * Throws when the delete did not take. A 200 from `userdata.writeMessage` only
+ * means "write accepted for this path" — it is returned even for a path that
+ * matches no draft (e.g. a wrong threadId), so callers that trusted the status
+ * code printed a ✓ for a delete that never happened. Unless `verify: false`,
+ * the tombstone is read back before this resolves.
  */
 export async function deleteDraftWithUserInfo(
   userInfo: UserInfo,
   threadId: string,
-  draftId: string
+  draftId: string,
+  options: { verify?: boolean } = {}
 ): Promise<boolean> {
+  const verify = options.verify !== false;
   try {
     const now = new Date().toISOString();
 
@@ -691,6 +759,14 @@ export async function deleteDraftWithUserInfo(
     if (!response.ok) {
       const text = await response.text();
       throw new Error(`API error ${response.status}: ${text}`);
+    }
+
+    // Read the tombstone back before claiming success (see doc comment above).
+    if (verify && !(await verifyDraftDiscarded(userInfo, draftId))) {
+      throw new Error(
+        `backend accepted the write but draft ${draftId} is still live ` +
+        `(no discardedAt at threads/${threadId}/messages/${draftId}) — not deleted`
+      );
     }
 
     // Evict the local send-cache entry. `draft create`/reply/forward persist
