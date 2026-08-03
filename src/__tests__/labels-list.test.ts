@@ -167,3 +167,73 @@ describe("listStarred", () => {
     );
   });
 });
+
+/**
+ * `star list` used to report the LATEST MESSAGE id as the thread id. For a
+ * single-message thread those coincide, which is why it looked fine; on a
+ * thread with replies they diverge and the printed id is one Gmail does not
+ * know as a thread at all.
+ *
+ * Verified live 2026-08-03 against eddyhu@gmail.com: `star list` reported
+ * 170ab9517c91b96f (threads.get → HTTP 404) while the real starred thread
+ * 170ab9484ad137a9 was absent from the listing entirely. Round-tripping that
+ * id into `star remove` only worked via the 404-then-resolveGmailThreadId
+ * retry in modifyThreadLabelsGmail.
+ */
+describe("listStarred thread-id identity (regression)", () => {
+  afterAll(() => {
+    mock.module("../sqlite-search", () => REAL_SQLITE);
+  });
+
+  test("SQLite path reports the thread id, not the latest message id", async () => {
+    mock.module("../sqlite-search", () => ({
+      ...REAL_SQLITE,
+      listInboxFromDB: () => [
+        {
+          threadId: "170ab9484ad137a9",
+          labelIds: ["STARRED"],
+          json: JSON.stringify({
+            messages: [
+              { id: "170ab9484ad137a9", subject: "Benefits docs", date: "2020-03-05T16:37:19.000Z" },
+              { id: "170ab9517c91b96f", subject: "Benefits docs", date: "2020-03-05T16:43:58.000Z" },
+            ],
+          }),
+        },
+      ],
+    }));
+
+    const { provider } = createMockPortalProvider();
+    provider.getCurrentEmail = (async () => "user@example.com") as any;
+
+    const starred = await listStarred(provider, 10);
+
+    expect(starred).toHaveLength(1);
+    // The id handed to star remove / archive must be the THREAD.
+    expect(starred[0]!.id).toBe("170ab9484ad137a9");
+    // The latest message stays available, just not as `id`.
+    expect(starred[0]!.messageId).toBe("170ab9517c91b96f");
+    expect(starred[0]!.subject).toBe("Benefits docs");
+  });
+
+  test("single-message thread still round-trips (id === messageId)", async () => {
+    mock.module("../sqlite-search", () => ({
+      ...REAL_SQLITE,
+      listInboxFromDB: () => [
+        {
+          threadId: "19f94a38ce214946",
+          labelIds: ["STARRED"],
+          json: JSON.stringify({
+            messages: [{ id: "19f94a38ce214946", subject: "BMLL Data Lab Invitation", date: "2026-07-30T10:00:00.000Z" }],
+          }),
+        },
+      ],
+    }));
+
+    const { provider } = createMockPortalProvider();
+    provider.getCurrentEmail = (async () => "user@example.com") as any;
+
+    const starred = await listStarred(provider, 10);
+    expect(starred[0]!.id).toBe("19f94a38ce214946");
+    expect(starred[0]!.messageId).toBe("19f94a38ce214946");
+  });
+});

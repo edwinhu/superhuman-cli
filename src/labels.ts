@@ -324,7 +324,10 @@ export interface Label {
 }
 
 export interface StarredThread {
+  /** Thread id — the id every mutating command (star/archive/label) expects. */
   id: string;
+  /** Latest message id in the thread; equals `id` for single-message threads. */
+  messageId?: string;
   subject?: string;
   from?: { email: string; name: string };
   date?: string;
@@ -511,7 +514,15 @@ export async function listStarred(
             );
             const latest = messages[messages.length - 1];
             return {
-              id: latest.id || row.threadId,
+              // The THREAD id, not the latest message id. These coincide for a
+              // single-message thread but diverge once a thread has replies,
+              // and the old `latest.id` made `star list` print ids Gmail does
+              // not know as threads (verified: cache listed 170ab9517c91b96f,
+              // which threads.get 404s, while the real thread 170ab9484ad137a9
+              // was missing from the listing entirely). Feeding that back into
+              // `star remove` only worked via the 404-then-resolve retry.
+              id: row.threadId,
+              messageId: latest.id || row.threadId,
               subject: latest.subject || "",
               from: parseFromField(latest.from),
               date: latest.date || "",
@@ -568,7 +579,9 @@ export async function listStarred(
       );
       const latest = messages[messages.length - 1];
       return {
-        id: latest.id || threadId,
+        // Thread id, not latest-message id — see the SQLite path above.
+        id: threadId || latest.id,
+        messageId: latest.id || threadId,
         subject: latest.subject || "",
         from: parseFromField(latest.from),
         date: latest.date || "",

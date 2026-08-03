@@ -220,9 +220,20 @@ export async function updateDraftViaProvider(
     const htmlBody = options.body
       ? (options.isHtml ? options.body : textToHtml(options.body))
       : undefined;
-    // updateDraftWithUserInfo requires threadId — use draftId as fallback
-    const { updateDraftWithUserInfo } = await import("./draft-api");
-    const ok = await updateDraftWithUserInfo(userInfo, draftId, draftId, {
+    // Resolve the real owning thread. This used to pass `draftId` as the
+    // threadId, which writes to users/{u}/threads/{draftId}/messages/{draftId}/draft
+    // — a path that does not exist. `userdata.writeMessage` returns 200 for such
+    // a write, so the update reported success; worse, the write CREATES that
+    // path, forking the draft into a second copy on a phantom thread. Both then
+    // show in `draft list` under the same draft id, and a later delete only
+    // tombstones whichever copy `findDraftMessage` happens to hit first.
+    // (Same defect class as `deleteDraftViaProvider`, fixed in #38.)
+    const { updateDraftWithUserInfo, findDraftMessage } = await import("./draft-api");
+    const located = await findDraftMessage(userInfo, draftId);
+    if (!located) {
+      return { success: false, draftId, error: `draft ${draftId} not found` };
+    }
+    const ok = await updateDraftWithUserInfo(userInfo, located.threadId, draftId, {
       to: options.to,
       cc: options.cc,
       bcc: options.bcc,
