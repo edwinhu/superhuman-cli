@@ -317,8 +317,15 @@ function info(message: string) {
  * Without this line the operation looks like it silently failed, so the natural
  * response is to run it again — which is exactly what turned a working `star
  * remove` into a reported no-op bug.
+ *
+ * Outlook Web accounts are exempt: `requireToken` prefers the OWA token, those
+ * mutations go through Outlook REST (`modifyThreadLabelsOwa`), and the matching
+ * reads (`owaListStarred`, `owaListLabels`) are read-through against the same
+ * REST backend rather than the SQLite cache. There is no lag to disclose, so
+ * printing this there would be a false statement about the architecture.
  */
-function noteLocalCacheLag() {
+function noteLocalCacheLag(token?: { isOutlookWeb?: boolean }) {
+  if (token?.isOutlookWeb) return;
   log(
     `  ${colors.dim}Written to the provider. Local list/search/read may show the ` +
       `old state for ~30s until the app syncs (superhuman sync --check).${colors.reset}`
@@ -3753,7 +3760,7 @@ async function cmdArchive(options: CliOptions) {
     }
   }
 
-  if (successCount > 0) noteLocalCacheLag();
+  if (successCount > 0) noteLocalCacheLag(token);
   if (options.threadIds.length > 1) {
     log(`\n${successCount} archived, ${failCount} failed`);
   }
@@ -3782,7 +3789,7 @@ async function cmdDelete(options: CliOptions) {
     }
   }
 
-  if (successCount > 0) noteLocalCacheLag();
+  if (successCount > 0) noteLocalCacheLag(token);
   if (options.threadIds.length > 1) {
     log(`\n${successCount} deleted, ${failCount} failed`);
   }
@@ -3811,7 +3818,7 @@ async function cmdMarkRead(options: CliOptions) {
     }
   }
 
-  if (successCount > 0) noteLocalCacheLag();
+  if (successCount > 0) noteLocalCacheLag(token);
   if (options.threadIds.length > 1) {
     log(`\n${successCount} marked as read, ${failCount} failed`);
   }
@@ -3840,7 +3847,7 @@ async function cmdMarkUnread(options: CliOptions) {
     }
   }
 
-  if (successCount > 0) noteLocalCacheLag();
+  if (successCount > 0) noteLocalCacheLag(token);
   if (options.threadIds.length > 1) {
     log(`\n${successCount} marked as unread, ${failCount} failed`);
   }
@@ -3927,6 +3934,7 @@ async function cmdAddLabel(options: CliOptions) {
     }
   }
 
+  if (successCount > 0) noteLocalCacheLag(token);
   if (options.threadIds.length > 1) {
     log(`\n${successCount} labeled, ${failCount} failed`);
   }
@@ -3961,7 +3969,7 @@ async function cmdRemoveLabel(options: CliOptions) {
     }
   }
 
-  if (successCount > 0) noteLocalCacheLag();
+  if (successCount > 0) noteLocalCacheLag(token);
   if (options.threadIds.length > 1) {
     log(`\n${successCount} updated, ${failCount} failed`);
   }
@@ -3990,7 +3998,7 @@ async function cmdStar(options: CliOptions) {
     }
   }
 
-  if (successCount > 0) noteLocalCacheLag();
+  if (successCount > 0) noteLocalCacheLag(token);
   if (options.threadIds.length > 1) {
     log(`\n${successCount} starred, ${failCount} failed`);
   }
@@ -4019,7 +4027,7 @@ async function cmdUnstar(options: CliOptions) {
     }
   }
 
-  if (successCount > 0) noteLocalCacheLag();
+  if (successCount > 0) noteLocalCacheLag(token);
   if (options.threadIds.length > 1) {
     log(`\n${successCount} unstarred, ${failCount} failed`);
   }
@@ -4097,7 +4105,7 @@ async function cmdSnooze(options: CliOptions) {
     }
   }
 
-  if (successCount > 0) noteLocalCacheLag();
+  if (successCount > 0) noteLocalCacheLag(token);
   if (options.threadIds.length > 1) {
     log(`\n${successCount} snoozed, ${failCount} failed`);
   }
@@ -4130,7 +4138,7 @@ async function cmdUnsnooze(options: CliOptions) {
     }
   }
 
-  if (successCount > 0) noteLocalCacheLag();
+  if (successCount > 0) noteLocalCacheLag(token);
   if (options.threadIds.length > 1) {
     log(`\n${successCount} unsnoozed, ${failCount} failed`);
   }

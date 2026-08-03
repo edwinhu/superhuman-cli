@@ -233,6 +233,14 @@ export async function updateDraftViaProvider(
     if (!located) {
       return { success: false, draftId, error: `draft ${draftId} not found` };
     }
+    // `findDraftMessage` deliberately still returns tombstoned records, so an
+    // existence check alone is not enough: writing a new /draft value beneath a
+    // message that stays discarded reports success while the edit remains
+    // invisible — the same "✓ for an effect the user never sees" class this
+    // change exists to close. The native path already refuses this.
+    if (located.discardedAt) {
+      return { success: false, draftId, error: `draft ${draftId} was deleted` };
+    }
     const ok = await updateDraftWithUserInfo(userInfo, located.threadId, draftId, {
       to: options.to,
       cc: options.cc,
@@ -240,7 +248,9 @@ export async function updateDraftViaProvider(
       subject: options.subject,
       body: htmlBody,
     });
-    return { success: ok, draftId };
+    return ok
+      ? { success: true, draftId }
+      : { success: false, draftId, error: `backend rejected the update for draft ${draftId}` };
   }
 
   throw new Error(

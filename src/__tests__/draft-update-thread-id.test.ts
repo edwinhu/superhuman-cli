@@ -72,6 +72,57 @@ describe("updateDraftViaProvider thread resolution", () => {
     expect(calls[0]!.threadId).not.toBe(calls[0]!.draftId);
   });
 
+  // findDraftMessage deliberately still returns tombstoned records, so an
+  // existence check alone lets an update land beneath a discarded message:
+  // success is reported, the edit is never visible. Flagged independently by
+  // both the Codex and Gemini reviews of PR #39.
+  test("refuses to update a draft that carries a discardedAt tombstone", async () => {
+    let wrote = false;
+
+    mock.module("../draft-api", () => ({
+      ...REAL_DRAFT_API,
+      findDraftMessage: async () => ({
+        threadId: "draft002c5c8842ab140d",
+        discardedAt: "2026-08-03T14:40:00.000Z",
+        draft: { body: "<p>ORIGINAL</p>" },
+      }),
+      updateDraftWithUserInfo: async () => {
+        wrote = true;
+        return true;
+      },
+    }));
+
+    const { updateDraftViaProvider } = await import("../send-api");
+    const result = await updateDraftViaProvider(await makeProvider(), "draft007b9ac23fa2d2c9", {
+      body: "edited",
+    });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toMatch(/deleted/i);
+    expect(wrote).toBe(false);
+  });
+
+  test("surfaces an error message when the backend rejects the update", async () => {
+    mock.module("../draft-api", () => ({
+      ...REAL_DRAFT_API,
+      findDraftMessage: async () => ({
+        threadId: "draft002c5c8842ab140d",
+        discardedAt: null,
+        draft: { body: "<p>ORIGINAL</p>" },
+      }),
+      updateDraftWithUserInfo: async () => false,
+    }));
+
+    const { updateDraftViaProvider } = await import("../send-api");
+    const result = await updateDraftViaProvider(await makeProvider(), "draft007b9ac23fa2d2c9", {
+      body: "edited",
+    });
+
+    expect(result.success).toBe(false);
+    // success:false with error:undefined gives the caller nothing to print.
+    expect(result.error).toBeTruthy();
+  });
+
   test("reports failure instead of forking when the draft cannot be located", async () => {
     let wrote = false;
 
