@@ -95,7 +95,7 @@ import { DraftService, type Draft } from "./services/draft-service";
 import { SuperhumanDraftProvider } from "./providers/superhuman-draft-provider";
 import { OutlookDraftProvider } from "./providers/outlook-draft-provider";
 
-const VERSION = "0.38.6";
+const VERSION = "0.38.7";
 const CDP_PORT = parseInt(process.env.CDP_PORT || "9252", 10);
 
 /**
