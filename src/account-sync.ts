@@ -2,33 +2,45 @@
  * Multi-Account Sync Staleness — force-sync + freshness detection
  *
  * Root cause (see docs/investigations/2026-07-06_multi_account_staleness.md):
- * Superhuman runs one background-sync engine per linked account inside the
- * Electron app's hidden `background_page.html`, but that engine is only
- * `.start()`-ed on account activation/foreground-switch — NOT unconditionally
- * for every linked account at app boot. An account that was linked before the
- * last app restart but never made active in this session can have its
- * `sync._isStarted === false` indefinitely, so its local OPFS SQLite cache
- * (the thing `sqlite-search.ts` reads for `inbox`/`search`/`read`) goes stale
- * or stays empty — silently, with no error, just 0 results.
+ * Superhuman runs one background-sync engine per linked account, but that
+ * engine is only `.start()`-ed on account activation/foreground-switch — NOT
+ * unconditionally for every linked account at app boot. An account that was
+ * linked before the last app restart but never made active in this session can
+ * have its `sync._isStarted === false` indefinitely, so its local OPFS SQLite
+ * cache (the thing `sqlite-search.ts` reads for `inbox`/`search`/`read`) goes
+ * stale or stays empty — silently, with no error, just 0 results.
+ *
+ * Two deployment shapes expose that per-account engine differently, and this
+ * module abstracts over both via `SyncSession` (see connectSyncSession):
+ *
+ *  - **Chrome-extension** (Linux/omarchy, and any Chromium where Superhuman
+ *    runs as the MV3 extension): the sync engine lives in the extension's
+ *    service worker, one per account, reachable as
+ *    `backgrounds[email]._accountBackground.di.get("sync")`. There is a single
+ *    service-worker execution context; the account is selected by keying into
+ *    `backgrounds[email]`.
+ *  - **Electron app** (macOS/Windows desktop Superhuman.app): the engine lives
+ *    in the hidden `background_page.html`, one per-account iframe, reachable as
+ *    `window.background.di.get("sync")` in that iframe's execution context. The
+ *    account is selected by CDP `contextId`.
  *
  * This module provides:
  *  - `getAccountFreshness(email)` — a pure on-disk staleness check (no CDP),
  *    reading `MAX(threads.sort)` (== `MAX(messages.timestamp)`) from the
  *    account's OPFS SQLite blob.
  *  - `ensureAccountSynced(email, opts)` — checks freshness; if stale (or
- *    `force`), connects to the background_page over CDP (reusing the
- *    `connectToBackgroundPage()` plumbing from background-page-refresh.ts),
- *    calls `sync.start()` in that account's iframe execution context
- *    (idempotent, side-effect-free beyond kicking off the normal poll loop —
- *    confirmed by reading its minified source), and awaits one completed
- *    poll cycle via `sync._pollers.syncForward._lastRunEnded` before
- *    returning.
+ *    `force`), opens a `SyncSession` (extension first, Electron fallback),
+ *    calls `sync.start()` in that account's context (idempotent,
+ *    side-effect-free beyond kicking off the normal poll loop — confirmed by
+ *    reading its minified source), and awaits one completed poll cycle via
+ *    `sync._pollers.syncForward._lastRunEnded` before returning.
  *
- * Fragility note: `sync`, `_pollers`, `_lastRunEnded`, `forceSyncBackend` are
- * minified/private Superhuman internals — NOT a public API. A Superhuman
- * update could rename or restructure them at any time. Every access is
- * wrapped in try/catch; if the poller shape can't be read, this degrades
- * gracefully to a fixed timed wait rather than throwing.
+ * Fragility note: `sync`, `_pollers`, `_lastRunEnded`, `forceSyncBackend`,
+ * `backgrounds`, `_accountBackground` are minified/private Superhuman
+ * internals — NOT a public API. A Superhuman update could rename or restructure
+ * them at any time. Every access is wrapped in try/catch; if the poller shape
+ * can't be read, this degrades gracefully to a fixed timed wait rather than
+ * throwing.
  */
 import { Database } from "bun:sqlite";
 import { rmSync } from "fs";
@@ -38,6 +50,12 @@ import {
   disconnectBackgroundPage,
   type BgPageConn,
 } from "./background-page-refresh";
+import {
+  connectToSuperhumanChrome,
+  disconnectChrome,
+  getCDPPort,
+  type ChromeExtConnection,
+} from "./superhuman-api";
 
 export interface AccountFreshness {
   /** MAX(threads.sort) — ms epoch of the newest cached thread activity, or null if the table is empty/unreadable. */
@@ -111,10 +129,142 @@ export function getAccountFreshness(
   }
 }
 
+// ---------------------------------------------------------------------------
+// SyncSession — backend-agnostic per-account CDP eval surface
+// ---------------------------------------------------------------------------
+
+/** Result of a single per-account eval. */
+export type EvalResult = { ok: true; value: any } | { ok: false; error: string };
+
+/**
+ * A per-account CDP eval session. Abstracts the two deployment shapes:
+ * the Chrome-extension service worker (account keyed by `backgrounds[email]`)
+ * and the Electron background_page (account selected by iframe `contextId`).
+ * Callers express what to run as a builder over `bg` — a JS expression string
+ * that resolves to the account's background object (exposing `.di`).
+ */
+export interface SyncSession {
+  /** Which deployment backs this session (diagnostics only). */
+  readonly kind: "extension" | "electron";
+  /** Emails this session can sync (ground truth for "what's linked" now). */
+  readonly emails: string[];
+  /**
+   * Evaluate `build(bg)` for `email`, where `bg` is a JS expression resolving
+   * to that account's background object. Returns the by-value result, or an
+   * `{ ok: false }` if the account isn't present / the eval threw.
+   */
+  evaluateForAccount(
+    email: string,
+    build: (bg: string) => string,
+    awaitPromise?: boolean
+  ): Promise<EvalResult>;
+  disconnect(): Promise<void>;
+}
+
+/** Wrap a live Electron background_page connection as a SyncSession. */
+export function electronSession(conn: BgPageConn): SyncSession {
+  return {
+    kind: "electron",
+    emails: Array.from(conn.contextByEmail.keys()),
+    async evaluateForAccount(email, build, awaitPromise = false) {
+      const contextId = conn.contextByEmail.get(email);
+      if (contextId === undefined) return { ok: false, error: "no-context" };
+      try {
+        const r = await conn.client.Runtime.evaluate({
+          expression: build("window.background"),
+          returnByValue: true,
+          awaitPromise,
+          contextId,
+        });
+        if ((r as any)?.exceptionDetails) {
+          const ed = (r as any).exceptionDetails;
+          return { ok: false, error: ed.exception?.description ?? ed.text ?? "eval error" };
+        }
+        return { ok: true, value: r?.result?.value ?? null };
+      } catch (e: any) {
+        return { ok: false, error: e?.message ?? String(e) };
+      }
+    },
+    async disconnect() {
+      await disconnectBackgroundPage(conn);
+    },
+  };
+}
+
+/** Wrap a live Chrome-extension service-worker connection as a SyncSession. */
+export function extensionSession(conn: ChromeExtConnection, emails: string[]): SyncSession {
+  return {
+    kind: "extension",
+    emails,
+    async evaluateForAccount(email, build, awaitPromise = false) {
+      // Resolve the per-account background inside the single SW context.
+      const key = JSON.stringify(email);
+      const bg = `(typeof backgrounds!=="undefined"&&backgrounds[${key}]?._accountBackground)`;
+      try {
+        const r = await conn.swClient.Runtime.evaluate({
+          expression: build(bg),
+          returnByValue: true,
+          awaitPromise,
+        });
+        if (r.exceptionDetails) {
+          return {
+            ok: false,
+            error:
+              r.exceptionDetails.exception?.description ??
+              r.exceptionDetails.text ??
+              "eval error",
+          };
+        }
+        return { ok: true, value: r?.result?.value ?? null };
+      } catch (e: any) {
+        return { ok: false, error: e?.message ?? String(e) };
+      }
+    },
+    async disconnect() {
+      await disconnectChrome(conn);
+    },
+  };
+}
+
+/**
+ * Open a SyncSession, preferring the Chrome-extension service worker (the
+ * common shape on Linux/omarchy, where there is no Superhuman.app) and falling
+ * back to the Electron background_page (macOS/Windows desktop app). Returns
+ * null when neither exposes a Superhuman sync target.
+ */
+export async function connectSyncSession(port?: number): Promise<SyncSession | null> {
+  const p = port ?? getCDPPort();
+
+  // Extension first: read the SW's `backgrounds` map to enumerate accounts.
+  const ext = await connectToSuperhumanChrome(p);
+  if (ext) {
+    let emails: string[] = [];
+    try {
+      const r = await ext.swClient.Runtime.evaluate({
+        expression: `typeof backgrounds!=="undefined"?Object.keys(backgrounds):[]`,
+        returnByValue: true,
+      });
+      emails = (r?.result?.value as string[]) ?? [];
+    } catch {
+      emails = [];
+    }
+    if (emails.length > 0) return extensionSession(ext, emails);
+    // Extension target present but no accounts wired up — release it and try
+    // the Electron path rather than returning an empty session.
+    await disconnectChrome(ext);
+  }
+
+  // Electron fallback: the hidden background_page with per-account iframes.
+  const bg = await connectToBackgroundPage(p);
+  if (bg) return electronSession(bg);
+
+  return null;
+}
+
 export type EnsureSyncReason =
   | "fresh" // freshness marker was already within maxAgeMs; nothing done
-  | "no-connection" // background_page unreachable (app not running w/ CDP)
-  | "no-context" // background_page reachable but this account has no iframe
+  | "no-connection" // no Superhuman sync target reachable over CDP
+  | "no-context" // session reachable but this account isn't present in it
   | "synced" // sync.start() called + a poll cycle was observed completing
   | "timeout" // sync.start() called but no completed cycle observed in time
   | "degraded-wait" // poller internals unreadable; fell back to a fixed wait
@@ -142,14 +292,14 @@ export interface EnsureSyncOptions {
   port?: number;
   /** Test seam: override freshness lookup. Defaults to getAccountFreshness. */
   getFreshness?: (email: string, nowMs?: number) => AccountFreshness | null;
-  /** Test seam: override background_page connection. Defaults to connectToBackgroundPage. */
-  connect?: (port?: number) => Promise<BgPageConn | null>;
+  /** Test seam: override session creation. Defaults to connectSyncSession. */
+  connect?: (port?: number) => Promise<SyncSession | null>;
   /**
-   * Test seam / caller-shared connection: if given, this connection is used
-   * as-is and is NOT disconnected by this call (caller owns its lifecycle) —
-   * lets `syncAllAccounts` share one CDP connection across multiple accounts.
+   * Test seam / caller-shared session: if given, this session is used as-is and
+   * is NOT disconnected by this call (caller owns its lifecycle) — lets
+   * `syncAllAccounts` share one CDP connection across multiple accounts.
    */
-  conn?: BgPageConn;
+  session?: SyncSession;
 }
 
 const DEFAULT_MAX_AGE_MS = 15 * 60 * 1000;
@@ -158,12 +308,17 @@ const DEFAULT_POLL_INTERVAL_MS = 2_000;
 /** Fallback wait when the poller shape can't be read at all (degraded mode). */
 const DEGRADED_WAIT_MS = 10_000;
 
-const SNAPSHOT_EXPR = `
+/**
+ * Snapshot the pre-sync `_lastRunEnded` and kick `sync.start()`. `bg` resolves
+ * to the account's background object (`window.background` on Electron,
+ * `backgrounds[email]._accountBackground` on the extension).
+ */
+const snapshotExpr = (bg: string) => `
   (() => {
     try {
-      const bg = window.background;
-      if (!bg) return { ok: false, error: "no window.background" };
-      const sync = bg.di && bg.di.get && bg.di.get("sync");
+      const _bg = ${bg};
+      if (!_bg) return { ok: false, error: "no background for account" };
+      const sync = _bg.di && _bg.di.get && _bg.di.get("sync");
       if (!sync) return { ok: false, error: "no sync service" };
       const lastRunEnded = sync._pollers && sync._pollers.syncForward
         ? sync._pollers.syncForward._lastRunEnded
@@ -176,10 +331,11 @@ const SNAPSHOT_EXPR = `
   })()
 `;
 
-const FORCE_SYNC_EXPR = `
+const forceSyncExpr = (bg: string) => `
   (() => {
     try {
-      const sync = window.background && window.background.di && window.background.di.get && window.background.di.get("sync");
+      const _bg = ${bg};
+      const sync = _bg && _bg.di && _bg.di.get && _bg.di.get("sync");
       if (sync && typeof sync.forceSyncBackend === "function") {
         sync.forceSyncBackend();
         return true;
@@ -191,10 +347,11 @@ const FORCE_SYNC_EXPR = `
   })()
 `;
 
-const POLL_EXPR = `
+const pollExpr = (bg: string) => `
   (() => {
     try {
-      const sync = window.background && window.background.di && window.background.di.get && window.background.di.get("sync");
+      const _bg = ${bg};
+      const sync = _bg && _bg.di && _bg.di.get && _bg.di.get("sync");
       const v = sync && sync._pollers && sync._pollers.syncForward ? sync._pollers.syncForward._lastRunEnded : null;
       return typeof v === "number" ? v : null;
     } catch {
@@ -219,7 +376,7 @@ export async function ensureAccountSynced(
   const timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   const pollIntervalMs = opts.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   const getFreshness = opts.getFreshness ?? ((e: string, n?: number) => getAccountFreshness(e, n));
-  const connectFn = opts.connect ?? ((port?: number) => connectToBackgroundPage(port));
+  const connectFn = opts.connect ?? ((port?: number) => connectSyncSession(port));
 
   const before = getFreshness(email);
 
@@ -227,37 +384,33 @@ export async function ensureAccountSynced(
     return { synced: false, reason: "fresh", before, after: before, waitedMs: 0 };
   }
 
-  const ownConn = !opts.conn;
-  const conn = opts.conn ?? (await connectFn(opts.port));
-  if (!conn) {
+  const ownSession = !opts.session;
+  const session = opts.session ?? (await connectFn(opts.port));
+  if (!session) {
     return { synced: false, reason: "no-connection", before, after: before, waitedMs: 0 };
   }
 
   const start = Date.now();
   try {
-    const contextId = conn.contextByEmail.get(email);
-    if (contextId === undefined) {
+    if (!session.emails.includes(email)) {
       return { synced: false, reason: "no-context", before, after: before, waitedMs: 0 };
     }
 
-    let snap: { ok: boolean; error?: string; lastRunEnded: number | null } | null = null;
-    try {
-      const r = await conn.client.Runtime.evaluate({
-        expression: SNAPSHOT_EXPR,
-        returnByValue: true,
-        contextId,
-      });
-      snap = r?.result?.value ?? null;
-    } catch (e: any) {
+    const snapRes = await session.evaluateForAccount(email, snapshotExpr);
+    if (!snapRes.ok) {
       return {
         synced: false,
         reason: "error",
         before,
         after: before,
         waitedMs: Date.now() - start,
-        error: e?.message,
+        error: snapRes.error,
       };
     }
+
+    const snap = snapRes.value as
+      | { ok: boolean; error?: string; lastRunEnded: number | null }
+      | null;
 
     if (!snap || snap.ok === false) {
       return {
@@ -271,16 +424,9 @@ export async function ensureAccountSynced(
     }
 
     if (opts.force) {
-      try {
-        await conn.client.Runtime.evaluate({
-          expression: FORCE_SYNC_EXPR,
-          returnByValue: true,
-          contextId,
-        });
-      } catch {
-        // forceSyncBackend is a best-effort escalation lever; ignore failures
-        // and fall through to the normal poller-wait below.
-      }
+      // forceSyncBackend is a best-effort escalation lever; ignore failures and
+      // fall through to the normal poller-wait below.
+      await session.evaluateForAccount(email, forceSyncExpr).catch(() => {});
     }
 
     const lastRunBefore = snap.lastRunEnded;
@@ -297,19 +443,13 @@ export async function ensureAccountSynced(
     let advanced = false;
     while (Date.now() < deadline) {
       await new Promise((r) => setTimeout(r, pollIntervalMs));
-      let current: number | null = null;
-      try {
-        const poll = await conn.client.Runtime.evaluate({
-          expression: POLL_EXPR,
-          returnByValue: true,
-          contextId,
-        });
-        current = poll?.result?.value ?? null;
-      } catch {
+      const poll = await session.evaluateForAccount(email, pollExpr);
+      if (!poll.ok) {
         // Eval failed mid-poll (e.g. context torn down) — stop polling and
         // fall through to the timeout/degraded-wait handling below.
         break;
       }
+      const current = poll.value;
       if (typeof current === "number" && current > lastRunBefore) {
         advanced = true;
         break;
@@ -326,45 +466,45 @@ export async function ensureAccountSynced(
       waitedMs,
     };
   } finally {
-    if (ownConn) await disconnectBackgroundPage(conn);
+    if (ownSession) await session.disconnect();
   }
 }
 
 /**
- * Enumerate every account exposed by the background_page's per-account
- * iframes (active or not) — the ground truth for "what's linked", since it
- * reflects the live Electron session rather than a possibly-incomplete
- * on-disk blob scan. Returns [] if the background_page isn't reachable.
+ * Enumerate every account exposed by the live session (active or not) — the
+ * ground truth for "what's linked", since it reflects the running app rather
+ * than a possibly-incomplete on-disk blob scan. Returns [] if no Superhuman
+ * sync target is reachable over CDP.
  */
 export async function listSyncableAccounts(port?: number): Promise<string[]> {
-  const conn = await connectToBackgroundPage(port);
-  if (!conn) return [];
+  const session = await connectSyncSession(port);
+  if (!session) return [];
   try {
-    return Array.from(conn.contextByEmail.keys());
+    return session.emails;
   } finally {
-    await disconnectBackgroundPage(conn);
+    await session.disconnect();
   }
 }
 
 /**
- * Sync every linked account, sharing a single CDP connection across all of
- * them (opened once via connectToBackgroundPage, reused for each account's
+ * Sync every linked account, sharing a single CDP session across all of them
+ * (opened once via connectSyncSession, reused for each account's
  * ensureAccountSynced call, closed once at the end).
  */
 export async function syncAllAccounts(
-  opts: Omit<EnsureSyncOptions, "conn"> = {}
+  opts: Omit<EnsureSyncOptions, "session"> = {}
 ): Promise<Map<string, EnsureSyncResult>> {
   const results = new Map<string, EnsureSyncResult>();
-  const connectFn = opts.connect ?? ((port?: number) => connectToBackgroundPage(port));
-  const conn = await connectFn(opts.port);
-  if (!conn) return results;
+  const connectFn = opts.connect ?? ((port?: number) => connectSyncSession(port));
+  const session = await connectFn(opts.port);
+  if (!session) return results;
 
   try {
-    for (const email of conn.contextByEmail.keys()) {
-      results.set(email, await ensureAccountSynced(email, { ...opts, conn }));
+    for (const email of session.emails) {
+      results.set(email, await ensureAccountSynced(email, { ...opts, session }));
     }
   } finally {
-    await disconnectBackgroundPage(conn);
+    await session.disconnect();
   }
   return results;
 }
