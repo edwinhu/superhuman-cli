@@ -693,7 +693,7 @@ interface CliOptions {
   fix: boolean; // doctor: relaunch the app to restore a dead CDP debug port
 }
 
-function parseArgs(args: string[]): CliOptions {
+export function parseArgs(args: string[]): CliOptions {
   const options: CliOptions = {
     command: "",
     subcommand: "",
@@ -767,6 +767,11 @@ function parseArgs(args: string[]): CliOptions {
   let i = 0;
   while (i < args.length) {
     const arg = args[i]!;
+    // Backstop against a flag case that forgets to advance `i`: capture the
+    // index before dispatch and guarantee forward progress after. A missing
+    // increment (as `--ai` once had) would otherwise spin this loop forever,
+    // hanging the CLI with no output. See parse-args.test.ts.
+    const iBefore = i;
 
     if (arg.startsWith("--")) {
       // Support both --key value and --key=value formats
@@ -929,6 +934,7 @@ function parseArgs(args: string[]): CliOptions {
           break;
         case "ai":
           options.ai = true;
+          i += 1;
           break;
         case "include-done":
           options.includeDone = true;
@@ -1146,6 +1152,16 @@ function parseArgs(args: string[]): CliOptions {
     } else {
       error(`Unexpected argument: ${arg}`);
       process.exit(1);
+    }
+
+    // Forward-progress guarantee: no matter which branch handled this arg, `i`
+    // must have advanced. If a flag case forgot to increment, this prevents an
+    // infinite loop (silent hang) and surfaces the offending token instead.
+    if (i === iBefore) {
+      throw new Error(
+        `Argument parser failed to advance at "${arg}" (index ${i}). ` +
+        `This is a bug in parseArgs — the flag's case is missing an index increment.`
+      );
     }
   }
 
